@@ -84,6 +84,7 @@ class AuthUserResponse(BaseModel):
     user_id: str
     email: str
     email_verified: bool
+    is_admin: bool = False
     password_hash: str | None = None  # only returned on login lookup
 
 
@@ -122,6 +123,7 @@ async def auth_get_user(email: str, conn: Conn):
         user_id=user["id"],
         email=user["email"],
         email_verified=bool(user["email_verified"]),
+        is_admin=bool(user["is_admin"]),
         password_hash=user["password_hash"],
     )
 
@@ -142,5 +144,6 @@ async def auth_verify_email(body: VerifyTokenRequest, conn: Conn):
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     return AuthUserResponse(
-        user_id=user["id"], email=user["email"], email_verified=True
+        user_id=user["id"], email=user["email"], email_verified=True,
+        is_admin=bool(user["is_admin"]),
     )

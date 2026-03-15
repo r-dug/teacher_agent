@@ -92,6 +92,61 @@ async def consume_upload_token(
     return session
 
 
+# ── courses ────────────────────────────────────────────────────────────────────
+
+async def create_course(
+    conn: aiosqlite.Connection,
+    user_id: str,
+    title: str,
+    description: str | None = None,
+) -> Row:
+    cid = new_id()
+    await conn.execute(
+        "INSERT INTO courses (id, user_id, title, description) VALUES (?, ?, ?, ?)",
+        (cid, user_id, title, description),
+    )
+    await conn.commit()
+    async with conn.execute("SELECT * FROM courses WHERE id = ?", (cid,)) as cur:
+        return _row(await cur.fetchone())  # type: ignore[return-value]
+
+
+async def get_course(conn: aiosqlite.Connection, course_id: str) -> Row | None:
+    async with conn.execute(
+        "SELECT * FROM courses WHERE id = ?", (course_id,)
+    ) as cur:
+        return _row(await cur.fetchone())
+
+
+async def list_courses(
+    conn: aiosqlite.Connection,
+    user_id: str,
+) -> list[Row]:
+    async with conn.execute(
+        "SELECT * FROM courses WHERE user_id = ? ORDER BY updated_at DESC",
+        (user_id,),
+    ) as cur:
+        return _rows(await cur.fetchall())
+
+
+async def update_course(
+    conn: aiosqlite.Connection, course_id: str, **kwargs: Any
+) -> None:
+    allowed = {"title", "description"}
+    for key, value in kwargs.items():
+        if key not in allowed:
+            continue
+        await conn.execute(
+            f"UPDATE courses SET {key} = ?, updated_at = datetime('now') WHERE id = ?",
+            (value, course_id),
+        )
+    await conn.commit()
+
+
+async def delete_course(conn: aiosqlite.Connection, course_id: str) -> None:
+    await conn.execute("DELETE FROM courses WHERE id = ?", (course_id,))
+    await conn.commit()
+
+
 # ── lessons ────────────────────────────────────────────────────────────────────
 
 async def create_lesson(
@@ -99,11 +154,13 @@ async def create_lesson(
     user_id: str,
     title: str,
     pdf_path: str | None = None,
+    course_id: str | None = None,
+    description: str | None = None,
 ) -> str:
     lid = new_id()
     await conn.execute(
-        "INSERT INTO lessons (id, user_id, title, pdf_path) VALUES (?, ?, ?, ?)",
-        (lid, user_id, title, pdf_path),
+        "INSERT INTO lessons (id, user_id, title, pdf_path, course_id, description) VALUES (?, ?, ?, ?, ?, ?)",
+        (lid, user_id, title, pdf_path, course_id, description),
     )
     await conn.commit()
     return lid
@@ -116,28 +173,50 @@ async def get_lesson(conn: aiosqlite.Connection, lesson_id: str) -> Row | None:
         return _row(await cur.fetchone())
 
 
-async def list_lessons(conn: aiosqlite.Connection, user_id: str) -> list[Row]:
-    async with conn.execute(
-        "SELECT * FROM lessons WHERE user_id = ? ORDER BY updated_at DESC",
-        (user_id,),
-    ) as cur:
+async def list_lessons(
+    conn: aiosqlite.Connection,
+    user_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    course_id: str | None = None,
+    standalone: bool = False,
+) -> list[Row]:
+    sql = (
+        "SELECT l.*, "
+        "(SELECT COUNT(*) FROM lesson_sections WHERE lesson_id = l.id) AS section_count "
+        "FROM lessons l WHERE l.user_id = ?"
+    )
+    params: list[Any] = [user_id]
+    if standalone:
+        sql += " AND l.course_id IS NULL"
+    elif course_id is not None:
+        sql += " AND l.course_id = ?"
+        params.append(course_id)
+    sql += " ORDER BY l.updated_at DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    async with conn.execute(sql, params) as cur:
         return _rows(await cur.fetchall())
+
+
+_LESSON_UPDATE_SQL: dict[str, str] = {
+    "title": "UPDATE lessons SET title = ?, updated_at = datetime('now') WHERE id = ?",
+    "description": "UPDATE lessons SET description = ?, updated_at = datetime('now') WHERE id = ?",
+    "course_id": "UPDATE lessons SET course_id = ?, updated_at = datetime('now') WHERE id = ?",
+    "pdf_path": "UPDATE lessons SET pdf_path = ?, updated_at = datetime('now') WHERE id = ?",
+    "current_section_idx": "UPDATE lessons SET current_section_idx = ?, updated_at = datetime('now') WHERE id = ?",
+    "completed": "UPDATE lessons SET completed = ?, updated_at = datetime('now') WHERE id = ?",
+}
 
 
 async def update_lesson(
     conn: aiosqlite.Connection, lesson_id: str, **kwargs: Any
 ) -> None:
-    """Update arbitrary lesson columns.  Always bumps updated_at."""
-    allowed = {"title", "pdf_path", "current_section_idx", "completed"}
-    fields = {k: v for k, v in kwargs.items() if k in allowed}
-    if not fields:
-        return
-    sets = ", ".join(f"{k} = ?" for k in fields)
-    values = list(fields.values()) + [lesson_id]
-    await conn.execute(
-        f"UPDATE lessons SET {sets}, updated_at = datetime('now') WHERE id = ?",
-        values,
-    )
+    """Update lesson columns.  Always bumps updated_at."""
+    for key, value in kwargs.items():
+        sql = _LESSON_UPDATE_SQL.get(key)
+        if sql is None:
+            continue
+        await conn.execute(sql, (value, lesson_id))
     await conn.commit()
 
 
@@ -231,6 +310,11 @@ async def get_messages(
         except (json.JSONDecodeError, TypeError):
             content = content_raw
         result.append({"role": role, "content": content})
+
+    # Repair any dangling tool_use blocks (disconnect/save race condition).
+    from shared.teaching_agent import _strip_dangling_tool_use
+    _strip_dangling_tool_use(result)
+
     return result
 
 
@@ -344,6 +428,26 @@ BUILT_IN_PERSONAS = [
         "user_id": None,
     },
 ]
+
+
+ADMIN_EMAILS: frozenset[str] = frozenset({"rcdoug03@louisville.edu"})
+
+
+async def seed_admin_users(conn: aiosqlite.Connection) -> None:
+    """Ensure known admin emails have is_admin=1 if their account exists."""
+    for email in ADMIN_EMAILS:
+        await conn.execute(
+            "UPDATE users SET is_admin = 1 WHERE email = ?", (email,)
+        )
+    await conn.commit()
+
+
+async def get_user_is_admin(conn: aiosqlite.Connection, user_id: str) -> bool:
+    async with conn.execute(
+        "SELECT is_admin FROM users WHERE id = ?", (user_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    return bool(row and row[0])
 
 
 async def seed_personas(conn: aiosqlite.Connection) -> None:

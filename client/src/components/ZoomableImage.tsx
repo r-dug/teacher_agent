@@ -38,15 +38,16 @@ export function ZoomableImage({ src, alt, className }: ZoomableImageProps) {
     if (!el) return
 
     function onWheel(e: WheelEvent) {
+      if (!e.ctrlKey && !e.metaKey) return  // plain scroll — let it pass through
+      const z = zoomRef.current
+      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15
+      const newZoom = Math.max(1, Math.min(6, z * factor))
+      if (newZoom === z) return
       e.preventDefault()
       const rect = el!.getBoundingClientRect()
       const cx = e.clientX - rect.left
       const cy = e.clientY - rect.top
-      const z = zoomRef.current
       const t = translateRef.current
-      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15
-      const newZoom = Math.max(1, Math.min(6, z * factor))
-      if (newZoom === z) return
       // Keep the content point under the cursor stationary.
       // With transform: translate(tx,ty) scale(zoom) and transform-origin 0 0:
       //   screen_x = img_x * zoom + tx  →  img_x = (cx - tx) / zoom
@@ -110,7 +111,7 @@ export function ZoomableImage({ src, alt, className }: ZoomableImageProps) {
       onDoubleClick={onDoubleClick}
       className="overflow-hidden select-none w-fit"
       style={{
-        cursor: zoom > 1 ? 'grab' : 'zoom-in',
+        cursor: zoom > 1 ? 'grab' : 'default',
         width: '100%',
         padding: '5%',
         border: '8px solid #3b09f0c0',

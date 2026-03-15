@@ -15,6 +15,9 @@ router = APIRouter(prefix="/personas", tags=["personas"])
 Conn = Annotated[aiosqlite.Connection, Depends(db.get)]
 
 
+_MAX_PERSONA_INSTRUCTIONS = 1_000
+
+
 class PersonaCreate(BaseModel):
     id: str          # caller-chosen slug, e.g. 'my-tutor'
     name: str
@@ -37,6 +40,11 @@ async def list_personas(user_id: str | None = None, conn: Conn = None):
 
 @router.post("", response_model=PersonaResponse, status_code=201)
 async def create_persona(body: PersonaCreate, user_id: str, conn: Conn):
+    if len(body.instructions) > _MAX_PERSONA_INSTRUCTIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Persona instructions must be {_MAX_PERSONA_INSTRUCTIONS} characters or fewer",
+        )
     row = await models.create_persona(
         conn,
         persona_id=body.id,

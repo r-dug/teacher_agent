@@ -30,6 +30,7 @@ import numpy as np
 from shared.constants import KOKORO_SAMPLE_RATE, DEFAULT_KOKORO_VOICE
 from shared.lesson import Curriculum
 from shared.teaching_agent import TeachingAgent
+from ..app_state import app_state
 
 
 class BackendAgentSession:
@@ -51,12 +52,16 @@ class BackendAgentSession:
         loop: asyncio.AbstractEventLoop,
         kokoro_pipeline,
         kokoro_voice: str = DEFAULT_KOKORO_VOICE,
-        llm_model: str = "claude-opus-4-6",
+        llm_model: str = "claude-sonnet-4-6",
         pdf_path: str | None = None,
+        session_id: str | None = None,
+        user_id: str = "",
     ) -> None:
         self._send = send
         self._loop = loop
         self._pdf_path = pdf_path
+        self._session_id = session_id
+        self._user_id = user_id
         # Pending sketchpad invocations: inv_id → (done_event, result_holder)
         self._tool_events: dict[str, tuple[threading.Event, list]] = {}
 
@@ -71,19 +76,30 @@ class BackendAgentSession:
             on_show_slide=self._on_show_slide,
             on_open_sketchpad=self._on_open_sketchpad,
             on_take_photo=self._on_take_photo,
+            on_record_video=self._on_record_video,
+            on_open_code_editor=self._on_open_code_editor,
+            on_open_html_editor=self._on_open_html_editor,
+            on_start_timer=self._on_start_timer,
+            on_token_usage=self._on_token_usage,
             on_section_advanced=self._on_section_advanced,
             on_curriculum_complete=self._on_curriculum_complete,
             on_turn_complete=self._on_turn_complete,
             on_response_end=self._on_response_end,
             on_tts_playing=self._on_tts_playing,
+            on_tts_done=self._on_tts_done,
             on_error=self._on_error,
         )
 
     # ── public API ─────────────────────────────────────────────────────────────
 
-    async def run_intro(self, curriculum: Curriculum, messages: list[dict]) -> None:
-        """Run the one-time intro turn in a thread pool."""
-        await asyncio.to_thread(self.agent.run_intro, curriculum, messages)
+    async def run_intro(self, curriculum: Curriculum, messages: list[dict], raw_text: str | None = None) -> str | None:
+        """Run the first intro turn in a thread pool. Returns captured goal or None."""
+        return await asyncio.to_thread(self.agent.run_intro_turn, curriculum, messages, raw_text)
+
+    async def run_intro_turn(self, curriculum: Curriculum, messages: list[dict], raw_text: str | None = None) -> str | None:
+        """Run one intro turn in a thread pool. Returns captured goal or None."""
+        async with asyncio.timeout(120):
+            return await asyncio.to_thread(self.agent.run_intro_turn, curriculum, messages, raw_text)
 
     async def run_turn(
         self,
@@ -93,19 +109,33 @@ class BackendAgentSession:
         lesson_goal: str | None = None,
     ) -> None:
         """Run one full agent turn (may chain tool calls) in a thread pool."""
-        await asyncio.to_thread(
-            self.agent.run_turn, curriculum, messages, agent_instructions, lesson_goal
-        )
+        async with asyncio.timeout(120):  # 2 minutes per turn
+            await asyncio.to_thread(
+                self.agent.run_turn, curriculum, messages, agent_instructions, lesson_goal
+            )
 
     async def decompose_pdf(
         self,
         pdf_path: str,
         on_progress: Callable[[str], None] | None = None,
+        student_goal: str | None = None,
     ) -> Curriculum:
-        """Decompose a PDF into a Curriculum in a thread pool."""
-        return await asyncio.to_thread(
-            self.agent.decompose_pdf, pdf_path, on_progress
-        )
+        """Decompose a PDF into a Curriculum in a thread pool.
+
+        A threading.Event is passed into the synchronous worker so that segment
+        threads can detect cancellation and stop before their next API call.
+        Parallelism means even large PDFs should complete well under 10 minutes.
+        """
+        import threading
+        cancel_event = threading.Event()
+        try:
+            async with asyncio.timeout(600):  # 10 minutes; parallel segments are much faster
+                return await asyncio.to_thread(
+                    self.agent.decompose_pdf, pdf_path, on_progress, student_goal, cancel_event
+                )
+        except TimeoutError:
+            cancel_event.set()  # signal worker threads to stop before their next API call
+            raise
 
     async def generate_instructions(self, description: str) -> str:
         return await asyncio.to_thread(self.agent.generate_instructions, description)
@@ -119,7 +149,20 @@ class BackendAgentSession:
         if entry is None:
             return
         done_event, result_holder = entry
-        result_holder[0] = result.get("drawing") or result.get("photo")
+        if "code" in result:
+            # Code editor submission: pass the full result dict through
+            result_holder[0] = result
+        elif "html" in result or "css" in result:
+            # HTML/CSS editor submission
+            result_holder[0] = result
+        elif "timed_out" in result:
+            # Timer submission
+            result_holder[0] = result
+        else:
+            # Sketchpad / photo / video: unwrap the raw value
+            result_holder[0] = (
+                result.get("drawing") or result.get("photo") or result.get("video_frames")
+            )
         done_event.set()
 
     # ── internal: fire-and-forget WS send from worker thread ──────────────────
@@ -230,6 +273,98 @@ class BackendAgentSession:
             "prompt": prompt,
             "invocation_id": inv_id,
         }))
+
+    def _on_record_video(
+        self,
+        prompt: str,
+        result_holder: list,
+        done_event: threading.Event,
+    ) -> None:
+        inv_id = str(uuid.uuid4())
+        self._tool_events[inv_id] = (done_event, result_holder)
+        self._fire(self._send({
+            "event": "record_video",
+            "prompt": prompt,
+            "invocation_id": inv_id,
+        }))
+
+    def _on_open_code_editor(
+        self,
+        prompt: str,
+        language: str,
+        starter_code: str | None,
+        result_holder: list,
+        done_event: threading.Event,
+    ) -> None:
+        inv_id = str(uuid.uuid4())
+        self._tool_events[inv_id] = (done_event, result_holder)
+        event: dict = {
+            "event": "open_code_editor",
+            "prompt": prompt,
+            "language": language,
+            "invocation_id": inv_id,
+        }
+        if starter_code is not None:
+            event["starter_code"] = starter_code
+        self._fire(self._send(event))
+
+    def _on_open_html_editor(
+        self,
+        prompt: str,
+        starter_html: str | None,
+        starter_css: str | None,
+        result_holder: list,
+        done_event: threading.Event,
+    ) -> None:
+        inv_id = str(uuid.uuid4())
+        self._tool_events[inv_id] = (done_event, result_holder)
+        event: dict = {
+            "event": "open_html_editor",
+            "prompt": prompt,
+            "invocation_id": inv_id,
+        }
+        if starter_html is not None:
+            event["starter_html"] = starter_html
+        if starter_css is not None:
+            event["starter_css"] = starter_css
+        self._fire(self._send(event))
+
+    def _on_start_timer(
+        self,
+        prompt: str,
+        duration_seconds: int,
+        result_holder: list,
+        done_event: threading.Event,
+    ) -> None:
+        inv_id = str(uuid.uuid4())
+        self._tool_events[inv_id] = (done_event, result_holder)
+        self._fire(self._send({
+            "event": "start_timer",
+            "prompt": prompt,
+            "duration_seconds": duration_seconds,
+            "invocation_id": inv_id,
+        }))
+
+    def _on_token_usage(self, call_type: str, model: str, usage) -> None:
+        app_state.token_tracker.record_api(
+            call_type, model, usage,
+            user_id=self._user_id, session_id=self._session_id,
+        )
+
+    def _on_tts_done(
+        self,
+        voice: str,
+        characters: int,
+        audio_seconds: float,
+        synthesis_ms: int,
+    ) -> None:
+        app_state.token_tracker.record_tts(
+            tts_voice=voice,
+            tts_characters=characters,
+            tts_audio_seconds=audio_seconds,
+            tts_synthesis_ms=synthesis_ms,
+            user_id=self._user_id,
+        )
 
     def _on_section_advanced(self, curriculum: Curriculum) -> None:
         self._fire(self._send({

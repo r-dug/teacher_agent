@@ -23,3 +23,11 @@ async def list_stt_languages():
     resp = await http.get("/stt-languages")
     return Response(content=resp.content, status_code=resp.status_code,
                     media_type="application/json")
+
+
+@router.get("/stt-models")
+async def list_stt_models():
+    http = get_http()
+    resp = await http.get("/stt-models")
+    return Response(content=resp.content, status_code=resp.status_code,
+                    media_type="application/json")

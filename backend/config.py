@@ -16,9 +16,9 @@ class Settings:
     DB_PATH: Path = Path(os.getenv("DB_PATH", "./storage/db.sqlite3"))
 
     # Models
-    STT_MODEL_SIZE: str = os.getenv("STT_MODEL_SIZE", "base")
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "claude-haiku-4-5-20251001")
-    DEFAULT_VOICE: str = os.getenv("DEFAULT_VOICE", "af_bella")
+    STT_MODEL_SIZE: str = os.getenv("STT_MODEL_SIZE", "medium")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "claude-sonnet-4-6")
+    DEFAULT_VOICE: str = os.getenv("DEFAULT_VOICE", "af_heart")
 
     # Auth (prototype: all requests trusted from the frontend server)
     FRONTEND_ORIGIN: str = os.getenv("FRONTEND_ORIGIN", "http://127.0.0.1:8000")

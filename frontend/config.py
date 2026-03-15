@@ -9,6 +9,9 @@ class Settings:
     HOST: str = os.getenv("FRONTEND_HOST", "0.0.0.0")
     PORT: int = int(os.getenv("FRONTEND_PORT", "8000"))
 
+    # Set ENV=production to enable production safety checks.
+    ENV: str = os.getenv("ENV", "development")
+
     BACKEND_HTTP: str = os.getenv("BACKEND_HTTP", "http://127.0.0.1:8001")
     BACKEND_WS: str = os.getenv("BACKEND_WS", "ws://127.0.0.1:8001")
 
@@ -17,7 +20,7 @@ class Settings:
     RATE_LIMIT_REFILL: float = float(os.getenv("RATE_LIMIT_REFILL", "1.0"))  # tokens/sec
 
     # CORS: default to wildcard for LAN dev access.
-    # In production set ALLOWED_ORIGINS=https://yourapp.example.com
+    # In production, set ALLOWED_ORIGINS=https://yourapp.example.com (no wildcard).
     ALLOWED_ORIGINS: list[str] = os.getenv(
         "ALLOWED_ORIGINS", "*"
     ).split(",")

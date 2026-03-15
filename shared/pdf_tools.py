@@ -7,7 +7,7 @@ from pathlib import Path
 
 # ── Claude extraction ─────────────────────────────────────────────────────────
 
-CLAUDE_MODEL = "claude-opus-4-6"
+CLAUDE_MODEL = "claude-sonnet-4-6"
 
 CLAUDE_PROMPTS: dict[str, str] = {
     "review": (
@@ -60,7 +60,6 @@ def extract_text_claude(pdf_path: str, mode: str = DEFAULT_CLAUDE_MODE) -> str:
     with client.messages.stream(
         model=CLAUDE_MODEL,
         max_tokens=8192,
-        thinking={"type": "adaptive"},
         system=system_prompt,
         messages=[
             {

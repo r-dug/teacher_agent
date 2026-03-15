@@ -17,14 +17,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from .config import settings
 from . import http_client
-from .routers import auth, sessions, lessons, personas, voices, ws_proxy
+from .routers import auth, sessions, courses, lessons, personas, voices, ws_proxy, usage
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -33,6 +34,11 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if settings.ENV == "production" and settings.ALLOWED_ORIGINS == ["*"]:
+        raise RuntimeError(
+            "ALLOWED_ORIGINS must be set to an explicit origin list in production "
+            "(current value is '*'). Set ALLOWED_ORIGINS=https://yourdomain.com"
+        )
     await http_client.init(settings.BACKEND_HTTP)
     yield
     await http_client.close()
@@ -48,6 +54,31 @@ app = FastAPI(
     redoc_url=None,
 )
 
+class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add HSTS, CSP, and MIME-type-sniffing-prevention headers."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains"
+        )
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "   # needed by Vite-built assets in prod
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; "
+            "media-src 'self' blob:; "
+            "connect-src 'self' wss: ws:; "
+            "font-src 'self' data:; "
+            "object-src 'none'; "
+            "frame-ancestors 'none'"
+        )
+        return response
+
+
+app.add_middleware(_SecurityHeadersMiddleware)
+
 _wildcard_origins = settings.ALLOWED_ORIGINS == ["*"]
 app.add_middleware(
     CORSMiddleware,
@@ -61,12 +92,14 @@ app.add_middleware(
 
 # ── routers ────────────────────────────────────────────────────────────────────
 
-app.include_router(auth.router)
-app.include_router(sessions.router)
-app.include_router(lessons.router)
-app.include_router(personas.router)
-app.include_router(voices.router)
-app.include_router(ws_proxy.router)
+app.include_router(auth.router, prefix="/api")
+app.include_router(sessions.router, prefix="/api")
+app.include_router(courses.router, prefix="/api")
+app.include_router(lessons.router, prefix="/api")
+app.include_router(personas.router, prefix="/api")
+app.include_router(voices.router, prefix="/api")
+app.include_router(ws_proxy.router)  # /ws/... — no /api prefix
+app.include_router(usage.router, prefix="/api")
 
 
 @app.get("/health")

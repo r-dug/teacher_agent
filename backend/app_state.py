@@ -5,15 +5,20 @@ from __future__ import annotations
 import asyncio
 from typing import Optional
 
+from .usage_tracker import UsageTracker as TokenUsageTracker
+
 
 class AppState:
     """Holds singletons that are expensive to initialise (models, pipelines)."""
 
-    stt_model: Optional[object] = None       # FasterWhisperBackend
+    stt_model: Optional[object] = None       # FasterWhisperBackend (default, loaded at startup)
+    stt_models: dict = {}                    # model_size → FasterWhisperBackend (lazily loaded)
     kokoro_pipeline: Optional[object] = None  # kokoro.KPipeline
+    token_tracker: TokenUsageTracker = None   # type: ignore[assignment]
 
 
 app_state = AppState()
+app_state.token_tracker = TokenUsageTracker()
 
 
 class SessionRegistry:

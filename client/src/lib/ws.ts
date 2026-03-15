@@ -33,15 +33,12 @@ export class WsConnection {
 
   connect() {
     if (this.closed) return
-    // In dev: connect directly to the BFF (wss://host:8000) — Vite's HTTPS+WS
-    // proxy causes ECONNRESET due to TLS mismatch; the BFF uses the same shared
-    // cert so the browser accepts it.
+    // Use window.location.host in all environments.
+    // In dev: Vite proxies /ws → wss://localhost:8000 with secure:false, so the
+    // browser only sees the already-trusted :5173 cert.
     // In prod: BFF serves the page and handles /ws on the same host:port.
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const host = import.meta.env.DEV
-      ? `${window.location.hostname}:${import.meta.env.VITE_BFF_PORT ?? '8000'}`
-      : window.location.host
-    const url = `${proto}://${host}/ws/${this.opts.sessionId}?lesson_id=${this.opts.lessonId}`
+    const url = `${proto}://${window.location.host}/ws/${this.opts.sessionId}?lesson_id=${this.opts.lessonId}`
     this.opts.onStatus?.('connecting')
     const ws = new WebSocket(url)
     this.ws = ws

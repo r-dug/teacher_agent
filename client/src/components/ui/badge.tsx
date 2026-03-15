@@ -1,32 +1,30 @@
-/**
- * Thin status bar: shows WS connection state + latest status message.
- */
-
+import * as React from 'react'
+import { cva, type VariantProps } from 'class-variance-authority'
 import { cn } from '@/lib/utils'
 
-interface StatusBarProps {
-  wsStatus: 'connecting' | 'connected' | 'disconnected'
-  message: string
+const badgeVariants = cva(
+  'inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors',
+  {
+    variants: {
+      variant: {
+        default: 'border-transparent bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))]',
+        secondary: 'border-transparent bg-[hsl(var(--secondary))] text-[hsl(var(--secondary-foreground))]',
+        destructive: 'border-transparent bg-[hsl(var(--destructive))] text-[hsl(var(--destructive-foreground))]',
+        outline: 'text-[hsl(var(--foreground))]',
+      },
+    },
+    defaultVariants: {
+      variant: 'default',
+    },
+  }
+)
+
+export interface BadgeProps
+  extends React.HTMLAttributes<HTMLDivElement>,
+    VariantProps<typeof badgeVariants> {}
+
+function Badge({ className, variant, ...props }: BadgeProps) {
+  return <div className={cn(badgeVariants({ variant }), className)} {...props} />
 }
 
-const WS_LABEL: Record<StatusBarProps['wsStatus'], string> = {
-  connecting: 'Connecting…',
-  connected: 'Connected',
-  disconnected: 'Disconnected',
-}
-
-const WS_DOT: Record<StatusBarProps['wsStatus'], string> = {
-  connecting: 'bg-yellow-400 animate-pulse',
-  connected: 'bg-green-500',
-  disconnected: 'bg-red-500',
-}
-
-export function StatusBar({ wsStatus, message }: StatusBarProps) {
-  return (
-    <div className="flex items-center gap-3 px-4 py-1 text-xs text-[hsl(var(--muted-foreground))] border-b border-[hsl(var(--border))]">
-      <span className={cn('h-2 w-2 rounded-full', WS_DOT[wsStatus])} />
-      <span>{WS_LABEL[wsStatus]}</span>
-      {message && <span className="ml-2 truncate">{message}</span>}
-    </div>
-  )
-}
+export { Badge, badgeVariants }

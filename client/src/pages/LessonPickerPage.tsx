@@ -17,9 +17,10 @@ import type { Lesson } from '@/lib/types'
 interface LessonPickerPageProps {
   sessionId: string
   onLogout: () => void
+  isAdmin?: boolean
 }
 
-export function LessonPickerPage({ sessionId, onLogout }: LessonPickerPageProps) {
+export function LessonPickerPage({ sessionId, onLogout, isAdmin }: LessonPickerPageProps) {
   const [lessons, setLessons] = useState<Lesson[]>([])
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -87,6 +88,11 @@ export function LessonPickerPage({ sessionId, onLogout }: LessonPickerPageProps)
           >
             {uploading ? 'Uploading…' : 'Upload PDF'}
           </Button>
+          {isAdmin && (
+            <Button variant="ghost" size="sm" onClick={() => navigate('/admin/usage')}>
+              Usage
+            </Button>
+          )}
           <Button variant="ghost" size="sm" onClick={onLogout}>
             Log out
           </Button>
@@ -114,10 +120,28 @@ export function LessonPickerPage({ sessionId, onLogout }: LessonPickerPageProps)
               <CardTitle className="text-base">{lesson.title}</CardTitle>
             </CardHeader>
             <CardContent className="p-4 pt-0 flex items-center gap-2">
-              <span className="text-xs text-[hsl(var(--muted-foreground))]">
+              <span className="text-xs text-[hsl(var(--muted-foreground))] flex-1">
                 {new Date(lesson.created_at).toLocaleDateString()}
               </span>
               {lesson.completed && <Badge variant="secondary">Complete</Badge>}
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2 text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--destructive))] hover:bg-[hsl(var(--destructive)/0.1)]"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  if (!confirm(`Delete "${lesson.title}"?`)) return
+                  fetch(`/api/lessons/${lesson.id}`, {
+                    method: 'DELETE',
+                    headers: { 'X-Session-Id': sessionId },
+                  }).then((r) => {
+                    if (r.ok) setLessons((prev) => prev.filter((l) => l.id !== lesson.id))
+                    else setError('Failed to delete lesson')
+                  }).catch(() => setError('Failed to delete lesson'))
+                }}
+              >
+                Delete
+              </Button>
             </CardContent>
           </Card>
         ))}

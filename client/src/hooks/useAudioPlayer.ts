@@ -26,5 +26,10 @@ export function useAudioPlayer() {
     []
   )
 
-  return { enqueue, replay }
+  const stop = useCallback(
+    () => playerRef.current?.stop(),
+    []
+  )
+
+  return { enqueue, replay, stop }
 }

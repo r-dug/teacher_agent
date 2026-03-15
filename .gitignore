@@ -14,6 +14,15 @@ wheels/
 
 # Secrets
 .env_vars
-
+.env.local
+.env.*.local
 # TLS certificates (machine-specific, generated locally)
 certs/
+
+# VAD static assets — large binaries, regenerated from node_modules after npm install
+# Run: npm run copy-vad-assets  (defined in client/package.json)
+client/public/vad/*.wasm
+client/public/vad/*.onnx
+client/public/vad/ort.min.js
+client/public/vad/vad.bundle.min.js
+client/public/vad/*.mjs

@@ -18,6 +18,18 @@ def _require_session(session_id: str):
     return entry
 
 
+async def _get_user_id(session_id: str, entry) -> str:
+    """Return the user_id for a session, fetching from backend if not yet cached."""
+    user_id = entry.user_id
+    if not user_id:
+        http = get_http()
+        resp = await http.get(f"/internal/sessions/{session_id}")
+        if resp.status_code == 200:
+            user_id = resp.json().get("user_id", "")
+            entry.user_id = user_id
+    return user_id
+
+
 async def _proxy_get(path: str, params: dict = None) -> Response:
     """Forward a GET to the backend and return the raw response."""
     http = get_http()
@@ -29,16 +41,16 @@ async def _proxy_get(path: str, params: dict = None) -> Response:
     )
 
 
-async def _proxy_delete(path: str) -> Response:
+async def _proxy_delete(path: str, params: dict = None) -> Response:
     http = get_http()
-    resp = await http.delete(path)
+    resp = await http.delete(path, params=params)
     return Response(content=resp.content, status_code=resp.status_code)
 
 
-async def _proxy_patch(path: str, body: bytes, content_type: str) -> Response:
+async def _proxy_patch(path: str, body: bytes, content_type: str, params: dict = None) -> Response:
     http = get_http()
     resp = await http.patch(
-        path, content=body, headers={"content-type": content_type}
+        path, content=body, headers={"content-type": content_type}, params=params
     )
     return Response(
         content=resp.content,
@@ -75,7 +87,11 @@ async def decompose_pdf(request: Request, x_upload_token: str = Header(...)):
 
 
 @router.get("")
-async def list_lessons(x_session_id: str = Header(...)):
+async def list_lessons(
+    x_session_id: str = Header(...),
+    course_id: str | None = None,
+    standalone: bool = False,
+):
     entry = _require_session(x_session_id)
     user_id = entry.user_id
     if not user_id:
@@ -86,41 +102,51 @@ async def list_lessons(x_session_id: str = Header(...)):
         if resp.status_code == 200:
             user_id = resp.json().get("user_id", "")
             entry.user_id = user_id
-    return await _proxy_get("/lessons", params={"user_id": user_id})
+    params: dict = {"user_id": user_id}
+    if course_id is not None:
+        params["course_id"] = course_id
+    if standalone:
+        params["standalone"] = "true"
+    return await _proxy_get("/lessons", params=params)
 
 
 @router.get("/{lesson_id}")
 async def get_lesson(lesson_id: str, x_session_id: str = Header(...)):
-    _require_session(x_session_id)
-    return await _proxy_get(f"/lessons/{lesson_id}")
+    entry = _require_session(x_session_id)
+    user_id = await _get_user_id(x_session_id, entry)
+    return await _proxy_get(f"/lessons/{lesson_id}", params={"user_id": user_id})
 
 
 @router.patch("/{lesson_id}")
 async def update_lesson(lesson_id: str, request: Request, x_session_id: str = Header(...)):
-    _require_session(x_session_id)
+    entry = _require_session(x_session_id)
+    user_id = await _get_user_id(x_session_id, entry)
     body = await request.body()
     return await _proxy_patch(
-        f"/lessons/{lesson_id}", body, request.headers.get("content-type", "application/json")
+        f"/lessons/{lesson_id}",
+        body,
+        request.headers.get("content-type", "application/json"),
+        params={"user_id": user_id},
     )
 
 
 @router.delete("/{lesson_id}", status_code=204)
 async def delete_lesson(lesson_id: str, x_session_id: str = Header(...)):
-    _require_session(x_session_id)
-    return await _proxy_delete(f"/lessons/{lesson_id}")
+    entry = _require_session(x_session_id)
+    user_id = await _get_user_id(x_session_id, entry)
+    return await _proxy_delete(f"/lessons/{lesson_id}", params={"user_id": user_id})
 
 
 @router.get("/{lesson_id}/page/{page_number}")
 async def get_lesson_page(
     lesson_id: str,
     page_number: int,
-    x_session_id: str | None = Header(default=None),
+    x_session_id: str = Header(...),
 ):
-    """Proxy PDF page image from backend (used by SlideViewer <img> tag).
-
-    Session validation is best-effort: browsers send no custom headers for
-    <img src=...> requests.  The backend already enforces lesson ownership.
-    """
-    if x_session_id is not None:
-        _require_session(x_session_id)
-    return await _proxy_get(f"/lessons/{lesson_id}/page/{page_number}")
+    """Proxy PDF page image from backend. Requires a valid session."""
+    entry = _require_session(x_session_id)
+    user_id = await _get_user_id(x_session_id, entry)
+    return await _proxy_get(
+        f"/lessons/{lesson_id}/page/{page_number}",
+        params={"user_id": user_id},
+    )

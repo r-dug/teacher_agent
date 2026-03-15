@@ -28,32 +28,37 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import secrets
 
 import bcrypt
+from email_validator import EmailNotValidError, validate_email
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
 from ..config import settings
 from ..email import send_verification_email
 from ..http_client import get as get_http
+from ..rate_limiter import RateLimiter
 from ..session_store import store
 
 log = logging.getLogger(__name__)
 
+# 3 resend emails per email address per hour
+_resend_limiter = RateLimiter(capacity=3.0, refill_rate=1 / 1200.0)
+# 10 verify attempts per token per minute (tokens are 32-byte secrets so brute-force
+# is implausible, but belt-and-suspenders)
+_verify_limiter = RateLimiter(capacity=10.0, refill_rate=10 / 60.0)
+
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
 def _validate_email(email: str) -> str:
-    email = email.strip().lower()
-    if not _EMAIL_RE.match(email):
-        raise HTTPException(status_code=422, detail="Invalid email address")
-    return email
+    try:
+        info = validate_email(email.strip(), check_deliverability=False)
+        return info.normalized
+    except EmailNotValidError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _validate_password(password: str) -> None:
@@ -104,6 +109,7 @@ class SessionResponse(BaseModel):
 class MeResponse(BaseModel):
     user_id: str
     email: str
+    is_admin: bool = False
 
 
 # ── routes ─────────────────────────────────────────────────────────────────────
@@ -142,6 +148,10 @@ async def register(body: RegisterRequest):
 
 @router.post("/verify", response_model=SessionResponse)
 async def verify_email(body: VerifyRequest):
+    # Rate-limit by token prefix to prevent brute-force enumeration.
+    token_key = body.token[:8] if len(body.token) >= 8 else body.token
+    if not _verify_limiter.allow(token_key):
+        raise HTTPException(status_code=429, detail="Too many verification attempts. Please try again later.")
     http = get_http()
     resp = await http.post("/internal/auth/verify", json={"token": body.token})
     if resp.status_code == 400:
@@ -151,7 +161,8 @@ async def verify_email(body: VerifyRequest):
 
     user = resp.json()
     session_id = await _create_backend_session(user["user_id"])
-    store.add(session_id, user_id=user["user_id"], email=user["email"])
+    store.add(session_id, user_id=user["user_id"], email=user["email"],
+              is_admin=bool(user.get("is_admin", 0)))
     return SessionResponse(session_id=session_id)
 
 
@@ -180,7 +191,8 @@ async def login(body: LoginRequest):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     session_id = await _create_backend_session(user["user_id"])
-    store.add(session_id, user_id=user["user_id"], email=email)
+    store.add(session_id, user_id=user["user_id"], email=email,
+              is_admin=bool(user.get("is_admin", 0)))
     return SessionResponse(session_id=session_id)
 
 
@@ -198,12 +210,14 @@ async def me(x_session_id: str = Header(...)):
     entry = store.get(x_session_id)
     if entry is None:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
-    return MeResponse(user_id=entry.user_id, email=entry.email)
+    return MeResponse(user_id=entry.user_id, email=entry.email, is_admin=entry.is_admin)
 
 
 @router.post("/resend", status_code=200)
 async def resend_verification(body: ResendRequest):
     email = _validate_email(body.email)
+    if not _resend_limiter.allow(email):
+        raise HTTPException(status_code=429, detail="Too many resend requests. Please try again later.")
     http = get_http()
     resp = await http.get("/internal/auth/user", params={"email": email})
     if resp.status_code == 404:

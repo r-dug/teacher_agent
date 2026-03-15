@@ -31,7 +31,7 @@ _SCHEMA_FILE = Path(__file__).parent / "schema.sql"
 # ── lifecycle ──────────────────────────────────────────────────────────────────
 
 async def init(db_path: Path | str) -> None:
-    """Open the database, apply schema, and seed the default anonymous user."""
+    """Open the database, apply schema, run migrations, and seed defaults."""
     global _conn
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -40,6 +40,7 @@ async def init(db_path: Path | str) -> None:
     _conn.row_factory = aiosqlite.Row
     await _conn.executescript(_SCHEMA_FILE.read_text())
     await _conn.commit()
+    await _run_migrations(_conn)
     await _seed_default_user(_conn)
 
 
@@ -59,6 +60,31 @@ async def get() -> AsyncGenerator[aiosqlite.Connection, None]:
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
+
+async def _run_migrations(conn: aiosqlite.Connection) -> None:
+    """Apply additive schema changes that CREATE TABLE IF NOT EXISTS can't handle."""
+    # Add is_admin column to users if it doesn't exist yet (upgrading old DBs).
+    async with conn.execute("PRAGMA table_info(users)") as cur:
+        cols = {row[1] async for row in cur}
+    if "is_admin" not in cols:
+        await conn.execute(
+            "ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
+        )
+        await conn.commit()
+
+    # Add course_id and description to lessons (courses feature).
+    async with conn.execute("PRAGMA table_info(lessons)") as cur:
+        lesson_cols = {row[1] async for row in cur}
+    if "course_id" not in lesson_cols:
+        await conn.execute(
+            "ALTER TABLE lessons ADD COLUMN course_id TEXT REFERENCES courses(id) ON DELETE SET NULL"
+        )
+    if "description" not in lesson_cols:
+        await conn.execute(
+            "ALTER TABLE lessons ADD COLUMN description TEXT"
+        )
+    await conn.commit()
+
 
 async def _seed_default_user(conn: aiosqlite.Connection) -> None:
     """Ensure the single prototype user exists."""

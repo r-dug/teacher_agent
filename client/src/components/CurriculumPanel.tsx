@@ -4,7 +4,8 @@
 
 import { Progress } from './ui/progress'
 import { cn } from '@/lib/utils'
-import type { CurriculumData, CurriculumState, Persona, Voice, SttLanguage } from '@/lib/types'
+import { sortByRecency, recordRecent } from '@/lib/recency'
+import type { CurriculumData, CurriculumState, Persona, Voice, SttLanguage, SttModel } from '@/lib/types'
 
 interface CurriculumPanelProps {
   curriculum: CurriculumData | null
@@ -19,6 +20,10 @@ interface CurriculumPanelProps {
   sttLanguages: SttLanguage[]
   selectedLangCode: string
   onLangChange: (code: string) => void
+  sttModels: SttModel[]
+  selectedSttModelId: string
+  onSttModelChange: (id: string) => void
+  onViewPage?: (pageStart: number, pageEnd: number) => void
 }
 
 function SelectRow({ label, value, onChange, children }: {
@@ -46,28 +51,42 @@ export function CurriculumPanel({
   personas, selectedPersonaId, onPersonaChange,
   voices, selectedVoiceId, onVoiceChange,
   sttLanguages, selectedLangCode, onLangChange,
+  sttModels, selectedSttModelId, onSttModelChange,
+  onViewPage,
 }: CurriculumPanelProps) {
+  const sortedPersonas   = sortByRecency(personas,     (p) => p.id,           (p) => p.name, 'persona')
+  const sortedVoices     = sortByRecency(voices,       (v) => v.id,           (v) => v.id,   'voice')
+  const sortedLanguages  = sortByRecency(sttLanguages, (l) => l.code ?? '',   (l) => l.name, 'stt_lang')
+  const sortedSttModels  = sortByRecency(sttModels,    (m) => m.id,           (m) => m.id,   'stt_model')
+
   const controls = (
     <div className="flex flex-col gap-2">
-      {personas.length > 0 && (
-        <SelectRow label="Persona" value={selectedPersonaId} onChange={onPersonaChange}>
+      {sortedPersonas.length > 0 && (
+        <SelectRow label="Persona" value={selectedPersonaId} onChange={(id) => { recordRecent('persona', id); onPersonaChange(id) }}>
           <option value="">Default</option>
-          {personas.map((p) => (
+          {sortedPersonas.map((p) => (
             <option key={p.id} value={p.id}>{p.name}</option>
           ))}
         </SelectRow>
       )}
-      {voices.length > 0 && (
-        <SelectRow label="Voice" value={selectedVoiceId} onChange={onVoiceChange}>
-          {voices.map((v) => (
+      {sortedVoices.length > 0 && (
+        <SelectRow label="Voice" value={selectedVoiceId} onChange={(id) => { recordRecent('voice', id); onVoiceChange(id) }}>
+          {sortedVoices.map((v) => (
             <option key={v.id} value={v.id}>{v.id}</option>
           ))}
         </SelectRow>
       )}
-      {sttLanguages.length > 0 && (
-        <SelectRow label="Speech language" value={selectedLangCode} onChange={onLangChange}>
-          {sttLanguages.map((l) => (
+      {sortedLanguages.length > 0 && (
+        <SelectRow label="Speech language" value={selectedLangCode} onChange={(code) => { recordRecent('stt_lang', code); onLangChange(code) }}>
+          {sortedLanguages.map((l) => (
             <option key={l.code ?? '__auto'} value={l.code ?? ''}>{l.name}</option>
+          ))}
+        </SelectRow>
+      )}
+      {sortedSttModels.length > 0 && (
+        <SelectRow label="STT model" value={selectedSttModelId} onChange={(id) => { recordRecent('stt_model', id); onSttModelChange(id) }}>
+          {sortedSttModels.map((m) => (
+            <option key={m.id} value={m.id}>{m.id}{m.is_default ? ' (default)' : ''}</option>
           ))}
         </SelectRow>
       )}
@@ -99,6 +118,12 @@ export function CurriculumPanel({
         {curriculum.sections.map((sec, idx) => {
           const isCurrent = !complete && idx === current
           const isDone = complete || idx < current
+          const hasPages = sec.page_start != null
+          const pageLabel = hasPages
+            ? sec.page_end && sec.page_end !== sec.page_start
+              ? `pp. ${sec.page_start}–${sec.page_end}`
+              : `p. ${sec.page_start}`
+            : null
           return (
             <li
               key={idx}
@@ -109,7 +134,18 @@ export function CurriculumPanel({
                 !isCurrent && !isDone && 'text-[hsl(var(--foreground))]'
               )}
             >
-              {sec.title ?? `Section ${idx + 1}`}
+              <div className="flex items-center justify-between gap-1">
+                <span className="flex-1 truncate">{sec.title ?? `Section ${idx + 1}`}</span>
+                {pageLabel && onViewPage && (
+                  <button
+                    onClick={() => onViewPage(sec.page_start!, sec.page_end ?? sec.page_start!)}
+                    className="shrink-0 rounded px-1 text-xs text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--accent))] hover:text-[hsl(var(--accent-foreground))] transition-colors"
+                    title="View pages"
+                  >
+                    {pageLabel}
+                  </button>
+                )}
+              </div>
             </li>
           )
         })}

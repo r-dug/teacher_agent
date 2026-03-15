@@ -27,7 +27,7 @@ CHANNELS = 1
 SILENCE_THRESHOLD = 0.01   # RMS below this counts as silence
 WAKE_WORD_THRESHOLD = 0.5
 
-DEFAULT_LLM_MODEL = "claude-opus-4-6"
+DEFAULT_LLM_MODEL = "claude-sonnet-4-6"
 
 SYSTEM_PROMPT = (
     "You are a helpful, conversational voice assistant. "

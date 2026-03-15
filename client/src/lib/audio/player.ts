@@ -15,6 +15,7 @@ export class AudioPlayer {
   /** Queue of pending [buffer, resolve] pairs */
   private playQueue: Array<[AudioBuffer, () => void]> = []
   private playing = false
+  private currentSource: AudioBufferSourceNode | null = null
 
   constructor() {
     this.ctx = new AudioContext()
@@ -55,6 +56,16 @@ export class AudioPlayer {
     }
   }
 
+  /** Stop all playback immediately and drain the queue. */
+  stop() {
+    // Resolve (unblock) all pending enqueue() callers so they don't hang
+    for (const [, resolve] of this.playQueue) resolve()
+    this.playQueue = []
+    this.playing = false
+    try { this.currentSource?.stop() } catch { /* already ended */ }
+    this.currentSource = null
+  }
+
   suspend() {
     return this.ctx.suspend()
   }
@@ -78,7 +89,8 @@ export class AudioPlayer {
       const source = this.ctx.createBufferSource()
       source.buffer = buffer
       source.connect(this.ctx.destination)
-      source.onended = () => resolve()
+      source.onended = () => { this.currentSource = null; resolve() }
+      this.currentSource = source
       source.start()
     })
   }

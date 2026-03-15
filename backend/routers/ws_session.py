@@ -27,7 +27,7 @@ from ..app_state import app_state, registry
 from ..config import settings
 from ..db import connection as db, models
 from ..services.agent import BackendAgentSession
-from ..services.stt import transcribe
+from ..services.stt import transcribe, load_stt_model
 from shared.lesson import Curriculum
 
 router = APIRouter(tags=["ws"])
@@ -51,6 +51,7 @@ class SessionState:
         messages: list[dict],
         agent_instructions: str | None,
         agent_session: BackendAgentSession,
+        pdf_path: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.lesson_id = lesson_id
@@ -58,12 +59,21 @@ class SessionState:
         self.messages = messages
         self.agent_instructions = agent_instructions
         self.agent_session = agent_session
+        self.pdf_path = pdf_path
         self.agent_task: asyncio.Task | None = None
         self.last_turn_id: str | None = None
         self.turn_status: str = "idle"  # 'idle' | 'running' | 'complete' | 'failed'
         self.stt_language: str | None = None  # None = auto-detect
+        self.stt_model_size: str | None = None  # None = use app default
         self.phase: str = "intro"  # 'intro' | 'teaching'
         self.lesson_goal: str | None = None
+        # Multi-turn intro messages (separate from teaching messages).
+        self.intro_messages: list[dict] = []
+        self.intro_raw_text: str | None = None
+        # Closures injected by ws_session() for deferred decomposition flow.
+        self.deferred_decompose_fn = None
+        self.first_teaching_task_fn = None
+        self.handle_intro_turn_fn = None
 
 
 # ── WebSocket endpoint ─────────────────────────────────────────────────────────
@@ -99,6 +109,12 @@ async def ws_session(
     if lesson is None:
         await websocket.send_json({"event": "error", "message": "Lesson not found"})
         await websocket.close(code=4004)
+        return
+
+    # Verify lesson belongs to the session's user
+    if lesson["user_id"] != session["user_id"]:
+        await websocket.send_json({"event": "error", "message": "Access denied"})
+        await websocket.close(code=4003)
         return
 
     sections = await models.get_sections(conn, lesson_id)
@@ -147,6 +163,8 @@ async def ws_session(
         kokoro_voice=settings.DEFAULT_VOICE,
         llm_model=settings.LLM_MODEL,
         pdf_path=pdf_full_path,
+        session_id=session_id,
+        user_id=session.get("user_id", ""),
     )
 
     state = SessionState(
@@ -156,30 +174,164 @@ async def ws_session(
         messages=messages,
         agent_instructions=None,  # set by client via set_instructions event
         agent_session=agent_session,
+        pdf_path=pdf_full_path,
     )
-    # Skip intro phase for resumed lessons that already have conversation history.
-    if messages:
+    # Skip intro for resumed lessons (messages exist) or already-decomposed lessons (sections exist).
+    if messages or sections:
         state.phase = "teaching"
 
     async def _auto_start() -> None:
-        """Run the intro turn (overview + goal question) for a fresh lesson."""
+        """Run the first intro turn (overview + goal question) for a fresh lesson.
+
+        If sections are not yet available (deferred decomposition), extract a raw
+        text preview from the PDF so the agent can give a meaningful overview.
+
+        The intro is now a multi-turn loop: the agent may ask follow-up questions
+        before calling capture_lesson_goal.  Subsequent user messages are routed
+        back here via _handle_intro_turn().
+        """
         import uuid as _uuid
         turn_id = str(_uuid.uuid4())
         state.last_turn_id = turn_id
         state.turn_status = "running"
         log.info("[auto-start] launching intro turn for lesson %s", lesson_id)
+
+        raw_text: str | None = None
+        if not state.curriculum.sections and state.pdf_path:
+            try:
+                import fitz
+                def _extract() -> str:
+                    doc = fitz.open(state.pdf_path)
+                    pages = [doc[i].get_text() for i in range(min(5, len(doc)))]
+                    doc.close()
+                    return "\n\n".join(p for p in pages if p.strip())
+                raw_text = await asyncio.to_thread(_extract)
+            except Exception:
+                pass  # non-fatal; intro will use title only
+
+        state.intro_raw_text = raw_text
+
         try:
-            # Run intro with a throwaway message list so state.messages stays clean.
-            intro_messages: list[dict] = []
-            await state.agent_session.run_intro(state.curriculum, intro_messages)
+            goal = await state.agent_session.run_intro_turn(
+                state.curriculum, state.intro_messages, raw_text
+            )
             state.turn_status = "complete"
             await websocket.send_json({"event": "turn_complete", "turn_id": turn_id})
+
+            if goal:
+                # Agent captured the goal on the very first exchange (rare but valid).
+                state.lesson_goal = goal
+                state.phase = "teaching"
+                if state.deferred_decompose_fn:
+                    asyncio.create_task(state.deferred_decompose_fn())
+                elif state.first_teaching_task_fn:
+                    state.agent_task = state.first_teaching_task_fn()
+            # else: agent asked a follow-up — wait for student's response.
+
         except asyncio.CancelledError:
             state.turn_status = "failed"
         except Exception as exc:
             log.exception("[auto-start] intro turn raised")
             state.turn_status = "failed"
             await websocket.send_json({"event": "error", "message": str(exc)})
+
+    async def _handle_intro_turn(user_text: str, turn_id: str) -> None:
+        """
+        Continue the goal-gathering intro loop with the student's response.
+
+        Appends the student's message to the shared intro_messages list, runs
+        another intro turn, and either:
+          - Captures the goal → transitions to teaching + kicks off decomposition.
+          - Gets another follow-up question → sends turn_complete and waits.
+        """
+        state.intro_messages.append({"role": "user", "content": user_text})
+        state.turn_status = "running"
+
+        try:
+            goal = await state.agent_session.run_intro_turn(
+                state.curriculum, state.intro_messages, state.intro_raw_text
+            )
+            state.turn_status = "complete"
+            await websocket.send_json({"event": "turn_complete", "turn_id": turn_id})
+
+            if goal:
+                state.lesson_goal = goal
+                state.phase = "teaching"
+                if state.deferred_decompose_fn:
+                    asyncio.create_task(state.deferred_decompose_fn())
+                elif state.first_teaching_task_fn:
+                    state.agent_task = state.first_teaching_task_fn()
+            # else: agent asked another follow-up — wait for next student message.
+
+        except asyncio.CancelledError:
+            state.turn_status = "failed"
+        except Exception as exc:
+            log.exception("[intro-turn] raised")
+            state.turn_status = "failed"
+            await websocket.send_json({"event": "error", "message": str(exc)})
+
+    async def _deferred_decompose() -> None:
+        """Run goal-informed decomposition after the intro, then push decompose_complete."""
+        # Re-fetch pdf_path in case the WS connected before the upload endpoint committed.
+        if not state.pdf_path:
+            refreshed = await models.get_lesson(conn, lesson_id)
+            if refreshed and refreshed.get("pdf_path"):
+                state.pdf_path = str(settings.STORAGE_DIR / refreshed["pdf_path"])
+                state.agent_session._pdf_path = state.pdf_path
+        if not state.pdf_path:
+            log.error("[deferred-decompose] no PDF path on lesson %s — cannot decompose", lesson_id)
+            await websocket.send_json({"event": "error", "message": "No PDF found for this lesson. Please re-upload."})
+            return
+        def on_progress(msg: str) -> None:
+            registry.send_threadsafe(session_id, {"event": "status", "message": msg}, loop)
+        try:
+            await websocket.send_json({"event": "decompose_start"})
+            await websocket.send_json({"event": "status", "message": "Analysing your document with your goals in mind…"})
+            curriculum = await state.agent_session.decompose_pdf(
+                state.pdf_path, on_progress, student_goal=state.lesson_goal
+            )
+            await models.upsert_sections(conn, lesson_id, curriculum.sections)
+            await models.update_lesson(conn, lesson_id, title=curriculum.title)
+            await registry.send(session_id, {
+                "event": "decompose_complete",
+                "lesson_id": lesson_id,
+                "curriculum": {
+                    "title": curriculum.title,
+                    "sections": curriculum.sections,
+                    "idx": 0,
+                },
+            })
+        except Exception as exc:
+            log.exception("[deferred-decompose] raised")
+            await websocket.send_json({"event": "error", "message": f"Decomposition failed: {exc}"})
+
+    async def _first_teaching_turn() -> None:
+        """Run the first proper teaching turn after deferred decomposition completes."""
+        import uuid as _uuid
+        turn_id = str(_uuid.uuid4())
+        state.last_turn_id = turn_id
+        state.turn_status = "running"
+        log.info("[first-teaching] starting first teaching turn for lesson %s", lesson_id)
+        try:
+            await state.agent_session.run_turn(
+                state.curriculum,
+                state.messages,
+                state.agent_instructions,
+                lesson_goal=state.lesson_goal,
+            )
+            state.turn_status = "complete"
+            await _save_state(conn, state)
+            await websocket.send_json({"event": "turn_complete", "turn_id": turn_id})
+        except asyncio.CancelledError:
+            state.turn_status = "failed"
+        except Exception as exc:
+            log.exception("[first-teaching] raised")
+            state.turn_status = "failed"
+            await websocket.send_json({"event": "error", "message": str(exc)})
+
+    state.deferred_decompose_fn = _deferred_decompose
+    state.first_teaching_task_fn = lambda: asyncio.create_task(_first_teaching_turn())
+    state.handle_intro_turn_fn = _handle_intro_turn
 
     try:
         receive_task = asyncio.create_task(
@@ -234,7 +386,16 @@ async def _receive_loop(
 
         elif event == "tool_result":
             inv_id = msg.get("invocation_id", "")
-            state.agent_session.handle_tool_result(inv_id, msg.get("result", {}))
+            result_payload = msg.get("result", {})
+            # Reject oversized tool results (drawings, photos, video frames).
+            # Encoded payload must not exceed 50 MB of raw text.
+            if len(raw) > 50 * 1024 * 1024:
+                await websocket.send_json({
+                    "event": "error",
+                    "message": "tool_result payload exceeds 50 MB limit",
+                })
+                continue
+            state.agent_session.handle_tool_result(inv_id, result_payload)
 
         elif event == "set_instructions":
             state.agent_instructions = msg.get("instructions") or None
@@ -247,6 +408,13 @@ async def _receive_loop(
         elif event == "set_stt_language":
             lang = msg.get("language")  # BCP-47 code or None / "" for auto
             state.stt_language = lang or None
+
+        elif event == "set_stt_model":
+            size = msg.get("model_size")
+            if size:
+                state.stt_model_size = size
+                if size not in app_state.stt_models:
+                    asyncio.create_task(_load_stt_model_bg(websocket, size))
 
         elif event == "reconnect":
             await _handle_reconnect(websocket, msg, state)
@@ -262,11 +430,124 @@ async def _receive_loop(
                     and not (state.agent_task and not state.agent_task.done())):
                 state.agent_task = asyncio.create_task(auto_start())
 
+        elif event == "text_message":
+            await _handle_text_message(websocket, msg, state, conn)
+
+        elif event == "transcribe_only":
+            await _handle_transcribe_only(websocket, msg, state)
+
+        elif event == "voice_message":
+            await _handle_voice_message(websocket, msg, state, conn)
+
+        elif event == "run_code":
+            asyncio.create_task(_handle_run_code(websocket, msg))
+
         elif event == "image_input":
             await _handle_image_input(websocket, msg, state, conn)
 
         elif event == "ping":
             await websocket.send_json({"event": "pong"})
+
+
+# ── code execution handler ─────────────────────────────────────────────────────
+
+async def _handle_run_code(websocket: WebSocket, msg: dict) -> None:
+    """Stream sandboxed code execution output back to the client."""
+    from ..services.code_runner import stream_execution
+
+    inv_id = msg.get("invocation_id", "")
+    code = msg.get("code", "")
+    runtime = msg.get("runtime", "python")
+
+    try:
+        async for ev in stream_execution(code, runtime):
+            t = ev["type"]
+            if t == "stdout":
+                await websocket.send_json(
+                    {"event": "code_stdout", "invocation_id": inv_id, "data": ev["data"]}
+                )
+            elif t == "stderr":
+                await websocket.send_json(
+                    {"event": "code_stderr", "invocation_id": inv_id, "data": ev["data"]}
+                )
+            elif t == "done":
+                await websocket.send_json({
+                    "event": "code_done",
+                    "invocation_id": inv_id,
+                    "exit_code": ev["exit_code"],
+                    "elapsed_ms": ev["elapsed_ms"],
+                })
+            elif t == "error":
+                await websocket.send_json(
+                    {"event": "code_error", "invocation_id": inv_id, "message": ev["message"]}
+                )
+    except Exception as exc:
+        log.exception("_handle_run_code raised: %s", exc)
+        try:
+            await websocket.send_json(
+                {"event": "code_error", "invocation_id": inv_id, "message": str(exc)}
+            )
+        except Exception:
+            pass
+
+
+# ── STT model loader ───────────────────────────────────────────────────────────
+
+_stt_load_lock: asyncio.Lock | None = None
+
+
+async def _get_stt_model(state: SessionState) -> object:
+    """Return the appropriate STT model, lazy-loading the default if not yet ready."""
+    global _stt_load_lock
+    if state.stt_model_size and state.stt_model_size in app_state.stt_models:
+        return app_state.stt_models[state.stt_model_size]
+    if app_state.stt_model is not None:
+        return app_state.stt_model
+    # Lazy-load the default model on first use.
+    if _stt_load_lock is None:
+        _stt_load_lock = asyncio.Lock()
+    async with _stt_load_lock:
+        if app_state.stt_model is None:
+            log.info("Lazy-loading STT model (%s)…", settings.STT_MODEL_SIZE)
+            model = await asyncio.to_thread(load_stt_model, settings.STT_MODEL_SIZE)
+            app_state.stt_model = model
+            app_state.stt_models[settings.STT_MODEL_SIZE] = model
+    return app_state.stt_model
+
+
+def _evict_and_load_stt_model(model_size: str) -> object:
+    """
+    Evict all cached STT models, free CUDA memory, then load the requested model.
+    Runs inside asyncio.to_thread() — blocking is fine here.
+    """
+    app_state.stt_models.clear()
+    app_state.stt_model = None
+    try:
+        import gc
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+    return load_stt_model(model_size)
+
+
+async def _load_stt_model_bg(websocket: WebSocket, model_size: str) -> None:
+    """Load an STT model in a thread pool and cache it on app_state."""
+    try:
+        await websocket.send_json({"event": "status", "message": f"Loading STT model ({model_size})…"})
+        model = await asyncio.to_thread(_evict_and_load_stt_model, model_size)
+        app_state.stt_models[model_size] = model
+        app_state.stt_model = model
+        await websocket.send_json({"event": "status", "message": f"STT model ready ({model_size})"})
+    except Exception as exc:
+        log.error("Failed to load STT model %s: %s", model_size, exc)
+        try:
+            await websocket.send_json({"event": "error", "message": f"Failed to load STT model: {exc}"})
+        except Exception:
+            pass
 
 
 # ── send loop ──────────────────────────────────────────────────────────────────
@@ -287,8 +568,8 @@ async def _send_loop(
         except Exception:
             break
 
-        # When decomposition finishes, refresh the in-memory curriculum so the
-        # teaching agent has the correct sections, then kick off the first turn.
+        # When decomposition finishes, refresh the in-memory curriculum and
+        # kick off the appropriate next step.
         if event.get("event") == "decompose_complete":
             raw = event.get("curriculum", {})
             state.curriculum = Curriculum(
@@ -300,8 +581,13 @@ async def _send_loop(
                 "[send_loop] decompose_complete: curriculum updated (%d sections)",
                 len(state.curriculum.sections),
             )
-            if not state.messages and not (state.agent_task and not state.agent_task.done()):
-                state.agent_task = asyncio.create_task(auto_start())
+            if not (state.agent_task and not state.agent_task.done()):
+                if state.phase == "teaching" and state.first_teaching_task_fn:
+                    # Goal already captured via intro — start first teaching turn.
+                    state.agent_task = state.first_teaching_task_fn()
+                elif not state.messages:
+                    # Legacy / edge case: no intro yet, run it now.
+                    state.agent_task = asyncio.create_task(auto_start())
 
 
 # ── event handlers ─────────────────────────────────────────────────────────────
@@ -326,9 +612,15 @@ async def _handle_audio_input(
     await websocket.send_json({"event": "status", "message": "Transcribing..."})
 
     try:
-        text = await transcribe(audio_b64, sample_rate, app_state.stt_model, state.stt_language)
+        stt_model = await _get_stt_model(state)
+        text = await transcribe(audio_b64, sample_rate, stt_model, state.stt_language)
     except Exception as exc:
         await websocket.send_json({"event": "error", "message": f"STT error: {exc}"})
+        return
+
+    # Re-check: another handler may have started a turn while we were transcribing.
+    if state.agent_task and not state.agent_task.done():
+        await websocket.send_json({"event": "error", "message": "Agent turn already in progress"})
         return
 
     if not text.strip():
@@ -346,33 +638,12 @@ async def _handle_audio_input(
         "turn_id": turn_id,
     })
 
-    # ── Intro phase: student's response IS the lesson goal ──────────────────
+    # ── Intro phase: continue the goal-gathering loop ────────────────────────
     if state.phase == "intro":
-        state.lesson_goal = text
-        state.phase = "teaching"
-        # state.messages stays empty; teaching starts fresh with goal injected.
-        await websocket.send_json({"event": "status", "message": "Thinking..."})
-
-        async def _first_teaching_turn() -> None:
-            log.info("[turn %s] first teaching turn (goal captured)", turn_id)
-            try:
-                await state.agent_session.run_turn(
-                    state.curriculum,
-                    state.messages,
-                    state.agent_instructions,
-                    lesson_goal=state.lesson_goal,
-                )
-                state.turn_status = "complete"
-                await _save_state(conn, state)
-                await websocket.send_json({"event": "turn_complete", "turn_id": turn_id})
-            except asyncio.CancelledError:
-                state.turn_status = "failed"
-            except Exception as exc:
-                log.exception("[turn %s] first teaching turn raised", turn_id)
-                state.turn_status = "failed"
-                await websocket.send_json({"event": "error", "message": str(exc)})
-
-        state.agent_task = asyncio.create_task(_first_teaching_turn())
+        if state.handle_intro_turn_fn:
+            state.agent_task = asyncio.create_task(
+                state.handle_intro_turn_fn(text, turn_id)
+            )
         return
 
     # ── Teaching phase: normal conversation turn ────────────────────────────
@@ -397,6 +668,146 @@ async def _handle_audio_input(
             state.turn_status = "failed"
         except Exception as exc:
             log.exception("[turn %s] agent turn raised", turn_id)
+            state.turn_status = "failed"
+            await websocket.send_json({"event": "error", "message": str(exc)})
+
+    state.agent_task = asyncio.create_task(_run_turn())
+
+
+async def _handle_text_message(
+    websocket: WebSocket,
+    msg: dict,
+    state: SessionState,
+    conn: aiosqlite.Connection,
+) -> None:
+    """Handle a typed text message from the client — runs an agent turn directly."""
+    if state.agent_task and not state.agent_task.done():
+        await websocket.send_json({"event": "error", "message": "Agent turn already in progress"})
+        return
+
+    text: str = msg.get("text", "").strip()
+    if not text:
+        return
+
+    import uuid as _uuid
+    turn_id = str(_uuid.uuid4())
+    state.last_turn_id = turn_id
+    state.turn_status = "running"
+
+    await websocket.send_json({"event": "transcription", "text": text, "turn_id": turn_id})
+
+    if state.phase == "intro":
+        if state.handle_intro_turn_fn:
+            state.agent_task = asyncio.create_task(
+                state.handle_intro_turn_fn(text, turn_id)
+            )
+        return
+
+    state.messages.append({"role": "user", "content": text})
+    await websocket.send_json({"event": "status", "message": "Thinking..."})
+
+    async def _run_turn() -> None:
+        try:
+            await state.agent_session.run_turn(
+                state.curriculum, state.messages, state.agent_instructions,
+                lesson_goal=state.lesson_goal,
+            )
+            state.turn_status = "complete"
+            await _save_state(conn, state)
+            await websocket.send_json({"event": "turn_complete", "turn_id": turn_id})
+        except asyncio.CancelledError:
+            state.turn_status = "failed"
+        except Exception as exc:
+            log.exception("[text_message] agent turn raised")
+            state.turn_status = "failed"
+            await websocket.send_json({"event": "error", "message": str(exc)})
+
+    state.agent_task = asyncio.create_task(_run_turn())
+
+
+async def _handle_transcribe_only(
+    websocket: WebSocket,
+    msg: dict,
+    state: SessionState,
+) -> None:
+    """Run STT and return transcription to the client without starting an agent turn."""
+    from ..services.stt import transcribe
+    audio_b64: str = msg.get("data", "")
+    sample_rate: int = msg.get("sample_rate", 16000)
+    try:
+        stt_model = await _get_stt_model(state)
+        text = await transcribe(audio_b64, sample_rate, stt_model, state.stt_language)
+        await websocket.send_json({"event": "transcription_only", "text": text})
+    except Exception as exc:
+        await websocket.send_json({"event": "error", "message": f"STT error: {exc}"})
+
+
+async def _handle_voice_message(
+    websocket: WebSocket,
+    msg: dict,
+    state: SessionState,
+    conn: aiosqlite.Connection,
+) -> None:
+    """
+    Transcribe a compressed audio file (webm/opus etc.) and run an agent turn.
+
+    The Claude API does not yet accept raw audio content blocks, so we run the
+    recording through Whisper first, then proceed exactly like a typed message.
+    """
+    from ..services.stt import transcribe_file
+    if state.agent_task and not state.agent_task.done():
+        await websocket.send_json({"event": "error", "message": "Agent turn already in progress"})
+        return
+
+    audio_b64: str = msg.get("data", "")
+    mime_type: str = msg.get("mime_type", "audio/webm")
+
+    try:
+        stt_model = await _get_stt_model(state)
+        text = await transcribe_file(audio_b64, mime_type, stt_model, state.stt_language)
+    except Exception as exc:
+        await websocket.send_json({"event": "error", "message": f"STT error: {exc}"})
+        return
+
+    # Re-check: another handler may have started a turn while we were transcribing.
+    if state.agent_task and not state.agent_task.done():
+        await websocket.send_json({"event": "error", "message": "Agent turn already in progress"})
+        return
+
+    if not text.strip():
+        await websocket.send_json({"event": "status", "message": "Ready"})
+        return
+
+    import uuid as _uuid
+    turn_id = str(_uuid.uuid4())
+    state.last_turn_id = turn_id
+    state.turn_status = "running"
+
+    await websocket.send_json({"event": "transcription", "text": text, "turn_id": turn_id})
+
+    if state.phase == "intro":
+        if state.handle_intro_turn_fn:
+            state.agent_task = asyncio.create_task(
+                state.handle_intro_turn_fn(text, turn_id)
+            )
+        return
+
+    state.messages.append({"role": "user", "content": text})
+    await websocket.send_json({"event": "status", "message": "Thinking..."})
+
+    async def _run_turn() -> None:
+        try:
+            await state.agent_session.run_turn(
+                state.curriculum, state.messages, state.agent_instructions,
+                lesson_goal=state.lesson_goal,
+            )
+            state.turn_status = "complete"
+            await _save_state(conn, state)
+            await websocket.send_json({"event": "turn_complete", "turn_id": turn_id})
+        except asyncio.CancelledError:
+            state.turn_status = "failed"
+        except Exception as exc:
+            log.exception("[voice_message] agent turn raised")
             state.turn_status = "failed"
             await websocket.send_json({"event": "error", "message": str(exc)})
 

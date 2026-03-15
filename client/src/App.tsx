@@ -7,19 +7,25 @@
  *  3. If missing / invalid, show auth screens (login / register / verify).
  *
  * Routing (authenticated):
- *  /            → LessonPickerPage
- *  /teach/:id   → TeachPage
+ *  /                  → HomePage (courses + individual lessons)
+ *  /courses/:courseId → CoursePage
+ *  /teach/:id         → TeachPage
+ *  /admin/usage       → UsageDashboardPage (admin only)
  *
  * Routing (unauthenticated):
  *  /auth/verify → EmailVerifyPage  (handles email verification links)
  *  *            → LoginPage / RegisterPage / EmailPendingPage
  */
 
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 
-import { LessonPickerPage } from './pages/LessonPickerPage'
+import { HomePage } from './pages/HomePage'
+import { CoursePage } from './pages/CoursePage'
 import { TeachPage } from './pages/TeachPage'
+const UsageDashboardPage = lazy(() =>
+  import('./pages/UsageDashboardPage').then(m => ({ default: m.UsageDashboardPage }))
+)
 import { LoginPage } from './pages/LoginPage'
 import { RegisterPage } from './pages/RegisterPage'
 import { EmailPendingPage } from './pages/EmailPendingPage'
@@ -32,6 +38,7 @@ const SESSION_KEY = 'session_id'
 export default function App() {
   const [authState, setAuthState] = useState<'loading' | 'authenticated' | 'unauthenticated'>('loading')
   const [sessionId, setSessionId] = useState<string | null>(null)
+  const [isAdmin, setIsAdmin] = useState(false)
   const [authPage, setAuthPage] = useState<AuthPage>('login')
   const [pendingEmail, setPendingEmail] = useState('')
 
@@ -47,8 +54,9 @@ export default function App() {
         if (!r.ok) throw new Error('invalid')
         return r.json()
       })
-      .then(() => {
+      .then((data) => {
         setSessionId(stored)
+        setIsAdmin(Boolean(data.is_admin))
         setAuthState('authenticated')
       })
       .catch(() => {
@@ -61,6 +69,11 @@ export default function App() {
   function onLogin(sid: string) {
     localStorage.setItem(SESSION_KEY, sid)
     setSessionId(sid)
+    // Re-fetch /me to get is_admin
+    fetch('/api/auth/me', { headers: { 'X-Session-Id': sid } })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) setIsAdmin(Boolean(data.is_admin)) })
+      .catch(() => {})
     setAuthState('authenticated')
   }
 
@@ -68,6 +81,7 @@ export default function App() {
     const sid = sessionId
     localStorage.removeItem(SESSION_KEY)
     setSessionId(null)
+    setIsAdmin(false)
     setAuthState('unauthenticated')
     setAuthPage('login')
     if (sid) {
@@ -94,8 +108,14 @@ export default function App() {
     return (
       <BrowserRouter>
         <Routes>
-          <Route path="/" element={<LessonPickerPage sessionId={sessionId} onLogout={onLogout} />} />
+          <Route path="/" element={<HomePage sessionId={sessionId} onLogout={onLogout} isAdmin={isAdmin} />} />
+          <Route path="/courses/:courseId" element={<CoursePage sessionId={sessionId} />} />
           <Route path="/teach/:lessonId" element={<TeachPage sessionId={sessionId} />} />
+          <Route path="/admin/usage" element={
+            <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
+              <UsageDashboardPage sessionId={sessionId} isAdmin={isAdmin} />
+            </Suspense>
+          } />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
