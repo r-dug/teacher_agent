@@ -205,6 +205,7 @@ _LESSON_UPDATE_SQL: dict[str, str] = {
     "pdf_path": "UPDATE lessons SET pdf_path = ?, updated_at = datetime('now') WHERE id = ?",
     "current_section_idx": "UPDATE lessons SET current_section_idx = ?, updated_at = datetime('now') WHERE id = ?",
     "completed": "UPDATE lessons SET completed = ?, updated_at = datetime('now') WHERE id = ?",
+    "lesson_goal": "UPDATE lessons SET lesson_goal = ?, updated_at = datetime('now') WHERE id = ?",
 }
 
 

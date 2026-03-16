@@ -177,6 +177,8 @@ async def ws_session(
         agent_session=agent_session,
         pdf_path=pdf_full_path,
     )
+    # Restore persisted lesson_goal (captured during intro, saved before decomposition).
+    state.lesson_goal = lesson.get("lesson_goal") or None
     # Skip intro for resumed lessons (messages exist) or already-decomposed lessons (sections exist).
     if messages or sections:
         state.phase = "teaching"
@@ -223,6 +225,7 @@ async def ws_session(
                 # Agent captured the goal on the very first exchange (rare but valid).
                 state.lesson_goal = goal
                 state.phase = "teaching"
+                await models.update_lesson(conn, lesson_id, lesson_goal=goal)
                 if state.deferred_decompose_fn:
                     asyncio.create_task(state.deferred_decompose_fn())
                 elif state.first_teaching_task_fn:
@@ -258,6 +261,7 @@ async def ws_session(
             if goal:
                 state.lesson_goal = goal
                 state.phase = "teaching"
+                await models.update_lesson(conn, lesson_id, lesson_goal=goal)
                 if state.deferred_decompose_fn:
                     asyncio.create_task(state.deferred_decompose_fn())
                 elif state.first_teaching_task_fn:
@@ -427,9 +431,14 @@ async def _receive_loop(
 
         elif event == "start_lesson":
             # Client sends this after dispatching initial config (set_instructions etc.)
-            if (auto_start and not state.messages
-                    and not (state.agent_task and not state.agent_task.done())):
-                state.agent_task = asyncio.create_task(auto_start())
+            if not (state.agent_task and not state.agent_task.done()):
+                if state.phase == "intro" and not state.messages and auto_start:
+                    # Fresh lesson: run intro.
+                    state.agent_task = asyncio.create_task(auto_start())
+                elif state.phase == "teaching" and not state.messages and state.first_teaching_task_fn:
+                    # Sections exist but no messages (reconnect after intro but before first
+                    # teaching turn was saved) — skip intro, start teaching directly.
+                    state.agent_task = state.first_teaching_task_fn()
 
         elif event == "text_message":
             await _handle_text_message(websocket, msg, state, conn)

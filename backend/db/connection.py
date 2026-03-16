@@ -83,6 +83,10 @@ async def _run_migrations(conn: aiosqlite.Connection) -> None:
         await conn.execute(
             "ALTER TABLE lessons ADD COLUMN description TEXT"
         )
+    if "lesson_goal" not in lesson_cols:
+        await conn.execute(
+            "ALTER TABLE lessons ADD COLUMN lesson_goal TEXT"
+        )
     await conn.commit()
 
 

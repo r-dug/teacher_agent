@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS lessons (
     pdf_path            TEXT,
     current_section_idx INTEGER NOT NULL DEFAULT 0,
     completed           INTEGER NOT NULL DEFAULT 0,   -- boolean (0/1)
+    lesson_goal         TEXT,                         -- captured during intro phase
     created_at          TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
