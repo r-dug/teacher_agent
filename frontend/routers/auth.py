@@ -32,7 +32,7 @@ import secrets
 
 import bcrypt
 from email_validator import EmailNotValidError, validate_email
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from ..config import settings
@@ -45,9 +45,12 @@ log = logging.getLogger(__name__)
 
 # 3 resend emails per email address per hour
 _resend_limiter = RateLimiter(capacity=3.0, refill_rate=1 / 1200.0)
-# 10 verify attempts per token per minute (tokens are 32-byte secrets so brute-force
-# is implausible, but belt-and-suspenders)
+# 10 verify attempts per token per minute
 _verify_limiter = RateLimiter(capacity=10.0, refill_rate=10 / 60.0)
+# 5 login attempts per email per 5 minutes
+_login_limiter = RateLimiter(capacity=5.0, refill_rate=5 / 300.0)
+# 10 registrations per IP per hour
+_register_limiter = RateLimiter(capacity=10.0, refill_rate=10 / 3600.0)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -115,7 +118,10 @@ class MeResponse(BaseModel):
 # ── routes ─────────────────────────────────────────────────────────────────────
 
 @router.post("/register", status_code=201)
-async def register(body: RegisterRequest):
+async def register(request: Request, body: RegisterRequest):
+    client_ip = request.client.host if request.client else "unknown"
+    if not _register_limiter.allow(client_ip):
+        raise HTTPException(status_code=429, detail="Too many registration attempts. Please try again later.")
     email = _validate_email(body.email)
     _validate_password(body.password)
 
@@ -169,6 +175,8 @@ async def verify_email(body: VerifyRequest):
 @router.post("/login", response_model=SessionResponse)
 async def login(body: LoginRequest):
     email = _validate_email(body.email)
+    if not _login_limiter.allow(email):
+        raise HTTPException(status_code=429, detail="Too many login attempts. Please try again later.")
     http = get_http()
     resp = await http.get("/internal/auth/user", params={"email": email})
 

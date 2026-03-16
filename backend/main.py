@@ -109,6 +109,19 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class _InternalTokenMiddleware(BaseHTTPMiddleware):
+    """Reject requests that don't carry the shared BFF→backend secret."""
+
+    async def dispatch(self, request: Request, call_next):
+        if settings.BACKEND_SHARED_SECRET and request.url.path != "/health":
+            token = request.headers.get("x-internal-token", "")
+            if token != settings.BACKEND_SHARED_SECRET:
+                from fastapi.responses import JSONResponse
+                return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        return await call_next(request)
+
+
+app.add_middleware(_InternalTokenMiddleware)
 app.add_middleware(_SecurityHeadersMiddleware)
 
 # Allow the frontend server to call us

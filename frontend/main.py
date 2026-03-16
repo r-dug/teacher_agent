@@ -39,7 +39,7 @@ async def lifespan(app: FastAPI):
             "ALLOWED_ORIGINS must be set to an explicit origin list in production "
             "(current value is '*'). Set ALLOWED_ORIGINS=https://yourdomain.com"
         )
-    await http_client.init(settings.BACKEND_HTTP)
+    await http_client.init(settings.BACKEND_HTTP, secret=settings.BACKEND_SHARED_SECRET)
     yield
     await http_client.close()
 

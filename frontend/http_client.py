@@ -7,9 +7,10 @@ import httpx
 _client: httpx.AsyncClient | None = None
 
 
-async def init(base_url: str, timeout: float = 30.0) -> None:
+async def init(base_url: str, timeout: float = 30.0, secret: str | None = None) -> None:
     global _client
-    _client = httpx.AsyncClient(base_url=base_url, timeout=timeout)
+    headers = {"X-Internal-Token": secret} if secret else {}
+    _client = httpx.AsyncClient(base_url=base_url, timeout=timeout, headers=headers)
 
 
 async def close() -> None:

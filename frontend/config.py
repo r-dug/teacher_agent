@@ -30,6 +30,10 @@ class Settings:
     SSL_CERTFILE: str | None = os.getenv("SSL_CERTFILE", None)
     SSL_KEYFILE: str | None = os.getenv("SSL_KEYFILE", None)
 
+    # Shared secret for BFF→backend calls (must match backend BACKEND_SHARED_SECRET).
+    # When unset in dev, no auth header is sent (backend also skips the check).
+    BACKEND_SHARED_SECRET: str | None = os.getenv("BACKEND_SHARED_SECRET")
+
     # Email / auth
     # When RESEND_API_KEY is absent, verification URLs are logged to stdout
     # instead of emailed (dev / test mode).

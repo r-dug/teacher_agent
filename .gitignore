@@ -13,9 +13,11 @@ wheels/
 # .notes/
 
 # Secrets
+.env
 .env_vars
 .env.local
 .env.*.local
+.certbot_email
 # TLS certificates (machine-specific, generated locally)
 certs/
 

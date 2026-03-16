@@ -10,6 +10,12 @@ from ..session_store import store
 router = APIRouter(tags=["usage"])
 
 
+def _require_session(x_session_id: str) -> None:
+    entry = store.get(x_session_id)
+    if entry is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+
+
 def _require_admin(x_session_id: str) -> None:
     entry = store.get(x_session_id)
     if entry is None:
@@ -21,7 +27,8 @@ def _require_admin(x_session_id: str) -> None:
 # ── Session-scoped ─────────────────────────────────────────────────────────────
 
 @router.get("/usage")
-async def get_usage():
+async def get_usage(x_session_id: str = Header(...)):
+    _require_session(x_session_id)
     http = get_http()
     resp = await http.get("/usage")
     return Response(content=resp.content, status_code=resp.status_code,
@@ -29,7 +36,8 @@ async def get_usage():
 
 
 @router.delete("/usage")
-async def reset_usage():
+async def reset_usage(x_session_id: str = Header(...)):
+    _require_session(x_session_id)
     http = get_http()
     resp = await http.delete("/usage")
     return Response(content=resp.content, status_code=resp.status_code,

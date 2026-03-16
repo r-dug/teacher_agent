@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import urllib.parse
 
 import websockets.asyncio.client
 import websockets.exceptions
@@ -63,17 +65,28 @@ async def ws_proxy(
 
     # ── connect to backend ─────────────────────────────────────────────────────
 
+    _UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+    if not _UUID_RE.match(lesson_id):
+        await websocket.send_json({"event": "error", "message": "Invalid lesson ID"})
+        await websocket.close(code=4004)
+        return
+
     backend_url = (
         f"{settings.BACKEND_WS}/ws/{session_id}"
-        f"?lesson_id={lesson_id}"
+        f"?{urllib.parse.urlencode({'lesson_id': lesson_id})}"
     )
 
     try:
+        extra_headers = {}
+        if settings.BACKEND_SHARED_SECRET:
+            extra_headers["X-Internal-Token"] = settings.BACKEND_SHARED_SECRET
+
         async with websockets.asyncio.client.connect(
             backend_url,
             ping_interval=20,
             ping_timeout=10,
             max_size=4 * 1024 * 1024,  # 4 MB — audio sub-chunks are ≤350 KB after base64
+            additional_headers=extra_headers,
         ) as backend_ws:
             await _relay(websocket, backend_ws, session_id)
 

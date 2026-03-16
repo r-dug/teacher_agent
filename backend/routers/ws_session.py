@@ -65,6 +65,7 @@ class SessionState:
         self.turn_status: str = "idle"  # 'idle' | 'running' | 'complete' | 'failed'
         self.stt_language: str | None = None  # None = auto-detect
         self.stt_model_size: str | None = None  # None = use app default
+        self.code_run_semaphore: asyncio.Semaphore = asyncio.Semaphore(3)
         self.phase: str = "intro"  # 'intro' | 'teaching'
         self.lesson_goal: str | None = None
         # Multi-turn intro messages (separate from teaching messages).
@@ -440,7 +441,7 @@ async def _receive_loop(
             await _handle_voice_message(websocket, msg, state, conn)
 
         elif event == "run_code":
-            asyncio.create_task(_handle_run_code(websocket, msg))
+            asyncio.create_task(_handle_run_code(websocket, msg, state))
 
         elif event == "image_input":
             await _handle_image_input(websocket, msg, state, conn)
@@ -451,7 +452,11 @@ async def _receive_loop(
 
 # ── code execution handler ─────────────────────────────────────────────────────
 
-async def _handle_run_code(websocket: WebSocket, msg: dict) -> None:
+_CODE_MAX_BYTES = 100_000       # 100 KB input limit
+_OUTPUT_MAX_BYTES = 1_024_000   # 1 MB output limit
+
+
+async def _handle_run_code(websocket: WebSocket, msg: dict, state: SessionState) -> None:
     """Stream sandboxed code execution output back to the client."""
     from ..services.code_runner import stream_execution
 
@@ -459,16 +464,43 @@ async def _handle_run_code(websocket: WebSocket, msg: dict) -> None:
     code = msg.get("code", "")
     runtime = msg.get("runtime", "python")
 
+    if len(code.encode()) > _CODE_MAX_BYTES:
+        await websocket.send_json(
+            {"event": "code_error", "invocation_id": inv_id, "message": "Code exceeds 100 KB limit"}
+        )
+        return
+
+    if not await _try_acquire(state.code_run_semaphore):
+        await websocket.send_json(
+            {"event": "code_error", "invocation_id": inv_id, "message": "Too many concurrent code executions — please wait"}
+        )
+        return
+
+    output_bytes = 0
     try:
         async for ev in stream_execution(code, runtime):
             t = ev["type"]
             if t == "stdout":
+                data = ev["data"]
+                output_bytes += len(data.encode())
+                if output_bytes > _OUTPUT_MAX_BYTES:
+                    await websocket.send_json(
+                        {"event": "code_stderr", "invocation_id": inv_id, "data": "\n[output truncated — 1 MB limit reached]"}
+                    )
+                    break
                 await websocket.send_json(
-                    {"event": "code_stdout", "invocation_id": inv_id, "data": ev["data"]}
+                    {"event": "code_stdout", "invocation_id": inv_id, "data": data}
                 )
             elif t == "stderr":
+                data = ev["data"]
+                output_bytes += len(data.encode())
+                if output_bytes > _OUTPUT_MAX_BYTES:
+                    await websocket.send_json(
+                        {"event": "code_stderr", "invocation_id": inv_id, "data": "\n[output truncated — 1 MB limit reached]"}
+                    )
+                    break
                 await websocket.send_json(
-                    {"event": "code_stderr", "invocation_id": inv_id, "data": ev["data"]}
+                    {"event": "code_stderr", "invocation_id": inv_id, "data": data}
                 )
             elif t == "done":
                 await websocket.send_json({
@@ -489,6 +521,17 @@ async def _handle_run_code(websocket: WebSocket, msg: dict) -> None:
             )
         except Exception:
             pass
+    finally:
+        state.code_run_semaphore.release()
+
+
+async def _try_acquire(sem: asyncio.Semaphore) -> bool:
+    """Non-blocking semaphore acquire. Returns False immediately if all slots are taken."""
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=0)
+        return True
+    except (asyncio.TimeoutError, TimeoutError):
+        return False
 
 
 # ── STT model loader ───────────────────────────────────────────────────────────

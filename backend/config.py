@@ -22,6 +22,9 @@ class Settings:
 
     # Auth (prototype: all requests trusted from the frontend server)
     FRONTEND_ORIGIN: str = os.getenv("FRONTEND_ORIGIN", "http://127.0.0.1:8000")
+    # Shared secret for BFF→backend calls.  When set, all inbound requests must
+    # carry X-Internal-Token: <secret>.  Unset in dev (no check performed).
+    BACKEND_SHARED_SECRET: str | None = os.getenv("BACKEND_SHARED_SECRET")
 
     def ensure_dirs(self) -> None:
         self.STORAGE_DIR.mkdir(parents=True, exist_ok=True)
