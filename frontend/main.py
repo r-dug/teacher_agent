@@ -65,7 +65,10 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
         )
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "   # needed by Vite-built assets in prod
+            # VAD (onnxruntime-web) compiles WebAssembly at runtime and requires
+            # wasm-unsafe-eval/unsafe-eval in script-src. Keep this as narrow as
+            # possible while allowing dictation to function.
+            "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' 'unsafe-eval'; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob:; "
             "media-src 'self' blob:; "

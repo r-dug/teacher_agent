@@ -94,9 +94,16 @@ export function InputBar({
       },
       onSpeaking: setSttSpeaking,
     })
-    await rec.start()
-    sttRecorderRef.current = rec
-    setSttActive(true)
+    try {
+      await rec.start()
+      sttRecorderRef.current = rec
+      setSttActive(true)
+    } catch (err) {
+      // Keep dictation failures non-fatal to the rest of the page (e.g. CSP or mic init issues).
+      console.error('[STT] Failed to start dictation recorder:', err)
+      setSttActive(false)
+      setSttSpeaking(false)
+    }
   }, [onTranscribeAudio])
 
   const stopStt = useCallback(() => {
