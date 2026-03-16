@@ -134,6 +134,38 @@ async def auth_store_token(body: StoreTokenRequest, conn: Conn):
     return {"ok": True}
 
 
+class PasswordResetTokenRequest(BaseModel):
+    user_id: str
+    token: str
+
+
+class PasswordResetRequest(BaseModel):
+    token: str
+    password_hash: str
+
+
+@router.post("/auth/password-reset-tokens", status_code=201)
+async def auth_store_reset_token(body: PasswordResetTokenRequest, conn: Conn):
+    await models.create_password_reset_token(conn, body.user_id, body.token)
+    return {"ok": True}
+
+
+@router.post("/auth/password-reset", response_model=AuthUserResponse)
+async def auth_reset_password(body: PasswordResetRequest, conn: Conn):
+    user_id = await models.consume_password_reset_token(conn, body.token)
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset link")
+    await models.update_password_hash(conn, user_id, body.password_hash)
+    user = await models.get_user_by_id(conn, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return AuthUserResponse(
+        user_id=user["id"], email=user["email"],
+        email_verified=bool(user["email_verified"]),
+        is_admin=bool(user["is_admin"]),
+    )
+
+
 @router.post("/auth/verify", response_model=AuthUserResponse)
 async def auth_verify_email(body: VerifyTokenRequest, conn: Conn):
     user_id = await models.consume_verification_token(conn, body.token)

@@ -104,6 +104,16 @@ CREATE TABLE IF NOT EXISTS personas (
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- ── Password Reset Tokens ─────────────────────────────────────────────────────
+-- Short-lived tokens sent by email to allow password reset.
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    token      TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ── Upload Tokens ─────────────────────────────────────────────────────────────
 -- Short-lived tokens issued by frontend server for direct PDF upload.
 

@@ -398,6 +398,52 @@ async def consume_verification_token(
     return user_id
 
 
+async def create_password_reset_token(
+    conn: aiosqlite.Connection,
+    user_id: str,
+    token: str,
+    ttl_hours: int = 1,
+) -> None:
+    await conn.execute(
+        "DELETE FROM password_reset_tokens WHERE user_id = ?", (user_id,)
+    )
+    await conn.execute(
+        """INSERT INTO password_reset_tokens (token, user_id, expires_at)
+           VALUES (?, ?, datetime('now', ?))""",
+        (token, user_id, f"+{ttl_hours} hours"),
+    )
+    await conn.commit()
+
+
+async def consume_password_reset_token(
+    conn: aiosqlite.Connection, token: str
+) -> str | None:
+    """Validate and delete token; returns user_id or None if invalid/expired."""
+    async with conn.execute(
+        """SELECT user_id FROM password_reset_tokens
+           WHERE token = ? AND expires_at > datetime('now')""",
+        (token,),
+    ) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    user_id = row[0]
+    await conn.execute(
+        "DELETE FROM password_reset_tokens WHERE token = ?", (token,)
+    )
+    await conn.commit()
+    return user_id
+
+
+async def update_password_hash(
+    conn: aiosqlite.Connection, user_id: str, password_hash: str
+) -> None:
+    await conn.execute(
+        "UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id)
+    )
+    await conn.commit()
+
+
 # ── personas ───────────────────────────────────────────────────────────────────
 
 BUILT_IN_PERSONAS = [

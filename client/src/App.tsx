@@ -30,8 +30,10 @@ import { LoginPage } from './pages/LoginPage'
 import { RegisterPage } from './pages/RegisterPage'
 import { EmailPendingPage } from './pages/EmailPendingPage'
 import { EmailVerifyPage } from './pages/EmailVerifyPage'
+import { ForgotPasswordPage } from './pages/ForgotPasswordPage'
+import { ResetPasswordPage } from './pages/ResetPasswordPage'
 
-type AuthPage = 'login' | 'register' | 'pending'
+type AuthPage = 'login' | 'register' | 'pending' | 'forgot'
 
 const SESSION_KEY = 'session_id'
 
@@ -131,14 +133,20 @@ export default function App() {
           element={<EmailVerifyPage onLogin={onLogin} onGoLogin={() => setAuthPage('login')} />}
         />
         <Route
+          path="/auth/reset-password"
+          element={<ResetPasswordPage onGoLogin={() => setAuthPage('login')} />}
+        />
+        <Route
           path="*"
           element={
             authPage === 'pending' ? (
               <EmailPendingPage email={pendingEmail} onGoLogin={() => setAuthPage('login')} />
             ) : authPage === 'register' ? (
               <RegisterPage onPending={onRegisterSuccess} onGoLogin={() => setAuthPage('login')} />
+            ) : authPage === 'forgot' ? (
+              <ForgotPasswordPage onGoLogin={() => setAuthPage('login')} />
             ) : (
-              <LoginPage onLogin={onLogin} onGoRegister={() => setAuthPage('register')} />
+              <LoginPage onLogin={onLogin} onGoRegister={() => setAuthPage('register')} onForgotPassword={() => setAuthPage('forgot')} />
             )
           }
         />

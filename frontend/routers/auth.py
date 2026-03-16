@@ -36,13 +36,17 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from ..config import settings
-from ..email import send_verification_email
+from ..email import send_verification_email, send_password_reset_email
 from ..http_client import get as get_http
 from ..rate_limiter import RateLimiter
 from ..session_store import store
 
 log = logging.getLogger(__name__)
 
+# 3 password reset requests per email per hour
+_reset_limiter = RateLimiter(capacity=3.0, refill_rate=1 / 1200.0)
+# 10 reset-password attempts per token prefix per minute
+_reset_verify_limiter = RateLimiter(capacity=10.0, refill_rate=10 / 60.0)
 # 3 resend emails per email address per hour
 _resend_limiter = RateLimiter(capacity=3.0, refill_rate=1 / 1200.0)
 # 10 verify attempts per token per minute
@@ -103,6 +107,15 @@ class VerifyRequest(BaseModel):
 
 class ResendRequest(BaseModel):
     email: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    password: str
 
 
 class SessionResponse(BaseModel):
@@ -219,6 +232,45 @@ async def me(x_session_id: str = Header(...)):
     if entry is None:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
     return MeResponse(user_id=entry.user_id, email=entry.email, is_admin=entry.is_admin)
+
+
+@router.post("/forgot-password", status_code=200)
+async def forgot_password(body: ForgotPasswordRequest):
+    email = _validate_email(body.email)
+    if not _reset_limiter.allow(email):
+        raise HTTPException(status_code=429, detail="Too many reset requests. Please try again later.")
+    http = get_http()
+    resp = await http.get("/internal/auth/user", params={"email": email})
+    # Always return the same message to avoid email enumeration
+    if not resp.is_success:
+        return {"message": "If that email is registered, a reset link has been sent."}
+    user = resp.json()
+    token = secrets.token_urlsafe(32)
+    await http.post("/internal/auth/password-reset-tokens", json={"user_id": user["user_id"], "token": token})
+    reset_url = f"{settings.APP_URL}/auth/reset-password?token={token}"
+    await send_password_reset_email(email, reset_url)
+    return {"message": "If that email is registered, a reset link has been sent."}
+
+
+@router.post("/reset-password", status_code=200)
+async def reset_password(body: ResetPasswordRequest):
+    token_key = body.token[:8] if len(body.token) >= 8 else body.token
+    if not _reset_verify_limiter.allow(token_key):
+        raise HTTPException(status_code=429, detail="Too many attempts. Please try again later.")
+    _validate_password(body.password)
+    pw_hash = await asyncio.to_thread(
+        bcrypt.hashpw, body.password.encode(), bcrypt.gensalt()
+    )
+    http = get_http()
+    resp = await http.post(
+        "/internal/auth/password-reset",
+        json={"token": body.token, "password_hash": pw_hash.decode()},
+    )
+    if resp.status_code == 400:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset link")
+    if not resp.is_success:
+        raise HTTPException(status_code=502, detail="Password reset failed")
+    return {"message": "Password updated. You can now sign in."}
 
 
 @router.post("/resend", status_code=200)
