@@ -113,6 +113,8 @@ async def health():
 
 if _STATIC_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=_STATIC_DIR / "assets"), name="assets")
+    if (_STATIC_DIR / "vad").is_dir():
+        app.mount("/vad", StaticFiles(directory=_STATIC_DIR / "vad"), name="vad")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str):  # noqa: ARG001
