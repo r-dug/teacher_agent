@@ -38,9 +38,9 @@ def _send_via_resend(to_email: str, verify_url: str, settings) -> None:
     resend.Emails.send({
         "from": settings.FROM_EMAIL,
         "to": [to_email],
-        "subject": "Verify your email — pdf-to-audio",
+        "subject": "Verify your email — Tutorail",
         "html": (
-            "<p>Thanks for signing up!</p>"
+            "<p>Thanks for signing up for Tutorail!</p>"
             "<p>Click the link below to verify your email address. "
             "The link expires in 24 hours.</p>"
             f'<p><a href="{verify_url}">Verify my email</a></p>'

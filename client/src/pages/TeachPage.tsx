@@ -44,6 +44,7 @@ import type { ServerEvent, CurriculumData, CurriculumState, Persona, Voice, SttL
 
 interface TeachPageProps {
   sessionId: string
+  isAdmin?: boolean
 }
 
 interface SketchpadState {
@@ -59,7 +60,7 @@ interface SlideState {
   caption?: string
 }
 
-export function TeachPage({ sessionId }: TeachPageProps) {
+export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
   const { lessonId = '' } = useParams<{ lessonId: string }>()
   const navigate = useNavigate()
 
@@ -538,6 +539,7 @@ export function TeachPage({ sessionId }: TeachPageProps) {
     sttModels,
     selectedSttModelId,
     onSttModelChange: setSelectedSttModelId,
+    isAdmin,
     onViewPage: (pageStart: number, pageEnd: number) => {
       setSlide({ pageStart, pageEnd })
       setMobileSidebarOpen(false)

@@ -110,7 +110,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<HomePage sessionId={sessionId} onLogout={onLogout} isAdmin={isAdmin} />} />
           <Route path="/courses/:courseId" element={<CoursePage sessionId={sessionId} />} />
-          <Route path="/teach/:lessonId" element={<TeachPage sessionId={sessionId} />} />
+          <Route path="/teach/:lessonId" element={<TeachPage sessionId={sessionId} isAdmin={isAdmin} />} />
           <Route path="/admin/usage" element={
             <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
               <UsageDashboardPage sessionId={sessionId} isAdmin={isAdmin} />

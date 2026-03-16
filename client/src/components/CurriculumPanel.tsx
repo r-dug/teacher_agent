@@ -23,6 +23,7 @@ interface CurriculumPanelProps {
   sttModels: SttModel[]
   selectedSttModelId: string
   onSttModelChange: (id: string) => void
+  isAdmin?: boolean
   onViewPage?: (pageStart: number, pageEnd: number) => void
 }
 
@@ -52,6 +53,7 @@ export function CurriculumPanel({
   voices, selectedVoiceId, onVoiceChange,
   sttLanguages, selectedLangCode, onLangChange,
   sttModels, selectedSttModelId, onSttModelChange,
+  isAdmin = false,
   onViewPage,
 }: CurriculumPanelProps) {
   const sortedPersonas   = sortByRecency(personas,     (p) => p.id,           (p) => p.name, 'persona')
@@ -69,7 +71,7 @@ export function CurriculumPanel({
           ))}
         </SelectRow>
       )}
-      {sortedVoices.length > 0 && (
+      {isAdmin && sortedVoices.length > 0 && (
         <SelectRow label="Voice" value={selectedVoiceId} onChange={(id) => { recordRecent('voice', id); onVoiceChange(id) }}>
           {sortedVoices.map((v) => (
             <option key={v.id} value={v.id}>{v.id}</option>
@@ -83,7 +85,7 @@ export function CurriculumPanel({
           ))}
         </SelectRow>
       )}
-      {sortedSttModels.length > 0 && (
+      {isAdmin && sortedSttModels.length > 0 && (
         <SelectRow label="STT model" value={selectedSttModelId} onChange={(id) => { recordRecent('stt_model', id); onSttModelChange(id) }}>
           {sortedSttModels.map((m) => (
             <option key={m.id} value={m.id}>{m.id}{m.is_default ? ' (default)' : ''}</option>
