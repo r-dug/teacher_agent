@@ -16,7 +16,7 @@ class Settings:
     DB_PATH: Path = Path(os.getenv("DB_PATH", "./storage/db.sqlite3"))
 
     # Models
-    STT_MODEL_SIZE: str = os.getenv("STT_MODEL_SIZE", "medium")
+    STT_MODEL_SIZE: str = os.getenv("STT_MODEL_SIZE", "base")
     LLM_MODEL: str = os.getenv("LLM_MODEL", "claude-sonnet-4-6")
     DEFAULT_VOICE: str = os.getenv("DEFAULT_VOICE", "af_heart")
 
