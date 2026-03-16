@@ -215,16 +215,16 @@ echo "  Services started."
 
 echo "[9/9] Configuring nginx and TLS..."
 
-# Verify DNS resolves and port 80 is reachable before attempting certbot.
-# Note: when using Cloudflare proxy the domain resolves to Cloudflare IPs,
-# not the server's own IP — so we check reachability, not IP equality.
-if curl -sf --max-time 5 "http://$DOMAIN/health" -o /dev/null; then
+# Check nginx is serving locally before attempting certbot.
+# We test localhost directly — avoids Cloudflare HTTPS redirects that would
+# block an external HTTP check before the cert exists.
+if curl -sf --max-time 5 "http://127.0.0.1/health" -o /dev/null; then
     TLS_SKIP=false
 else
     echo ""
-    echo "  WARNING: http://$DOMAIN/health is not reachable yet."
-    echo "  DNS may not have propagated or port 80 may be blocked."
-    echo "  Skipping TLS setup — re-run this script once the domain is reachable."
+    echo "  WARNING: nginx is not responding on port 80."
+    echo "  Check nginx status: sudo systemctl status nginx"
+    echo "  Skipping TLS setup — re-run this script once nginx is up."
     echo ""
     TLS_SKIP=true
 fi
