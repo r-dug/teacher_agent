@@ -55,7 +55,7 @@ sudo apt-get install -y -qq \
     nginx certbot python3-certbot-nginx \
     git curl build-essential \
     libmagic1 pkg-config bubblewrap ffmpeg \
-    sqlite3
+    sqlite3 libportaudio2
 
 # ── 2. uv ─────────────────────────────────────────────────────────────────────
 
@@ -215,18 +215,25 @@ echo "  Services started."
 
 echo "[9/9] Configuring nginx and TLS..."
 
-# Check nginx is serving locally before attempting certbot.
-# We test localhost directly — avoids Cloudflare HTTPS redirects that would
-# block an external HTTP check before the cert exists.
-if curl -sf --max-time 5 "http://127.0.0.1/health" -o /dev/null; then
-    TLS_SKIP=false
-else
+# Wait for the BFF to be ready (backend loads Kokoro TTS which takes ~30s).
+# Retry for up to 90 seconds before giving up.
+echo "  Waiting for services to be ready (up to 90s)..."
+TLS_SKIP=true
+for i in $(seq 1 18); do
+    if curl -sf --max-time 5 "http://127.0.0.1/health" -o /dev/null; then
+        TLS_SKIP=false
+        break
+    fi
+    echo "  ... attempt $i/18, retrying in 5s"
+    sleep 5
+done
+
+if [ "$TLS_SKIP" = "true" ]; then
     echo ""
-    echo "  WARNING: nginx is not responding on port 80."
-    echo "  Check nginx status: sudo systemctl status nginx"
-    echo "  Skipping TLS setup — re-run this script once nginx is up."
+    echo "  WARNING: services did not become ready within 90s."
+    echo "  Check logs: journalctl -u pdf-backend -n 30"
+    echo "  Skipping TLS setup — re-run this script once services are up."
     echo ""
-    TLS_SKIP=true
 fi
 
 # Write nginx config (HTTP first; certbot will add HTTPS block)
