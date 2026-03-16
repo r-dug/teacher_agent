@@ -234,7 +234,7 @@ async def ws_session(
         except Exception as exc:
             log.exception("[auto-start] intro turn raised")
             state.turn_status = "failed"
-            await websocket.send_json({"event": "error", "message": str(exc)})
+            await websocket.send_json({"event": "error", "message": str(exc) or type(exc).__name__})
 
     async def _handle_intro_turn(user_text: str, turn_id: str) -> None:
         """
@@ -269,7 +269,7 @@ async def ws_session(
         except Exception as exc:
             log.exception("[intro-turn] raised")
             state.turn_status = "failed"
-            await websocket.send_json({"event": "error", "message": str(exc)})
+            await websocket.send_json({"event": "error", "message": str(exc) or type(exc).__name__})
 
     async def _deferred_decompose() -> None:
         """Run goal-informed decomposition after the intro, then push decompose_complete."""
@@ -328,7 +328,7 @@ async def ws_session(
         except Exception as exc:
             log.exception("[first-teaching] raised")
             state.turn_status = "failed"
-            await websocket.send_json({"event": "error", "message": str(exc)})
+            await websocket.send_json({"event": "error", "message": str(exc) or type(exc).__name__})
 
     state.deferred_decompose_fn = _deferred_decompose
     state.first_teaching_task_fn = lambda: asyncio.create_task(_first_teaching_turn())
@@ -712,7 +712,7 @@ async def _handle_audio_input(
         except Exception as exc:
             log.exception("[turn %s] agent turn raised", turn_id)
             state.turn_status = "failed"
-            await websocket.send_json({"event": "error", "message": str(exc)})
+            await websocket.send_json({"event": "error", "message": str(exc) or type(exc).__name__})
 
     state.agent_task = asyncio.create_task(_run_turn())
 
@@ -763,7 +763,7 @@ async def _handle_text_message(
         except Exception as exc:
             log.exception("[text_message] agent turn raised")
             state.turn_status = "failed"
-            await websocket.send_json({"event": "error", "message": str(exc)})
+            await websocket.send_json({"event": "error", "message": str(exc) or type(exc).__name__})
 
     state.agent_task = asyncio.create_task(_run_turn())
 
@@ -852,7 +852,7 @@ async def _handle_voice_message(
         except Exception as exc:
             log.exception("[voice_message] agent turn raised")
             state.turn_status = "failed"
-            await websocket.send_json({"event": "error", "message": str(exc)})
+            await websocket.send_json({"event": "error", "message": str(exc) or type(exc).__name__})
 
     state.agent_task = asyncio.create_task(_run_turn())
 
@@ -906,7 +906,7 @@ async def _handle_image_input(
         except Exception as exc:
             log.exception("[turn %s] annotation turn raised", turn_id)
             state.turn_status = "failed"
-            await websocket.send_json({"event": "error", "message": str(exc)})
+            await websocket.send_json({"event": "error", "message": str(exc) or type(exc).__name__})
 
     state.agent_task = asyncio.create_task(_run_annotation_turn())
 
