@@ -113,6 +113,23 @@ async def auth_register(body: AuthRegisterRequest, conn: Conn):
     )
 
 
+@router.get("/auth/user-by-session/{session_id}", response_model=AuthUserResponse)
+async def auth_get_user_by_session(session_id: str, conn: Conn):
+    """Look up a user by session_id — used by the BFF to restore sessions after restart."""
+    session = await models.get_session(conn, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    user = await models.get_user_by_id(conn, session["user_id"])
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return AuthUserResponse(
+        user_id=user["id"],
+        email=user["email"],
+        email_verified=bool(user["email_verified"]),
+        is_admin=bool(user["is_admin"]),
+    )
+
+
 @router.get("/auth/user", response_model=AuthUserResponse)
 async def auth_get_user(email: str, conn: Conn):
     """Look up a user by email for login; returns password_hash for BFF to verify."""

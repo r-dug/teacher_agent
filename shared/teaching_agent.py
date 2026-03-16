@@ -95,6 +95,30 @@ def _strip_dangling_tool_use(messages: list[dict]) -> None:
                         continue  # re-check at same index
         i += 1
 
+    # Pass 2: remove user messages whose tool_result blocks have no matching
+    # tool_use in the immediately preceding assistant message.
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if msg.get("role") == "user":
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                result_ids = {
+                    b.get("tool_use_id") for b in content
+                    if isinstance(b, dict) and b.get("type") == "tool_result"
+                }
+                if result_ids:
+                    prev_msg = messages[i - 1] if i > 0 else None
+                    prev_content = prev_msg.get("content", []) if prev_msg else []
+                    tool_ids = {
+                        b.get("id") for b in (prev_content if isinstance(prev_content, list) else [])
+                        if isinstance(b, dict) and b.get("type") == "tool_use"
+                    }
+                    if not result_ids.issubset(tool_ids):
+                        messages.pop(i)
+                        continue
+        i += 1
+
 
 # ── intro goal-gathering tool ──────────────────────────────────────────────────
 

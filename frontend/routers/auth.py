@@ -230,7 +230,18 @@ async def logout(x_session_id: str = Header(...)):
 async def me(x_session_id: str = Header(...)):
     entry = store.get(x_session_id)
     if entry is None:
-        raise HTTPException(status_code=401, detail="Invalid or expired session")
+        # BFF restarted — try to restore the session from the backend DB.
+        http = get_http()
+        resp = await http.get(f"/internal/auth/user-by-session/{x_session_id}")
+        if not resp.is_success:
+            raise HTTPException(status_code=401, detail="Invalid or expired session")
+        user = resp.json()
+        entry = store.add(
+            x_session_id,
+            user_id=user["user_id"],
+            email=user["email"],
+            is_admin=bool(user.get("is_admin", False)),
+        )
     return MeResponse(user_id=entry.user_id, email=entry.email, is_admin=entry.is_admin)
 
 
