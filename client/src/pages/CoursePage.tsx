@@ -4,21 +4,24 @@
  */
 
 import { useEffect, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Drawer } from '@/components/Drawer'
 import { LessonDrawer } from '@/components/LessonDrawer'
+import { CourseChaptersEditor } from '@/components/CourseChaptersEditor'
 import type { Course, Lesson } from '@/lib/types'
 
 interface CoursePageProps {
   sessionId: string
+  isAdmin?: boolean
 }
 
-export function CoursePage({ sessionId }: CoursePageProps) {
+export function CoursePage({ sessionId, isAdmin = false }: CoursePageProps) {
   const { courseId } = useParams<{ courseId: string }>()
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const [course, setCourse] = useState<Course | null>(null)
   const [lessons, setLessons] = useState<Lesson[]>([])
@@ -26,6 +29,8 @@ export function CoursePage({ sessionId }: CoursePageProps) {
   const [error, setError] = useState<string | null>(null)
 
   const [lessonDrawer, setLessonDrawer] = useState<{ mode: 'create' | 'edit'; lesson?: Lesson } | null>(null)
+  const [chaptersDrawerOpen, setChaptersDrawerOpen] = useState(false)
+  const [publishing, setPublishing] = useState(false)
 
   useEffect(() => {
     if (!courseId) return
@@ -50,6 +55,15 @@ export function CoursePage({ sessionId }: CoursePageProps) {
     load()
   }, [courseId, sessionId])
 
+  useEffect(() => {
+    if (!isAdmin) return
+    if (searchParams.get('chapters') !== '1') return
+    setChaptersDrawerOpen(true)
+    const next = new URLSearchParams(searchParams)
+    next.delete('chapters')
+    setSearchParams(next, { replace: true })
+  }, [isAdmin, searchParams, setSearchParams])
+
   function handleLessonUpdated(lesson: Lesson) {
     if (lesson.course_id !== courseId) {
       // moved out of this course
@@ -61,6 +75,37 @@ export function CoursePage({ sessionId }: CoursePageProps) {
 
   function handleLessonDeleted(lessonId: string) {
     setLessons((prev) => prev.filter((l) => l.id !== lessonId))
+  }
+
+  async function handlePublishToAllUsers() {
+    if (!course || publishing) return
+    const ok = confirm(
+      `Publish "${course.title}" to all users?\n\n` +
+      "Only lessons that already finished decomposition will be included.\n" +
+      "Existing published copies will be reset to the starting point."
+    )
+    if (!ok) return
+
+    setPublishing(true)
+    setError(null)
+    try {
+      const res = await fetch(`/api/courses/${course.id}/publish`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Session-Id': sessionId },
+        body: JSON.stringify({}),
+      })
+      const payload = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(payload?.detail || 'Failed to publish course')
+
+      const skipped = Number(payload.skipped_lessons || 0)
+      const base = `Published to ${payload.target_users ?? 0} users.`
+      const extra = skipped > 0 ? ` ${skipped} undecomposed lesson(s) were skipped.` : ''
+      alert(base + extra)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to publish')
+    } finally {
+      setPublishing(false)
+    }
   }
 
   // Progress bar component
@@ -95,12 +140,34 @@ export function CoursePage({ sessionId }: CoursePageProps) {
             <div className="h-7 w-48 rounded bg-[hsl(var(--muted))] animate-pulse" />
           )}
         </div>
-        <Button
-          size="sm"
-          onClick={() => setLessonDrawer({ mode: 'create' })}
-        >
-          + Add Lesson
-        </Button>
+        {isAdmin && (
+          <Button
+            size="sm"
+            onClick={() => setLessonDrawer({ mode: 'create' })}
+          >
+            + Add Lesson
+          </Button>
+        )}
+        {isAdmin && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setChaptersDrawerOpen(true)}
+            disabled={!course}
+          >
+            Edit Chapters
+          </Button>
+        )}
+        {isAdmin && (
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={handlePublishToAllUsers}
+            disabled={publishing || !course}
+          >
+            {publishing ? 'Publishing…' : 'Publish To All Users'}
+          </Button>
+        )}
       </div>
 
       {error && <p className="text-sm text-[hsl(var(--destructive))]">{error}</p>}
@@ -184,6 +251,22 @@ export function CoursePage({ sessionId }: CoursePageProps) {
             onUpdated={handleLessonUpdated}
             onDeleted={handleLessonDeleted}
           />
+        )}
+      </Drawer>
+
+      {/* Chapter draft editor */}
+      <Drawer
+        open={chaptersDrawerOpen}
+        onClose={() => setChaptersDrawerOpen(false)}
+        title="Chapter Drafts"
+      >
+        {courseId ? (
+          <CourseChaptersEditor
+            sessionId={sessionId}
+            courseId={courseId}
+          />
+        ) : (
+          <p className="text-sm text-[hsl(var(--muted-foreground))]">Course not found.</p>
         )}
       </Drawer>
     </div>

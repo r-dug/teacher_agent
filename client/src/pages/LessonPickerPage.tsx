@@ -53,7 +53,7 @@ export function LessonPickerPage({ sessionId, onLogout, isAdmin }: LessonPickerP
       form.append('session_id', sessionId)
       const uploadRes = await fetch('/api/lessons/decompose', {
         method: 'POST',
-        headers: { 'X-Upload-Token': token },
+        headers: { 'X-Upload-Token': token, 'X-Session-Id': sessionId },
         body: form,
       })
       if (!uploadRes.ok) throw new Error('Upload failed')
@@ -81,13 +81,15 @@ export function LessonPickerPage({ sessionId, onLogout, isAdmin }: LessonPickerP
             className="hidden"
             onChange={handleFileChange}
           />
-          <Button
-            onClick={() => fileRef.current?.click()}
-            disabled={uploading}
-            size="sm"
-          >
-            {uploading ? 'Uploading…' : 'Upload PDF'}
-          </Button>
+          {isAdmin && (
+            <Button
+              onClick={() => fileRef.current?.click()}
+              disabled={uploading}
+              size="sm"
+            >
+              {uploading ? 'Uploading…' : 'Upload PDF'}
+            </Button>
+          )}
           {isAdmin && (
             <Button variant="ghost" size="sm" onClick={() => navigate('/admin/usage')}>
               Usage

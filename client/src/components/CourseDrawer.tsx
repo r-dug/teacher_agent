@@ -2,7 +2,7 @@
  * Slide-in drawer for creating or editing a course.
  */
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import type { Course } from '@/lib/types'
 
@@ -11,7 +11,7 @@ interface CourseDrawerProps {
   mode: 'create' | 'edit'
   course?: Course
   onClose: () => void
-  onCreated?: (course: Course) => void
+  onCreated?: (course: Course, options?: { openChapters?: boolean }) => void
   onUpdated?: (course: Course) => void
   onDeleted?: (courseId: string) => void
 }
@@ -25,10 +25,20 @@ export function CourseDrawer({
   onUpdated,
   onDeleted,
 }: CourseDrawerProps) {
+  const fileRef = useRef<HTMLInputElement>(null)
   const [title, setTitle] = useState(course?.title ?? '')
   const [description, setDescription] = useState(course?.description ?? '')
+  const [textbookFile, setTextbookFile] = useState<File | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0] ?? null
+    setTextbookFile(f)
+    if (f && !title.trim()) {
+      setTitle(f.name.replace(/\.pdf$/i, ''))
+    }
+  }
 
   async function handleSave() {
     if (!title.trim()) {
@@ -39,14 +49,34 @@ export function CourseDrawer({
     setError(null)
     try {
       if (mode === 'create') {
-        const res = await fetch('/api/courses', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Session-Id': sessionId },
-          body: JSON.stringify({ title: title.trim(), description: description.trim() || null }),
-        })
-        if (!res.ok) throw new Error('Failed to create course')
-        const created = (await res.json()) as Course
-        onCreated?.(created)
+        let created: Course
+        let openChapters = false
+        if (textbookFile) {
+          const form = new FormData()
+          form.append('file', textbookFile)
+          form.append('title', title.trim())
+          if (description.trim()) form.append('description', description.trim())
+
+          const res = await fetch('/api/courses/textbook/draft', {
+            method: 'POST',
+            headers: { 'X-Session-Id': sessionId },
+            body: form,
+          })
+          const payload = await res.json().catch(() => ({}))
+          if (!res.ok) throw new Error(payload?.detail || 'Failed to create textbook course')
+          created = payload.course as Course
+          openChapters = true
+        } else {
+          const res = await fetch('/api/courses', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Session-Id': sessionId },
+            body: JSON.stringify({ title: title.trim(), description: description.trim() || null }),
+          })
+          const payload = await res.json().catch(() => ({}))
+          if (!res.ok) throw new Error(payload?.detail || 'Failed to create course')
+          created = payload as Course
+        }
+        onCreated?.(created, { openChapters })
         onClose()
       } else {
         const res = await fetch(`/api/courses/${course!.id}`, {
@@ -88,6 +118,30 @@ export function CourseDrawer({
 
   return (
     <div className="space-y-4">
+      {mode === 'create' && (
+        <div>
+          <label className="mb-1 block text-sm font-medium">Textbook PDF <span className="text-[hsl(var(--muted-foreground))]">(optional)</span></label>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="application/pdf"
+            className="hidden"
+            onChange={handleFileChange}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => fileRef.current?.click()}
+            disabled={saving}
+          >
+            {textbookFile ? textbookFile.name : 'Choose Textbook PDF…'}
+          </Button>
+          <p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">
+            Uploading here runs a TOC pass and creates editable chapter drafts.
+          </p>
+        </div>
+      )}
+
       {/* Course name */}
       <div>
         <label className="mb-1 block text-sm font-medium">Course name</label>
@@ -120,7 +174,7 @@ export function CourseDrawer({
       {/* Actions */}
       <div className="flex items-center gap-2 pt-2">
         <Button onClick={handleSave} disabled={saving} size="sm">
-          {saving ? 'Saving…' : mode === 'create' ? 'Create Course' : 'Save'}
+          {saving ? 'Saving…' : mode === 'create' ? (textbookFile ? 'Create Textbook Course' : 'Create Course') : 'Save'}
         </Button>
         <Button variant="ghost" size="sm" onClick={onClose} disabled={saving}>
           Cancel

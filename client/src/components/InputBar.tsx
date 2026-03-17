@@ -8,7 +8,7 @@
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { Mic, Square, Send, Trash2 } from 'lucide-react'
+import { Mic, Send, Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { Recorder } from '@/lib/audio/recorder'
@@ -168,6 +168,10 @@ export function InputBar({
     if (audioRecording) stopAudioRecording()
     else void startAudioRecording()
   }, [audioRecording, startAudioRecording, stopAudioRecording])
+  // Voice-message controls are temporarily hidden in the UI, but we keep this
+  // callback wired for fast re-enable without rewriting recorder logic.
+  // sure, that's fine.
+  void toggleAudioRecording
 
   const discardPendingAudio = useCallback(() => {
     if (pendingAudio) URL.revokeObjectURL(pendingAudio.objectUrl)
@@ -270,20 +274,7 @@ export function InputBar({
         )}
       </div>
 
-      {/* Voice record button (right of textarea) */}
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={toggleAudioRecording}
-        disabled={disabled || sttActive || !!pendingAudio}
-        aria-label={audioRecording ? 'Stop recording' : 'Record voice message'}
-        className={cn(
-          'shrink-0 transition-colors',
-          audioRecording && 'text-red-500',
-        )}
-      >
-        {audioRecording ? <Square className="h-4 w-4 fill-current" /> : <Mic className="h-4 w-4" />}
-      </Button>
+        {/* we do not want the voice recording button.... do not add it back in... */}
 
       {/* Send button */}
       <Button

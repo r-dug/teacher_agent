@@ -40,12 +40,26 @@ _PRICING: dict[str, dict[str, float]] = {
     "claude-opus-4-6":    {"input": 15e-6,   "output": 75e-6,   "cache_read": 1.50e-6,  "cache_write": 18.75e-6},
     "claude-haiku-4-5":   {"input": 0.25e-6, "output": 1.25e-6, "cache_read": 0.03e-6,  "cache_write": 0.30e-6},
     "claude-haiku-4-5-20251001": {"input": 0.25e-6, "output": 1.25e-6, "cache_read": 0.03e-6, "cache_write": 0.30e-6},
+    # OpenAI text models (USD/token; model names may include date suffixes).
+    "gpt-4o-mini": {"input": 0.15e-6, "output": 0.60e-6, "cache_read": 0.075e-6, "cache_write": 0.0},
+    "gpt-4o": {"input": 2.50e-6, "output": 10.0e-6, "cache_read": 1.25e-6, "cache_write": 0.0},
+    "gpt-5-mini": {"input": 0.25e-6, "output": 2.0e-6, "cache_read": 0.025e-6, "cache_write": 0.0},
+    "gpt-5": {"input": 1.25e-6, "output": 10.0e-6, "cache_read": 0.125e-6, "cache_write": 0.0},
+    "gpt-5.4": {"input": 2.50e-6, "output": 15.0e-6, "cache_read": 0.25e-6, "cache_write": 0.0},
 }
 _DEFAULT_PRICING = {"input": 3e-6, "output": 15e-6, "cache_read": 0.30e-6, "cache_write": 3.75e-6}
 
 
 def _api_cost(model: str, inp: int, out: int, cr: int, cw: int) -> float:
-    p = _PRICING.get(model) or _PRICING.get(model.split("-20")[0], _DEFAULT_PRICING)
+    p = _PRICING.get(model)
+    if p is None:
+        # Support dated or suffixed model IDs (e.g. gpt-4o-mini-2025-xx).
+        for prefix, pricing in sorted(_PRICING.items(), key=lambda kv: len(kv[0]), reverse=True):
+            if model.startswith(prefix):
+                p = pricing
+                break
+    if p is None:
+        p = _PRICING.get(model.split("-20")[0], _DEFAULT_PRICING)
     return inp * p["input"] + out * p["output"] + cr * p["cache_read"] + cw * p["cache_write"]
 
 
@@ -152,6 +166,7 @@ class UsageTracker:
         stt_language: str,
         audio_seconds: float,
         transcription_ms: int,
+        cost_usd: float = 0.0,
         user_id: str = "",
     ) -> None:
         """Record a local STT transcription.  Safe to call from any thread."""
@@ -159,6 +174,7 @@ class UsageTracker:
             ts=time.time(), user_id=user_id, event_type="stt",
             stt_model=stt_model, stt_language=stt_language,
             audio_seconds=audio_seconds, transcription_ms=transcription_ms,
+            cost_usd=cost_usd,
         )
 
     def record_tts(
@@ -167,6 +183,7 @@ class UsageTracker:
         tts_characters: int,
         tts_audio_seconds: float,
         tts_synthesis_ms: int,
+        cost_usd: float = 0.0,
         user_id: str = "",
     ) -> None:
         """Record a local TTS synthesis.  Safe to call from any thread."""
@@ -174,6 +191,7 @@ class UsageTracker:
             ts=time.time(), user_id=user_id, event_type="tts",
             tts_voice=tts_voice, tts_characters=tts_characters,
             tts_audio_seconds=tts_audio_seconds, tts_synthesis_ms=tts_synthesis_ms,
+            cost_usd=cost_usd,
         )
 
     # ── In-memory summary (backward-compat for TokenUsageDisplay) ─────────────

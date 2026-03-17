@@ -256,6 +256,8 @@ async def decompose_pdf(
         raise HTTPException(status_code=401, detail="Invalid or expired upload token")
 
     user_id: str = session["user_id"]
+    if not await models.get_user_is_admin(conn, user_id):
+        raise HTTPException(status_code=403, detail="Admin access required")
 
     # Derive title: prefer user-supplied name, fall back to filename stem
     title = (lesson_name.strip() if lesson_name and lesson_name.strip()

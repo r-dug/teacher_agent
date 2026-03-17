@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +119,163 @@ def _strip_dangling_tool_use(messages: list[dict]) -> None:
                         messages.pop(i)
                         continue
         i += 1
+
+
+def _tool_schema_to_openai(tool: dict) -> dict:
+    """Convert Anthropic-style tool schema to OpenAI Chat Completions format."""
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.get("name", ""),
+            "description": tool.get("description", ""),
+            "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
+        },
+    }
+
+
+def _tool_result_content_to_text_and_images(content) -> tuple[str, list[dict]]:
+    """
+    Convert Anthropic tool_result content to a tool text payload plus optional
+    user multimodal blocks (for image-bearing submissions).
+    """
+    if isinstance(content, str):
+        text = content.strip()
+        return (text if text else "OK"), []
+
+    if not isinstance(content, list):
+        return "OK", []
+
+    text_parts: list[str] = []
+    user_blocks: list[dict] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            txt = (block.get("text") or "").strip()
+            if txt:
+                text_parts.append(txt)
+        elif btype == "image":
+            src = block.get("source") or {}
+            if src.get("type") == "base64":
+                media_type = src.get("media_type", "image/png")
+                data = src.get("data", "")
+                if data:
+                    user_blocks.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{media_type};base64,{data}"},
+                    })
+
+    tool_text = "\n".join(text_parts).strip()
+    if not tool_text and user_blocks:
+        tool_text = f"Student submitted {len(user_blocks)} image(s)."
+    if not tool_text:
+        tool_text = "OK"
+
+    if user_blocks:
+        user_blocks.insert(0, {"type": "text", "text": "Tool result images from the student."})
+    return tool_text, user_blocks
+
+
+def _messages_to_openai(messages: list[dict]) -> list[dict]:
+    """
+    Convert internal Anthropic-style message history to OpenAI chat messages.
+
+    This preserves tool-call chains and also forwards image-bearing tool results
+    as follow-up user multimodal messages.
+    """
+    out: list[dict] = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+
+        if isinstance(content, str):
+            out.append({"role": role, "content": content})
+            continue
+
+        if not isinstance(content, list):
+            out.append({"role": role, "content": str(content)})
+            continue
+
+        if role == "assistant":
+            text_parts: list[str] = []
+            tool_calls: list[dict] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    txt = (block.get("text") or "").strip()
+                    if txt:
+                        text_parts.append(txt)
+                elif btype == "tool_use":
+                    try:
+                        args_json = json.dumps(block.get("input") or {})
+                    except Exception:
+                        args_json = "{}"
+                    tool_calls.append({
+                        "id": block.get("id") or "",
+                        "type": "function",
+                        "function": {
+                            "name": block.get("name") or "",
+                            "arguments": args_json,
+                        },
+                    })
+
+            if text_parts or tool_calls:
+                msg_out: dict = {
+                    "role": "assistant",
+                    "content": "\n".join(text_parts).strip() if text_parts else None,
+                }
+                if tool_calls:
+                    msg_out["tool_calls"] = tool_calls
+                out.append(msg_out)
+            continue
+
+        if role == "user":
+            plain_text_parts: list[str] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    txt = (block.get("text") or "").strip()
+                    if txt:
+                        plain_text_parts.append(txt)
+                elif btype == "tool_result":
+                    tool_call_id = block.get("tool_use_id") or ""
+                    tool_text, user_blocks = _tool_result_content_to_text_and_images(
+                        block.get("content")
+                    )
+                    out.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": tool_text,
+                    })
+                    if user_blocks:
+                        out.append({"role": "user", "content": user_blocks})
+
+            if plain_text_parts:
+                out.append({"role": "user", "content": "\n".join(plain_text_parts).strip()})
+            continue
+
+        # Fallback for unexpected roles
+        out.append({"role": "user", "content": json.dumps(content)})
+
+    return out
+
+
+def _format_openai_chat_error(response) -> str:
+    """Best-effort extraction of OpenAI chat API error details."""
+    try:
+        data = response.json()
+    except Exception:
+        text = getattr(response, "text", "")
+        return f"{getattr(response, 'status_code', 'error')} {text[:300]}"
+    message = (data.get("error") or {}).get("message")
+    if message:
+        return f"{getattr(response, 'status_code', 'error')} {message}"
+    return f"{getattr(response, 'status_code', 'error')} {str(data)[:300]}"
 
 
 # ── intro goal-gathering tool ──────────────────────────────────────────────────
@@ -695,6 +853,14 @@ class TeachingAgent:
     def __init__(
         self,
         llm_model: str,
+        teach_llm_provider: str = "anthropic",
+        teach_llm_model: str | None = None,
+        openai_api_key: str | None = None,
+        openai_timeout_seconds: float = 30.0,
+        openai_max_retries: int = 1,
+        tts_provider=None,
+        fallback_tts_provider=None,
+        tts_voice: str | None = None,
         kokoro_pipeline=None,
         kokoro_voice: str = DEFAULT_KOKORO_VOICE,
         accent: str = DEFAULT_ACCENT,
@@ -716,10 +882,18 @@ class TeachingAgent:
         on_turn_complete: Callable[[np.ndarray | None], None] | None = None,
         on_response_end: Callable[[], None] | None = None,
         on_tts_playing: Callable[[bool], None] | None = None,
-        on_tts_done: Callable[[str, int, float, int], None] | None = None,
+        on_tts_done: Callable[..., None] | None = None,
         on_error: Callable[[str], None] | None = None,
     ):
         self._llm_model = llm_model
+        self._teach_llm_provider = (teach_llm_provider or "anthropic").strip().lower()
+        self._teach_llm_model = teach_llm_model or llm_model
+        self._openai_api_key = (openai_api_key or "").strip()
+        self._openai_timeout_seconds = max(1.0, float(openai_timeout_seconds))
+        self._openai_max_retries = max(0, int(openai_max_retries))
+        self.tts_provider = tts_provider
+        self.fallback_tts_provider = fallback_tts_provider
+        self.tts_voice = tts_voice or kokoro_voice
         self.kokoro_pipeline = kokoro_pipeline
         self.kokoro_voice = kokoro_voice
         self.accent = accent
@@ -754,6 +928,12 @@ class TeachingAgent:
     @property
     def audio_turns(self) -> list[list[np.ndarray]]:
         return self._audio_turns
+
+    def set_tts_voice(self, voice: str) -> None:
+        """Set the currently selected voice for the active provider."""
+        self.tts_voice = voice
+        # Keep backward compatibility with older code paths.
+        self.kokoro_voice = voice
 
     def decompose_pdf(
         self,
@@ -1053,6 +1233,39 @@ class TeachingAgent:
             return result
         except Exception:
             return text
+
+    def _prepare_tts_text_for_provider(self, provider, text: str) -> str:
+        """Apply provider-specific preprocessing rules before synthesis."""
+        if getattr(provider, "requires_preprocessing", False):
+            return self.prepare_for_tts(text)
+        return text
+
+    def _emit_tts_done(
+        self,
+        voice: str,
+        characters: int,
+        audio_seconds: float,
+        synthesis_ms: int,
+        estimated_cost_usd: float,
+    ) -> None:
+        """Call on_tts_done with backwards compatibility for 4-arg callbacks."""
+        if not self._on_tts_done:
+            return
+        try:
+            self._on_tts_done(
+                voice,
+                characters,
+                audio_seconds,
+                synthesis_ms,
+                estimated_cost_usd,
+            )
+        except TypeError:
+            self._on_tts_done(
+                voice,
+                characters,
+                audio_seconds,
+                synthesis_ms,
+            )
 
     def run_intro_turn(
         self,
@@ -1472,6 +1685,103 @@ class TeachingAgent:
             self._on_token_usage("episode_condensation", self._llm_model, response.usage)
         return response.content[0].text.strip()
 
+    def _openai_chat_turn(
+        self,
+        *,
+        model: str,
+        system: str,
+        messages: list[dict],
+        tools: list | None,
+    ) -> tuple[list[dict], str, object]:
+        """
+        Execute one OpenAI chat-completions turn and return:
+          - assistant content blocks in internal format
+          - assistant text
+          - usage object compatible with record_api expectations
+        """
+        import httpx
+
+        if not self._openai_api_key:
+            raise RuntimeError("OPENAI_API_KEY is not configured for OpenAI teaching turns.")
+
+        payload: dict = {
+            "model": model,
+            "max_tokens": 2048,
+            "messages": [{"role": "system", "content": system}] + _messages_to_openai(messages),
+        }
+        if tools:
+            payload["tools"] = [_tool_schema_to_openai(t) for t in tools]
+
+        headers = {"Authorization": f"Bearer {self._openai_api_key}"}
+        url = "https://api.openai.com/v1/chat/completions"
+        last_err: Exception | None = None
+
+        for attempt in range(self._openai_max_retries + 1):
+            try:
+                with httpx.Client(timeout=self._openai_timeout_seconds) as client:
+                    resp = client.post(url, headers=headers, json=payload)
+                if resp.status_code >= 400:
+                    raise RuntimeError(_format_openai_chat_error(resp))
+
+                data = resp.json()
+                choice = (data.get("choices") or [{}])[0]
+                message = choice.get("message") or {}
+
+                raw_content = message.get("content") or ""
+                if isinstance(raw_content, list):
+                    text_parts = []
+                    for part in raw_content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            txt = (part.get("text") or "").strip()
+                            if txt:
+                                text_parts.append(txt)
+                    content_text = "\n".join(text_parts).strip()
+                else:
+                    content_text = str(raw_content).strip()
+
+                content_blocks: list[dict] = []
+                if content_text:
+                    content_blocks.append({"type": "text", "text": content_text})
+
+                for tc in message.get("tool_calls") or []:
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function") or {}
+                    args_raw = fn.get("arguments") or "{}"
+                    try:
+                        parsed_args = (
+                            json.loads(args_raw)
+                            if isinstance(args_raw, str)
+                            else (args_raw if isinstance(args_raw, dict) else {})
+                        )
+                    except Exception:
+                        parsed_args = {}
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": tc.get("id") or "",
+                        "name": fn.get("name") or "",
+                        "input": parsed_args,
+                    })
+
+                usage = data.get("usage") or {}
+                usage_obj = SimpleNamespace(
+                    input_tokens=int(usage.get("prompt_tokens") or 0),
+                    output_tokens=int(usage.get("completion_tokens") or 0),
+                    cache_read_input_tokens=int(
+                        (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+                    ),
+                    cache_creation_input_tokens=0,
+                )
+
+                return content_blocks, content_text, usage_obj
+            except Exception as exc:
+                last_err = exc
+                if attempt >= self._openai_max_retries:
+                    break
+                time.sleep(min(0.2 * (2**attempt), 1.0))
+
+        raise RuntimeError(f"OpenAI teaching turn failed: {last_err}") from last_err
+
     def _do_single_llm_turn(
         self,
         curriculum: Curriculum,
@@ -1487,9 +1797,8 @@ class TeachingAgent:
         Appends the assistant message to messages.
         Returns the first tool_use block, or None if no tool was called.
         """
-        import anthropic
-
-        client = anthropic.Anthropic(max_retries=6)
+        llm_provider = self._teach_llm_provider
+        llm_model = self._teach_llm_model or self._llm_model
         if _system is not None:
             system = _system
         else:
@@ -1520,11 +1829,61 @@ class TeachingAgent:
         _STOP = object()
 
         def _tts_worker() -> None:
+            active_provider = self.tts_provider
+            fallback_provider = self.fallback_tts_provider
+            fallback_engaged = False
+
             while True:
                 text = tts_queue.get()
                 if text is None:
                     audio_queue.put(_STOP)
                     return
+
+                # Provider path (hybrid mode): OpenAI primary, Kokoro fallback.
+                if active_provider is not None:
+                    try:
+                        speakable_text = self._prepare_tts_text_for_provider(active_provider, text)
+                        result = active_provider.synthesize(speakable_text, self.tts_voice)
+                    except Exception as exc:
+                        if (
+                            not fallback_engaged
+                            and fallback_provider is not None
+                            and active_provider is not fallback_provider
+                        ):
+                            fallback_engaged = True
+                            active_provider = fallback_provider
+                            if self._on_error:
+                                self._on_error(
+                                    f"TTS provider failed ({exc}). Switching to Kokoro fallback for this turn."
+                                )
+                            try:
+                                speakable_text = self._prepare_tts_text_for_provider(active_provider, text)
+                                result = active_provider.synthesize(speakable_text, self.tts_voice)
+                            except Exception as fallback_exc:
+                                if self._on_error:
+                                    self._on_error(str(fallback_exc))
+                                # Keep turn alive even if speech synthesis fails.
+                                audio_queue.put(np.zeros(0, dtype=np.float32))
+                                continue
+                        else:
+                            if self._on_error:
+                                self._on_error(str(exc))
+                            # Keep turn alive even if speech synthesis fails.
+                            audio_queue.put(np.zeros(0, dtype=np.float32))
+                            continue
+
+                    audio_queue.put(result.audio)
+                    self.kokoro_voice = getattr(result, "voice", self.kokoro_voice)
+                    self._emit_tts_done(
+                        getattr(result, "voice", self.tts_voice),
+                        getattr(result, "characters", len(text)),
+                        len(result.audio) / max(1, getattr(result, "sample_rate", KOKORO_SAMPLE_RATE)),
+                        getattr(result, "synthesis_ms", 0),
+                        float(getattr(result, "estimated_cost_usd", 0.0)),
+                    )
+                    continue
+
+                # Legacy path: local Kokoro only.
                 try:
                     spoken = self.prepare_for_tts(text)
                     t0 = time.monotonic()
@@ -1538,19 +1897,19 @@ class TeachingAgent:
                         else np.zeros(0, dtype=np.float32)
                     )
                     audio_queue.put(combined)
-                    if self._on_tts_done:
-                        tts_audio_seconds = len(combined) / KOKORO_SAMPLE_RATE
-                        self._on_tts_done(
-                            self.kokoro_voice,
-                            len(spoken),
-                            tts_audio_seconds,
-                            synthesis_ms,
-                        )
+                    self._emit_tts_done(
+                        self.kokoro_voice,
+                        len(spoken),
+                        len(combined) / KOKORO_SAMPLE_RATE,
+                        synthesis_ms,
+                        0.0,
+                    )
                 except Exception as e:
                     if self._on_error:
                         self._on_error(str(e))
-                    audio_queue.put(_STOP)
-                    return
+                    # Keep turn alive if TTS fails.
+                    audio_queue.put(np.zeros(0, dtype=np.float32))
+                    continue
 
         def _audio_player() -> None:
             _chunk_idx = 0
@@ -1561,20 +1920,20 @@ class TeachingAgent:
                 turn_chunks.append(audio_data)
                 if audio_data.size > 0:
                     all_audio.append(audio_data)
-                    try:
-                        if self._on_tts_playing:
-                            self._on_tts_playing(True)
-                        if self._on_audio_chunk:
-                            # Backend mode: stream chunk to caller instead of local playback.
-                            self._on_audio_chunk(audio_data, turn_idx, _chunk_idx)
-                        else:
-                            with self._audio_lock:
-                                sd.play(audio_data, samplerate=KOKORO_SAMPLE_RATE)
-                                sd.wait()
-                    except Exception as e:
-                        if self._on_error:
-                            self._on_error(str(e))
-                        return
+                try:
+                    if self._on_tts_playing and audio_data.size > 0:
+                        self._on_tts_playing(True)
+                    if self._on_audio_chunk:
+                        # Backend mode: stream chunk to caller instead of local playback.
+                        self._on_audio_chunk(audio_data, turn_idx, _chunk_idx)
+                    elif audio_data.size > 0:
+                        with self._audio_lock:
+                            sd.play(audio_data, samplerate=KOKORO_SAMPLE_RATE)
+                            sd.wait()
+                except Exception as e:
+                    if self._on_error:
+                        self._on_error(str(e))
+                    return
                 _chunk_idx += 1
 
         tts_thread = threading.Thread(target=_tts_worker, daemon=True)
@@ -1587,52 +1946,99 @@ class TeachingAgent:
         text_buf = ""
 
         try:
-            log.info("_do_single_llm_turn: opening stream (model=%s, messages=%d)", self._llm_model, len(messages))
-            stream_kwargs: dict = dict(
-                model=self._llm_model,
-                max_tokens=2048,
-                system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-                messages=messages,
-            )
-            if tools:
-                stream_kwargs["tools"] = tools
-            with client.messages.stream(**stream_kwargs) as stream:
-                log.info("_do_single_llm_turn: stream opened, firing turn_start")
+            call_type = _call_type or ("intro_turn" if _tools == [] else "teach_turn")
+
+            if llm_provider == "openai":
+                log.info(
+                    "_do_single_llm_turn: opening OpenAI turn (model=%s, messages=%d)",
+                    llm_model,
+                    len(messages),
+                )
                 if self._on_turn_start:
                     self._on_turn_start()
-                for chunk in stream.text_stream:
-                    full_text += chunk
-                    text_buf += chunk
-                    if self._on_text_chunk:
-                        self._on_text_chunk(chunk)
+                content_blocks, content_text, usage = self._openai_chat_turn(
+                    model=llm_model,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                )
+                full_text = content_text
+                if full_text and self._on_text_chunk:
+                    # Non-streaming OpenAI v1 path: emit as one chunk.
+                    self._on_text_chunk(full_text)
+                text_buf += full_text
+                if "\n" in text_buf:
+                    parts = text_buf.split("\n")
+                    for part in parts[:-1]:
+                        if part.strip():
+                            _flush(part.strip())
+                    text_buf = parts[-1]
+                elif len(text_buf.split()) >= 400:
+                    _flush(text_buf.strip())
+                    text_buf = ""
 
-                    if "\n" in text_buf:
-                        parts = text_buf.split("\n")
-                        for part in parts[:-1]:
-                            if part.strip():
-                                _flush(part.strip())
-                        text_buf = parts[-1]
-                    elif len(text_buf.split()) >= 400:
-                        _flush(text_buf.strip())
-                        text_buf = ""
+                if self._on_token_usage:
+                    self._on_token_usage(call_type, llm_model, usage)
 
-                final = stream.get_final_message()
+                messages.append({"role": "assistant", "content": content_blocks})
+                for block in content_blocks:
+                    if block.get("type") == "tool_use":
+                        tool_use_block = SimpleNamespace(
+                            type="tool_use",
+                            id=block.get("id", ""),
+                            name=block.get("name", ""),
+                            input=block.get("input", {}),
+                        )
+                        break
 
-            if self._on_token_usage:
-                call_type = _call_type or ("intro_turn" if _tools == [] else "teach_turn")
-                self._on_token_usage(call_type, self._llm_model, final.usage)
+            else:
+                import anthropic
 
-            # Convert SDK content blocks to plain dicts with only the fields the API
-            # accepts.  model_dump() includes SDK-internal fields like parsed_output
-            # that cause a 400 on the next call.
-            messages.append({"role": "assistant", "content": [
-                _block_to_api_dict(b) for b in final.content
-            ]})
+                client = anthropic.Anthropic(max_retries=6)
+                stream_kwargs: dict = dict(
+                    model=llm_model,
+                    max_tokens=2048,
+                    system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+                    messages=messages,
+                )
+                if tools:
+                    stream_kwargs["tools"] = tools
+                with client.messages.stream(**stream_kwargs) as stream:
+                    log.info("_do_single_llm_turn: stream opened, firing turn_start")
+                    if self._on_turn_start:
+                        self._on_turn_start()
+                    for chunk in stream.text_stream:
+                        full_text += chunk
+                        text_buf += chunk
+                        if self._on_text_chunk:
+                            self._on_text_chunk(chunk)
 
-            for block in final.content:
-                if block.type == "tool_use":
-                    tool_use_block = block
-                    break
+                        if "\n" in text_buf:
+                            parts = text_buf.split("\n")
+                            for part in parts[:-1]:
+                                if part.strip():
+                                    _flush(part.strip())
+                            text_buf = parts[-1]
+                        elif len(text_buf.split()) >= 400:
+                            _flush(text_buf.strip())
+                            text_buf = ""
+
+                    final = stream.get_final_message()
+
+                if self._on_token_usage:
+                    self._on_token_usage(call_type, llm_model, final.usage)
+
+                # Convert SDK content blocks to plain dicts with only the fields the API
+                # accepts.  model_dump() includes SDK-internal fields like parsed_output
+                # that cause a 400 on the next call.
+                messages.append({"role": "assistant", "content": [
+                    _block_to_api_dict(b) for b in final.content
+                ]})
+
+                for block in final.content:
+                    if block.type == "tool_use":
+                        tool_use_block = block
+                        break
 
         except Exception as e:
             log.exception("_do_single_llm_turn: LLM/TTS exception: %s", e)

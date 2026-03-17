@@ -15,6 +15,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
+from frontend.rate_limiter import RateLimiter
 from frontend.session_store import SessionStore
 
 
@@ -159,18 +160,20 @@ async def bff_client():
 
     with patch.object(http_client, "_client", fake_http):
         with patch("frontend.routers.auth.store", fresh_store):
-            with patch(
-                "frontend.routers.auth.send_verification_email",
-                new=AsyncMock(return_value=None),
-            ):
-                async with AsyncClient(
-                    transport=ASGITransport(app=app),
-                    base_url="http://test",
-                ) as ac:
-                    # Expose backend for direct manipulation in tests
-                    ac._fake_backend = backend  # type: ignore[attr-defined]
-                    ac._store = fresh_store     # type: ignore[attr-defined]
-                    yield ac
+            with patch("frontend.routers.auth._register_limiter", RateLimiter(capacity=10.0, refill_rate=10/3600.0)):
+                with patch("frontend.routers.auth._resend_limiter", RateLimiter(capacity=3.0, refill_rate=1/1200.0)):
+                    with patch(
+                        "frontend.routers.auth.send_verification_email",
+                        new=AsyncMock(return_value=None),
+                    ):
+                        async with AsyncClient(
+                            transport=ASGITransport(app=app),
+                            base_url="http://test",
+                        ) as ac:
+                            # Expose backend for direct manipulation in tests
+                            ac._fake_backend = backend  # type: ignore[attr-defined]
+                            ac._store = fresh_store     # type: ignore[attr-defined]
+                            yield ac
 
 
 # ── registration ───────────────────────────────────────────────────────────────
@@ -178,7 +181,7 @@ async def bff_client():
 @pytest.mark.asyncio
 async def test_register_success(bff_client):
     resp = await bff_client.post(
-        "/auth/register",
+        "/api/auth/register",
         json={"email": "alice@example.com", "password": "password123"},
     )
     assert resp.status_code == 201
@@ -188,7 +191,7 @@ async def test_register_success(bff_client):
 @pytest.mark.asyncio
 async def test_register_invalid_email(bff_client):
     resp = await bff_client.post(
-        "/auth/register",
+        "/api/auth/register",
         json={"email": "not-an-email", "password": "password123"},
     )
     assert resp.status_code == 422
@@ -197,7 +200,7 @@ async def test_register_invalid_email(bff_client):
 @pytest.mark.asyncio
 async def test_register_password_too_short(bff_client):
     resp = await bff_client.post(
-        "/auth/register",
+        "/api/auth/register",
         json={"email": "short@example.com", "password": "abc"},
     )
     assert resp.status_code == 422
@@ -206,11 +209,11 @@ async def test_register_password_too_short(bff_client):
 @pytest.mark.asyncio
 async def test_register_duplicate_pending(bff_client):
     await bff_client.post(
-        "/auth/register",
+        "/api/auth/register",
         json={"email": "dup@example.com", "password": "password123"},
     )
     resp = await bff_client.post(
-        "/auth/register",
+        "/api/auth/register",
         json={"email": "dup@example.com", "password": "password123"},
     )
     assert resp.status_code == 409
@@ -225,7 +228,7 @@ async def test_verify_valid_token(bff_client):
 
     # Register to get a user in the backend store
     await bff_client.post(
-        "/auth/register",
+        "/api/auth/register",
         json={"email": "verify@example.com", "password": "password123"},
     )
 
@@ -234,14 +237,14 @@ async def test_verify_valid_token(bff_client):
     assert len(backend._tokens) == 1
     token = next(iter(backend._tokens))
 
-    resp = await bff_client.post("/auth/verify", json={"token": token})
+    resp = await bff_client.post("/api/auth/verify", json={"token": token})
     assert resp.status_code == 200
     assert "session_id" in resp.json()
 
 
 @pytest.mark.asyncio
 async def test_verify_invalid_token(bff_client):
-    resp = await bff_client.post("/auth/verify", json={"token": "bogus"})
+    resp = await bff_client.post("/api/auth/verify", json={"token": "bogus"})
     assert resp.status_code == 400
 
 
@@ -251,10 +254,10 @@ async def _register_and_verify(bff_client, email: str, password: str) -> str:
     """Helper: register + verify + return session_id."""
     backend: FakeBackend = bff_client._fake_backend
 
-    await bff_client.post("/auth/register", json={"email": email, "password": password})
+    await bff_client.post("/api/auth/register", json={"email": email, "password": password})
     token = next(iter(backend._tokens))
 
-    resp = await bff_client.post("/auth/verify", json={"token": token})
+    resp = await bff_client.post("/api/auth/verify", json={"token": token})
     return resp.json()["session_id"]
 
 
@@ -263,7 +266,7 @@ async def test_login_success(bff_client):
     await _register_and_verify(bff_client, "login@example.com", "password123")
 
     resp = await bff_client.post(
-        "/auth/login",
+        "/api/auth/login",
         json={"email": "login@example.com", "password": "password123"},
     )
     assert resp.status_code == 200
@@ -275,7 +278,7 @@ async def test_login_wrong_password(bff_client):
     await _register_and_verify(bff_client, "wp@example.com", "correct-password")
 
     resp = await bff_client.post(
-        "/auth/login",
+        "/api/auth/login",
         json={"email": "wp@example.com", "password": "wrong-password"},
     )
     assert resp.status_code == 401
@@ -284,11 +287,11 @@ async def test_login_wrong_password(bff_client):
 @pytest.mark.asyncio
 async def test_login_unverified(bff_client):
     await bff_client.post(
-        "/auth/register",
+        "/api/auth/register",
         json={"email": "unverified@example.com", "password": "password123"},
     )
     resp = await bff_client.post(
-        "/auth/login",
+        "/api/auth/login",
         json={"email": "unverified@example.com", "password": "password123"},
     )
     assert resp.status_code == 403
@@ -298,7 +301,7 @@ async def test_login_unverified(bff_client):
 @pytest.mark.asyncio
 async def test_login_unknown_email(bff_client):
     resp = await bff_client.post(
-        "/auth/login",
+        "/api/auth/login",
         json={"email": "ghost@example.com", "password": "password123"},
     )
     assert resp.status_code == 401
@@ -310,7 +313,7 @@ async def test_login_unknown_email(bff_client):
 async def test_me_valid_session(bff_client):
     sid = await _register_and_verify(bff_client, "me@example.com", "password123")
 
-    resp = await bff_client.get("/auth/me", headers={"X-Session-Id": sid})
+    resp = await bff_client.get("/api/auth/me", headers={"X-Session-Id": sid})
     assert resp.status_code == 200
     data = resp.json()
     assert data["email"] == "me@example.com"
@@ -319,7 +322,7 @@ async def test_me_valid_session(bff_client):
 
 @pytest.mark.asyncio
 async def test_me_invalid_session(bff_client):
-    resp = await bff_client.get("/auth/me", headers={"X-Session-Id": "fake-session"})
+    resp = await bff_client.get("/api/auth/me", headers={"X-Session-Id": "fake-session"})
     assert resp.status_code == 401
 
 
@@ -332,7 +335,7 @@ async def test_logout(bff_client):
 
     assert store.get(sid) is not None
 
-    resp = await bff_client.post("/auth/logout", headers={"X-Session-Id": sid})
+    resp = await bff_client.post("/api/auth/logout", headers={"X-Session-Id": sid})
     assert resp.status_code == 204
 
     assert store.get(sid) is None
@@ -342,8 +345,8 @@ async def test_logout(bff_client):
 async def test_me_after_logout(bff_client):
     sid = await _register_and_verify(bff_client, "after@example.com", "password123")
 
-    await bff_client.post("/auth/logout", headers={"X-Session-Id": sid})
-    resp = await bff_client.get("/auth/me", headers={"X-Session-Id": sid})
+    await bff_client.post("/api/auth/logout", headers={"X-Session-Id": sid})
+    resp = await bff_client.get("/api/auth/me", headers={"X-Session-Id": sid})
     assert resp.status_code == 401
 
 
@@ -353,12 +356,12 @@ async def test_me_after_logout(bff_client):
 async def test_resend_for_unverified(bff_client):
     backend: FakeBackend = bff_client._fake_backend
     await bff_client.post(
-        "/auth/register",
+        "/api/auth/register",
         json={"email": "resend@example.com", "password": "password123"},
     )
     backend._tokens.clear()  # clear first token
 
-    resp = await bff_client.post("/auth/resend", json={"email": "resend@example.com"})
+    resp = await bff_client.post("/api/auth/resend", json={"email": "resend@example.com"})
     assert resp.status_code == 200
     assert len(backend._tokens) == 1  # new token issued
 
@@ -369,7 +372,7 @@ async def test_resend_for_verified(bff_client):
     await _register_and_verify(bff_client, "done@example.com", "password123")
     backend._tokens.clear()
 
-    resp = await bff_client.post("/auth/resend", json={"email": "done@example.com"})
+    resp = await bff_client.post("/api/auth/resend", json={"email": "done@example.com"})
     assert resp.status_code == 200
     # No new token because email is already verified
     assert len(backend._tokens) == 0
@@ -378,5 +381,5 @@ async def test_resend_for_verified(bff_client):
 @pytest.mark.asyncio
 async def test_resend_for_unknown_email(bff_client):
     # Should return 200 and not reveal whether the email exists
-    resp = await bff_client.post("/auth/resend", json={"email": "nobody@example.com"})
+    resp = await bff_client.post("/api/auth/resend", json={"email": "nobody@example.com"})
     assert resp.status_code == 200

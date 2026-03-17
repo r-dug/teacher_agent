@@ -41,8 +41,9 @@ class BackendAgentSession:
     ----------
     send : async callable that accepts a dict and sends it as JSON over WS.
     loop : the running asyncio event loop (needed for run_coroutine_threadsafe).
-    kokoro_pipeline : loaded KPipeline instance (shared across sessions).
-    kokoro_voice : Kokoro voice name.
+    tts_provider : primary TTS provider adapter.
+    fallback_tts_provider : optional fallback provider adapter.
+    tts_voice : current voice id.
     llm_model : Claude model identifier.
     """
 
@@ -50,9 +51,17 @@ class BackendAgentSession:
         self,
         send: Callable,
         loop: asyncio.AbstractEventLoop,
-        kokoro_pipeline,
+        tts_provider=None,
+        fallback_tts_provider=None,
+        tts_voice: str = DEFAULT_KOKORO_VOICE,
+        kokoro_pipeline=None,
         kokoro_voice: str = DEFAULT_KOKORO_VOICE,
         llm_model: str = "claude-sonnet-4-6",
+        teach_llm_provider: str = "anthropic",
+        teach_llm_model: str | None = None,
+        openai_api_key: str | None = None,
+        openai_timeout_seconds: float = 30.0,
+        openai_max_retries: int = 1,
         pdf_path: str | None = None,
         session_id: str | None = None,
         user_id: str = "",
@@ -62,13 +71,30 @@ class BackendAgentSession:
         self._pdf_path = pdf_path
         self._session_id = session_id
         self._user_id = user_id
+        self._ws_closed = threading.Event()
         # Pending sketchpad invocations: inv_id → (done_event, result_holder)
         self._tool_events: dict[str, tuple[threading.Event, list]] = {}
 
+        if tts_provider is None and kokoro_pipeline is not None:
+            from .tts import KokoroTTSProvider
+
+            tts_provider = KokoroTTSProvider(
+                pipeline=kokoro_pipeline,
+                default_voice=kokoro_voice,
+            )
+
         self.agent = TeachingAgent(
             llm_model=llm_model,
+            tts_provider=tts_provider,
+            fallback_tts_provider=fallback_tts_provider,
+            tts_voice=tts_voice,
             kokoro_pipeline=kokoro_pipeline,
             kokoro_voice=kokoro_voice,
+            teach_llm_provider=teach_llm_provider,
+            teach_llm_model=teach_llm_model,
+            openai_api_key=openai_api_key,
+            openai_timeout_seconds=openai_timeout_seconds,
+            openai_max_retries=openai_max_retries,
             on_turn_start=self._on_turn_start,
             on_text_chunk=self._on_text_chunk,
             on_chunk_ready=self._on_chunk_ready,
@@ -169,8 +195,44 @@ class BackendAgentSession:
 
     def _fire(self, coro) -> None:
         """Schedule *coro* on the event loop and block until it completes."""
+        if self._ws_closed.is_set():
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+            return
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        fut.result()  # propagates exceptions; blocks thread until send done
+        try:
+            fut.result()  # propagates exceptions; blocks thread until send done
+        except Exception as exc:
+            if self._is_ws_send_after_close(exc):
+                self._ws_closed.set()
+                return
+            raise
+
+    @staticmethod
+    def _is_ws_send_after_close(exc: Exception) -> bool:
+        """Best-effort detection for benign websocket send-after-close races."""
+        msg = str(exc)
+        patterns = (
+            "Unexpected ASGI message 'websocket.send'",
+            "after sending 'websocket.close'",
+            "response already completed",
+            "Cannot call \"send\" once a close message has been sent",
+            "WebSocket is not connected",
+        )
+        if any(p in msg for p in patterns):
+            return True
+        cause = getattr(exc, "__cause__", None)
+        if isinstance(cause, Exception):
+            return BackendAgentSession._is_ws_send_after_close(cause)
+        context = getattr(exc, "__context__", None)
+        if isinstance(context, Exception):
+            return BackendAgentSession._is_ws_send_after_close(context)
+        return False
+
+    def close(self) -> None:
+        """Mark WS transport as closed so callback sends become no-ops."""
+        self._ws_closed.set()
 
     # ── TeachingAgent callbacks ────────────────────────────────────────────────
 
@@ -193,6 +255,13 @@ class BackendAgentSession:
     def _on_audio_chunk(
         self, audio: np.ndarray, turn_idx: int, chunk_idx: int
     ) -> None:
+        if audio.size == 0:
+            self._fire(self._send({
+                "event": "chunk_complete",
+                "turn_idx": turn_idx,
+                "chunk_idx": chunk_idx,
+            }))
+            return
         # WebSocket frames are limited to ~1 MB.  Split audio into ≤256 KB
         # sub-chunks (65536 float32 samples ≈ 2.7 s at 24 kHz) to stay well
         # within that limit even after base64 expansion (~33% overhead).
@@ -357,12 +426,14 @@ class BackendAgentSession:
         characters: int,
         audio_seconds: float,
         synthesis_ms: int,
+        estimated_cost_usd: float = 0.0,
     ) -> None:
         app_state.token_tracker.record_tts(
             tts_voice=voice,
             tts_characters=characters,
             tts_audio_seconds=audio_seconds,
             tts_synthesis_ms=synthesis_ms,
+            cost_usd=estimated_cost_usd,
             user_id=self._user_id,
         )
 

@@ -28,7 +28,14 @@ client/public/vad/*.onnx
 client/public/vad/ort.min.js
 client/public/vad/vad.bundle.min.js
 client/public/vad/*.mjs
+# Node modules and TS incremental cache
+client/node_modules/
+client/node_modules/**
+
 
 # Local SQLite runtime data
 storage/*.sqlite3
 storage/*.sqlite3-*
+storage/**
+
+

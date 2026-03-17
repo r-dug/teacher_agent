@@ -18,6 +18,7 @@ export interface Turn {
   role: 'user' | 'assistant'
   /** For user turns: the transcription. For assistant: accumulated text chunks. */
   text: string
+  turnId?: string    // present for user turns (WS turn_id)
   turnIdx?: number   // present for assistant turns (for replay)
   complete?: boolean
   figures?: Figure[]

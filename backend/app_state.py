@@ -14,6 +14,9 @@ class AppState:
     stt_model: Optional[object] = None       # FasterWhisperBackend (default, loaded at startup)
     stt_models: dict = {}                    # model_size → FasterWhisperBackend (lazily loaded)
     kokoro_pipeline: Optional[object] = None  # kokoro.KPipeline
+    tts_provider: Optional[object] = None      # primary provider adapter
+    tts_fallback_provider: Optional[object] = None  # fallback for same-turn resilience
+    active_tts_provider: str = "kokoro"
     token_tracker: TokenUsageTracker = None   # type: ignore[assignment]
 
 

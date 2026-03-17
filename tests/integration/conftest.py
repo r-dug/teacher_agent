@@ -96,7 +96,7 @@ def ws_test_client(tmp_path):
 
     # ── patch STT + teaching agent ─────────────────────────────────────────────
 
-    def _fake_run_turn(self, curriculum, messages, agent_instructions):
+    def _fake_run_turn(self, curriculum, messages, agent_instructions, lesson_goal=None):
         """Sync mock: append one assistant reply and return immediately."""
         messages.append({"role": "assistant", "content": "Let's begin!"})
 

@@ -32,6 +32,9 @@ router = APIRouter(tags=["ws"])
 # Audio input events are expensive (STT → LLM → TTS); cost more tokens.
 _EVENT_COSTS: dict[str, float] = {
     "audio_input": 5.0,
+    "realtime_stream_start": 1.0,
+    "realtime_stream_chunk": 0.2,
+    "realtime_stream_stop": 1.0,
     "tool_result": 1.0,
     "cancel_turn": 1.0,
     "set_instructions": 1.0,

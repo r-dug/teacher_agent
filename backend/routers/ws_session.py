@@ -14,20 +14,39 @@ asyncio.run_coroutine_threadsafe() (see BackendAgentSession in services/agent.py
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import uuid
+from dataclasses import dataclass
 from typing import Annotated
+from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
 import aiosqlite
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from websockets.asyncio.client import connect as ws_connect
 
 from ..app_state import app_state, registry
 from ..config import settings
 from ..db import connection as db, models
 from ..services.agent import BackendAgentSession
-from ..services.stt import transcribe, load_stt_model
+from ..services.realtime import (
+    float32_b64_to_pcm16_b64,
+    pcm16_b64_to_float32,
+    run_realtime_voice_turn,
+    usage_from_realtime,
+)
+from ..services.stt import (
+    OPENAI_STT_MODELS,
+    select_stt_provider,
+    transcribe,
+    transcribe_file,
+    transcribe_file_openai,
+    transcribe_openai,
+    load_stt_model,
+)
 from shared.lesson import Curriculum
 
 router = APIRouter(tags=["ws"])
@@ -36,6 +55,13 @@ router = APIRouter(tags=["ws"])
 # ── dependency shorthand ───────────────────────────────────────────────────────
 
 Conn = Annotated[aiosqlite.Connection, Depends(db.get)]
+
+
+def _normalize_voice_arch(value: str | None) -> str | None:
+    arch = (value or "").strip().lower()
+    if arch in {"chained", "realtime"}:
+        return arch
+    return None
 
 
 # ── per-session state ──────────────────────────────────────────────────────────
@@ -65,6 +91,15 @@ class SessionState:
         self.turn_status: str = "idle"  # 'idle' | 'running' | 'complete' | 'failed'
         self.stt_language: str | None = None  # None = auto-detect
         self.stt_model_size: str | None = None  # None = use app default
+        self.stt_provider: str = settings.effective_stt_provider()  # local | openai
+        self.voice_arch: str = settings.effective_voice_arch()  # chained | realtime
+        self.realtime_turn_idx: int = 0
+        self.realtime_ws = None
+        self.realtime_reader_task: asyncio.Task | None = None
+        self.realtime_send_lock: asyncio.Lock = asyncio.Lock()
+        self.realtime_stream_connected: bool = False
+        self.realtime_streaming: bool = False
+        self.realtime_stream_turn: RealtimeStreamTurn | None = None
         self.code_run_semaphore: asyncio.Semaphore = asyncio.Semaphore(3)
         self.phase: str = "intro"  # 'intro' | 'teaching'
         self.lesson_goal: str | None = None
@@ -75,6 +110,18 @@ class SessionState:
         self.deferred_decompose_fn = None
         self.first_teaching_task_fn = None
         self.handle_intro_turn_fn = None
+
+
+@dataclass(slots=True)
+class RealtimeStreamTurn:
+    turn_id: str
+    turn_idx: int
+    user_text: str = ""
+    assistant_text: str = ""
+    chunk_idx: int = 0
+    transcript_sent: bool = False
+    turn_start_sent: bool = False
+    tts_playing_sent: bool = False
 
 
 # ── WebSocket endpoint ─────────────────────────────────────────────────────────
@@ -157,12 +204,23 @@ async def ws_session(
         str(settings.STORAGE_DIR / lesson["pdf_path"])
         if lesson.get("pdf_path") else None
     )
+    default_tts_voice = (
+        getattr(app_state.tts_provider, "default_voice", "") or settings.default_tts_voice()
+    )
     agent_session = BackendAgentSession(
         send=_send,
         loop=loop,
+        tts_provider=app_state.tts_provider,
+        fallback_tts_provider=app_state.tts_fallback_provider,
+        tts_voice=default_tts_voice,
         kokoro_pipeline=app_state.kokoro_pipeline,
         kokoro_voice=settings.DEFAULT_VOICE,
         llm_model=settings.LLM_MODEL,
+        teach_llm_provider=settings.TEACH_LLM_PROVIDER,
+        teach_llm_model=settings.TEACH_LLM_MODEL,
+        openai_api_key=settings.OPENAI_API_KEY,
+        openai_timeout_seconds=settings.OPENAI_LLM_TIMEOUT_S,
+        openai_max_retries=settings.OPENAI_LLM_MAX_RETRIES,
         pdf_path=pdf_full_path,
         session_id=session_id,
         user_id=session.get("user_id", ""),
@@ -360,6 +418,8 @@ async def ws_session(
     except WebSocketDisconnect:
         pass
     finally:
+        state.agent_session.close()
+        await _close_realtime_stream(state)
         registry.unregister(session_id)
         # Cancel any running agent turn
         if state.agent_task and not state.agent_task.done():
@@ -404,11 +464,47 @@ async def _receive_loop(
 
         elif event == "set_instructions":
             state.agent_instructions = msg.get("instructions") or None
+            if state.realtime_stream_connected:
+                try:
+                    await _send_realtime_session_update(state)
+                except Exception as exc:
+                    await websocket.send_json({"event": "error", "message": f"Realtime session update failed: {exc}"})
 
         elif event == "set_voice":
             voice = msg.get("voice")
             if voice:
-                state.agent_session.agent.kokoro_voice = voice
+                state.agent_session.agent.set_tts_voice(voice)
+
+        elif event == "set_voice_arch":
+            requested_arch = _normalize_voice_arch(msg.get("voice_arch"))
+            if requested_arch is None:
+                await websocket.send_json({
+                    "event": "error",
+                    "message": "Invalid voice_arch. Use 'chained' or 'realtime'.",
+                })
+                continue
+            state.voice_arch = requested_arch
+            if requested_arch != "realtime":
+                await _close_realtime_stream(state)
+            if state.agent_task and not state.agent_task.done():
+                await websocket.send_json({
+                    "event": "status",
+                    "message": f"Conversation mode will switch to {requested_arch} after this turn.",
+                })
+            else:
+                await websocket.send_json({
+                    "event": "status",
+                    "message": f"Conversation mode set to {requested_arch}.",
+                })
+
+        elif event == "realtime_stream_start":
+            await _handle_realtime_stream_start(websocket, state, conn)
+
+        elif event == "realtime_stream_chunk":
+            await _handle_realtime_stream_chunk(websocket, msg, state, conn)
+
+        elif event == "realtime_stream_stop":
+            await _handle_realtime_stream_stop(websocket, state)
 
         elif event == "set_stt_language":
             lang = msg.get("language")  # BCP-47 code or None / "" for auto
@@ -418,8 +514,22 @@ async def _receive_loop(
             size = msg.get("model_size")
             if size:
                 state.stt_model_size = size
-                if size not in app_state.stt_models:
+                if state.stt_provider != "openai" and size not in app_state.stt_models:
                     asyncio.create_task(_load_stt_model_bg(websocket, size))
+
+        elif event == "set_stt_provider":
+            provider_raw = msg.get("provider")
+            provider = select_stt_provider(provider_raw)
+            state.stt_provider = provider
+            if provider == "openai":
+                if state.stt_model_size not in OPENAI_STT_MODELS:
+                    state.stt_model_size = settings.OPENAI_STT_MODEL
+            else:
+                if state.stt_model_size in OPENAI_STT_MODELS or not state.stt_model_size:
+                    state.stt_model_size = settings.STT_MODEL_SIZE
+                if state.stt_model_size not in app_state.stt_models:
+                    asyncio.create_task(_load_stt_model_bg(websocket, state.stt_model_size))
+            await websocket.send_json({"event": "status", "message": f"STT provider set to {provider}"})
 
         elif event == "reconnect":
             await _handle_reconnect(websocket, msg, state)
@@ -428,6 +538,15 @@ async def _receive_loop(
             if state.agent_task and not state.agent_task.done():
                 state.agent_task.cancel()
                 state.turn_status = "failed"
+            if state.realtime_stream_connected:
+                try:
+                    await _realtime_send(state, {"type": "response.cancel"})
+                    await _realtime_send(state, {"type": "input_audio_buffer.clear"})
+                except Exception:
+                    pass
+                if state.realtime_stream_turn and state.realtime_stream_turn.tts_playing_sent:
+                    await websocket.send_json({"event": "tts_playing", "playing": False})
+                state.realtime_stream_turn = None
 
         elif event == "start_lesson":
             # Client sends this after dispatching initial config (set_instructions etc.)
@@ -550,6 +669,9 @@ _stt_load_lock: asyncio.Lock | None = None
 
 async def _get_stt_model(state: SessionState) -> object:
     """Return the appropriate STT model, lazy-loading the default if not yet ready."""
+    if state.stt_provider == "openai":
+        # OpenAI STT is API-based and does not require a local model object.
+        return object()
     global _stt_load_lock
     if state.stt_model_size and state.stt_model_size in app_state.stt_models:
         return app_state.stt_models[state.stt_model_size]
@@ -644,7 +766,514 @@ async def _send_loop(
 
 # ── event handlers ─────────────────────────────────────────────────────────────
 
+def _make_realtime_system_prompt(state: SessionState) -> str:
+    from shared.teaching_agent import make_teaching_prompt
+
+    system = make_teaching_prompt(
+        state.curriculum.title,
+        state.curriculum.sections,
+        state.curriculum.idx,
+        state.lesson_goal,
+    )
+    if state.agent_instructions:
+        system += f"\n\nADDITIONAL STYLE INSTRUCTIONS:\n{state.agent_instructions}"
+    return system
+
+
+def _realtime_session_update_payload(state: SessionState) -> dict:
+    return {
+        "type": "session.update",
+        "session": {
+            "instructions": _make_realtime_system_prompt(state),
+            "voice": settings.OPENAI_REALTIME_VOICE,
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "modalities": ["text", "audio"],
+            "turn_detection": {
+                "type": "server_vad",
+                "create_response": True,
+                "interrupt_response": settings.OPENAI_REALTIME_INTERRUPT_RESPONSE,
+                "threshold": settings.OPENAI_REALTIME_VAD_THRESHOLD,
+                "prefix_padding_ms": settings.OPENAI_REALTIME_VAD_PREFIX_MS,
+                "silence_duration_ms": settings.OPENAI_REALTIME_VAD_SILENCE_MS,
+            },
+            "input_audio_transcription": {"model": "gpt-4o-mini-transcribe"},
+        },
+    }
+
+
+async def _realtime_send(state: SessionState, payload: dict) -> None:
+    if not state.realtime_stream_connected or state.realtime_ws is None:
+        raise RuntimeError("Realtime session is not connected.")
+    async with state.realtime_send_lock:
+        await state.realtime_ws.send(json.dumps(payload))
+
+
+async def _send_realtime_session_update(state: SessionState) -> None:
+    await _realtime_send(state, _realtime_session_update_payload(state))
+
+
+def _next_realtime_turn(state: SessionState) -> RealtimeStreamTurn:
+    turn = RealtimeStreamTurn(
+        turn_id=str(uuid.uuid4()),
+        turn_idx=state.realtime_turn_idx,
+    )
+    state.realtime_turn_idx += 1
+    state.realtime_stream_turn = turn
+    state.last_turn_id = turn.turn_id
+    state.turn_status = "running"
+    return turn
+
+
+def _ensure_realtime_turn(state: SessionState) -> RealtimeStreamTurn:
+    return state.realtime_stream_turn or _next_realtime_turn(state)
+
+
+def _merge_realtime_text(existing: str, incoming: str) -> str:
+    existing = (existing or "").strip()
+    incoming = (incoming or "").strip()
+    if not incoming:
+        return existing
+    if not existing:
+        return incoming
+    if incoming.startswith(existing):
+        return incoming
+    if existing.startswith(incoming):
+        return existing
+    if existing.endswith(incoming):
+        return existing
+    return f"{existing} {incoming}".strip()
+
+
+async def _close_realtime_stream(state: SessionState, *, cancel_reader: bool = True) -> None:
+    reader = state.realtime_reader_task
+    ws = state.realtime_ws
+
+    state.realtime_stream_connected = False
+    state.realtime_streaming = False
+    state.realtime_stream_turn = None
+    state.realtime_ws = None
+
+    if cancel_reader and reader and not reader.done():
+        reader.cancel()
+        try:
+            await reader
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+    state.realtime_reader_task = None
+
+    if ws is not None:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
+async def _ensure_realtime_stream_connected(
+    websocket: WebSocket,
+    state: SessionState,
+    conn: aiosqlite.Connection,
+) -> None:
+    if state.realtime_stream_connected and state.realtime_ws is not None:
+        return
+    if state.phase != "teaching":
+        raise RuntimeError("Realtime conversation is only available during teaching mode.")
+    api_key = (settings.OPENAI_API_KEY or "").strip()
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured for realtime conversation.")
+
+    ws_url = f"wss://api.openai.com/v1/realtime?model={quote(settings.OPENAI_REALTIME_MODEL)}"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "OpenAI-Beta": "realtime=v1",
+    }
+    ws = await ws_connect(
+        ws_url,
+        additional_headers=headers,
+        open_timeout=settings.OPENAI_REALTIME_TIMEOUT_S,
+        close_timeout=settings.OPENAI_REALTIME_TIMEOUT_S,
+        max_size=None,
+    )
+    state.realtime_ws = ws
+    state.realtime_stream_connected = True
+    await _send_realtime_session_update(state)
+    state.realtime_reader_task = asyncio.create_task(_realtime_stream_reader(websocket, state, conn))
+
+
+async def _emit_realtime_turn_start_if_needed(websocket: WebSocket, turn: RealtimeStreamTurn) -> None:
+    if turn.turn_start_sent:
+        return
+    turn.turn_start_sent = True
+    await websocket.send_json({"event": "turn_start"})
+
+
+async def _finalize_realtime_stream_turn(
+    websocket: WebSocket,
+    state: SessionState,
+    conn: aiosqlite.Connection,
+    *,
+    usage: dict,
+) -> None:
+    turn = state.realtime_stream_turn
+    if turn is None:
+        return
+
+    user_text = turn.user_text.strip()
+    assistant_text = turn.assistant_text.strip()
+
+    if user_text and not turn.transcript_sent:
+        turn.transcript_sent = True
+        await websocket.send_json({"event": "transcription", "text": user_text, "turn_id": turn.turn_id})
+    if not turn.turn_start_sent and (assistant_text or turn.chunk_idx > 0):
+        await _emit_realtime_turn_start_if_needed(websocket, turn)
+
+    if user_text:
+        state.messages.append({"role": "user", "content": user_text})
+    if assistant_text:
+        state.messages.append({"role": "assistant", "content": assistant_text})
+
+    if usage:
+        try:
+            usage_obj = usage_from_realtime(usage)
+            app_state.token_tracker.record_api(
+                call_type="realtime_turn",
+                model=settings.OPENAI_REALTIME_MODEL,
+                usage=usage_obj,
+                user_id=state.agent_session._user_id,
+                session_id=state.session_id,
+            )
+        except Exception:
+            pass
+
+    state.turn_status = "complete"
+    await _save_state(conn, state)
+    await websocket.send_json({
+        "event": "chunk_complete",
+        "turn_idx": turn.turn_idx,
+        "chunk_idx": max(turn.chunk_idx - 1, 0),
+    })
+    if turn.tts_playing_sent:
+        await websocket.send_json({"event": "tts_playing", "playing": False})
+    await websocket.send_json({"event": "response_end"})
+    await websocket.send_json({"event": "turn_complete", "turn_id": turn.turn_id})
+    state.realtime_stream_turn = None
+
+
+async def _realtime_stream_reader(
+    websocket: WebSocket,
+    state: SessionState,
+    conn: aiosqlite.Connection,
+) -> None:
+    try:
+        while state.realtime_stream_connected and state.realtime_ws is not None:
+            raw = await state.realtime_ws.recv()
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", errors="ignore")
+            event = json.loads(raw)
+            etype = event.get("type", "")
+
+            if etype == "conversation.item.input_audio_transcription.completed":
+                text = (event.get("transcript") or "").strip()
+                if text:
+                    turn = _ensure_realtime_turn(state)
+                    turn.user_text = _merge_realtime_text(turn.user_text, text)
+                    if not turn.transcript_sent:
+                        turn.transcript_sent = True
+                        await websocket.send_json({"event": "transcription", "text": turn.user_text, "turn_id": turn.turn_id})
+
+            elif etype in {
+                "response.output_text.delta",
+                "response.text.delta",
+                "response.audio_transcript.delta",
+                "response.output_audio_transcript.delta",
+            }:
+                delta = event.get("delta", "")
+                if isinstance(delta, str) and delta:
+                    turn = _ensure_realtime_turn(state)
+                    await _emit_realtime_turn_start_if_needed(websocket, turn)
+                    turn.assistant_text += delta
+                    await websocket.send_json({
+                        "event": "text_chunk",
+                        "text": delta,
+                        "turn_idx": turn.turn_idx,
+                    })
+
+            elif etype in {"response.output_audio.delta", "response.audio.delta"}:
+                delta_b64 = event.get("delta", "")
+                if isinstance(delta_b64, str) and delta_b64:
+                    turn = _ensure_realtime_turn(state)
+                    await _emit_realtime_turn_start_if_needed(websocket, turn)
+                    if not turn.tts_playing_sent:
+                        turn.tts_playing_sent = True
+                        await websocket.send_json({"event": "tts_playing", "playing": True})
+                    audio = pcm16_b64_to_float32(delta_b64)
+                    data = base64.b64encode(audio.tobytes()).decode()
+                    await websocket.send_json({
+                        "event": "audio_chunk",
+                        "data": data,
+                        "sample_rate": settings.OPENAI_REALTIME_SAMPLE_RATE,
+                        "turn_idx": turn.turn_idx,
+                        "chunk_idx": turn.chunk_idx,
+                    })
+                    turn.chunk_idx += 1
+
+            elif etype == "response.done":
+                response = event.get("response") or {}
+                usage = response.get("usage") or {}
+                await _finalize_realtime_stream_turn(websocket, state, conn, usage=usage)
+
+            elif etype == "error":
+                err = event.get("error") or {}
+                msg = err.get("message") or str(err) or "Unknown realtime error"
+                await websocket.send_json({"event": "error", "message": f"Realtime stream error: {msg}"})
+                break
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        try:
+            await websocket.send_json({"event": "error", "message": f"Realtime stream disconnected: {exc}"})
+        except Exception:
+            pass
+    finally:
+        await _close_realtime_stream(state, cancel_reader=False)
+
+
+async def _handle_realtime_stream_start(
+    websocket: WebSocket,
+    state: SessionState,
+    conn: aiosqlite.Connection,
+) -> None:
+    if state.voice_arch != "realtime":
+        await websocket.send_json({
+            "event": "status",
+            "message": "Conversation mode is chained. Switch to realtime to stream audio.",
+        })
+        return
+    try:
+        await _ensure_realtime_stream_connected(websocket, state, conn)
+        state.realtime_streaming = True
+        await websocket.send_json({"event": "status", "message": "Realtime stream connected."})
+    except Exception as exc:
+        await websocket.send_json({"event": "error", "message": f"Could not start realtime stream: {exc}"})
+
+
+async def _handle_realtime_stream_chunk(
+    websocket: WebSocket,
+    msg: dict,
+    state: SessionState,
+    conn: aiosqlite.Connection,
+) -> None:
+    if state.voice_arch != "realtime":
+        return
+    audio_b64: str = msg.get("data", "")
+    sample_rate: int = int(msg.get("sample_rate", 16000) or 16000)
+    if not audio_b64:
+        return
+    try:
+        await _ensure_realtime_stream_connected(websocket, state, conn)
+        state.realtime_streaming = True
+        pcm16_b64 = float32_b64_to_pcm16_b64(
+            audio_b64,
+            sample_rate=sample_rate,
+            target_sample_rate=settings.OPENAI_REALTIME_SAMPLE_RATE,
+        )
+        await _realtime_send(state, {"type": "input_audio_buffer.append", "audio": pcm16_b64})
+    except Exception as exc:
+        await websocket.send_json({"event": "error", "message": f"Realtime stream chunk failed: {exc}"})
+
+
+async def _handle_realtime_stream_stop(
+    websocket: WebSocket,
+    state: SessionState,
+) -> None:
+    state.realtime_streaming = False
+    if not state.realtime_stream_connected:
+        return
+    try:
+        await _realtime_send(state, {"type": "input_audio_buffer.commit"})
+    except Exception as exc:
+        await websocket.send_json({"event": "error", "message": f"Realtime stream stop failed: {exc}"})
+
+
 async def _handle_audio_input(
+    websocket: WebSocket,
+    msg: dict,
+    state: SessionState,
+    conn: aiosqlite.Connection,
+) -> None:
+    """
+    Entry point for mic utterances.
+
+    - `VOICE_ARCH=chained`  -> existing STT -> agent -> TTS pipeline.
+    - `VOICE_ARCH=realtime` -> OpenAI Realtime audio in/out (teaching phase),
+      then automatic fallback to chained on any realtime failure.
+    """
+    if (
+        state.voice_arch == "realtime"
+        and state.phase == "teaching"
+        and not (state.agent_task and not state.agent_task.done())
+    ):
+        audio_b64: str = msg.get("data", "")
+        sample_rate: int = msg.get("sample_rate", 16000)
+        turn_id = str(uuid.uuid4())
+        state.last_turn_id = turn_id
+        state.turn_status = "running"
+
+        async def _run_realtime() -> None:
+            try:
+                await _handle_audio_input_realtime_turn(
+                    websocket=websocket,
+                    state=state,
+                    conn=conn,
+                    audio_b64=audio_b64,
+                    sample_rate=sample_rate,
+                    turn_id=turn_id,
+                )
+            except asyncio.CancelledError:
+                state.turn_status = "failed"
+                try:
+                    await websocket.send_json({"event": "tts_playing", "playing": False})
+                    await websocket.send_json({"event": "turn_interrupted"})
+                except Exception:
+                    pass
+            except Exception as exc:
+                log.warning("Realtime turn failed; falling back to chained path: %s", exc)
+                try:
+                    await websocket.send_json({
+                        "event": "status",
+                        "message": "Realtime unavailable. Falling back to chained speech path…",
+                    })
+                    # Preserve a stable turn id for UI continuity.
+                    state.last_turn_id = turn_id
+                    # Clear the in-flight realtime marker so chained fallback
+                    # can pass its "turn already in progress" guard.
+                    state.agent_task = None
+                    await _handle_audio_input_chained(websocket, msg, state, conn)
+                except Exception as chained_exc:
+                    state.turn_status = "failed"
+                    await websocket.send_json({"event": "error", "message": f"Realtime+fallback failed: {chained_exc}"})
+
+        state.agent_task = asyncio.create_task(_run_realtime())
+        return
+
+    await _handle_audio_input_chained(websocket, msg, state, conn)
+
+
+async def _handle_audio_input_realtime_turn(
+    *,
+    websocket: WebSocket,
+    state: SessionState,
+    conn: aiosqlite.Connection,
+    audio_b64: str,
+    sample_rate: int,
+    turn_id: str,
+) -> None:
+    """Process one audio utterance via OpenAI Realtime and stream it to client."""
+    turn_idx = state.realtime_turn_idx
+    state.realtime_turn_idx += 1
+    chunk_idx = 0
+    transcript_sent = False
+    tts_playing_sent = False
+
+    # Reuse the section-aware teaching system prompt to keep behavior aligned.
+    from shared.teaching_agent import make_teaching_prompt
+
+    system = make_teaching_prompt(
+        state.curriculum.title,
+        state.curriculum.sections,
+        state.curriculum.idx,
+        state.lesson_goal,
+    )
+    if state.agent_instructions:
+        system += f"\n\nADDITIONAL STYLE INSTRUCTIONS:\n{state.agent_instructions}"
+
+    await websocket.send_json({"event": "status", "message": "Realtime listening…"})
+    await websocket.send_json({"event": "turn_start"})
+
+    async def _emit_user_transcript(text: str) -> None:
+        nonlocal transcript_sent
+        if text and not transcript_sent:
+            transcript_sent = True
+            await websocket.send_json({"event": "transcription", "text": text, "turn_id": turn_id})
+
+    async def _emit_text_delta(text: str) -> None:
+        if text:
+            await websocket.send_json({"event": "text_chunk", "text": text, "turn_idx": turn_idx})
+
+    async def _emit_audio_chunk(audio: object) -> None:
+        nonlocal chunk_idx, tts_playing_sent
+        try:
+            import numpy as _np
+            chunk = _np.asarray(audio, dtype=_np.float32)
+        except Exception:
+            return
+        if chunk.size == 0:
+            return
+        if not tts_playing_sent:
+            tts_playing_sent = True
+            await websocket.send_json({"event": "tts_playing", "playing": True})
+        data = base64.b64encode(chunk.tobytes()).decode()
+        await websocket.send_json({
+            "event": "audio_chunk",
+            "data": data,
+            "sample_rate": settings.OPENAI_REALTIME_SAMPLE_RATE,
+            "turn_idx": turn_idx,
+            "chunk_idx": chunk_idx,
+        })
+        chunk_idx += 1
+
+    summary = await run_realtime_voice_turn(
+        audio_b64=audio_b64,
+        sample_rate=sample_rate,
+        api_key=settings.OPENAI_API_KEY,
+        model=settings.OPENAI_REALTIME_MODEL,
+        voice=settings.OPENAI_REALTIME_VOICE,
+        instructions=system,
+        target_sample_rate=settings.OPENAI_REALTIME_SAMPLE_RATE,
+        timeout_seconds=settings.OPENAI_REALTIME_TIMEOUT_S,
+        max_retries=settings.OPENAI_REALTIME_MAX_RETRIES,
+        on_user_transcript=_emit_user_transcript,
+        on_text_delta=_emit_text_delta,
+        on_audio_chunk=_emit_audio_chunk,
+    )
+
+    user_text = (summary.user_transcript or "").strip()
+    assistant_text = (summary.assistant_text or "").strip()
+
+    if not transcript_sent and user_text:
+        await websocket.send_json({"event": "transcription", "text": user_text, "turn_id": turn_id})
+        transcript_sent = True
+
+    if user_text:
+        state.messages.append({"role": "user", "content": user_text})
+    if assistant_text:
+        state.messages.append({"role": "assistant", "content": assistant_text})
+
+    # Track OpenAI realtime token usage in the existing usage pipeline.
+    try:
+        usage_obj = usage_from_realtime(summary.usage)
+        app_state.token_tracker.record_api(
+            call_type="realtime_turn",
+            model=settings.OPENAI_REALTIME_MODEL,
+            usage=usage_obj,
+            user_id=state.agent_session._user_id,
+            session_id=state.session_id,
+        )
+    except Exception:
+        pass
+
+    state.turn_status = "complete"
+    await _save_state(conn, state)
+    await websocket.send_json({"event": "chunk_complete", "turn_idx": turn_idx, "chunk_idx": max(chunk_idx - 1, 0)})
+    if tts_playing_sent:
+        await websocket.send_json({"event": "tts_playing", "playing": False})
+    await websocket.send_json({"event": "response_end"})
+    await websocket.send_json({"event": "turn_complete", "turn_id": turn_id})
+
+
+async def _handle_audio_input_chained(
     websocket: WebSocket,
     msg: dict,
     state: SessionState,
@@ -663,9 +1292,26 @@ async def _handle_audio_input(
 
     await websocket.send_json({"event": "status", "message": "Transcribing..."})
 
+    stt_provider = state.stt_provider
     try:
-        stt_model = await _get_stt_model(state)
-        text = await transcribe(audio_b64, sample_rate, stt_model, state.stt_language)
+        if stt_provider == "openai":
+            model_id = state.stt_model_size or settings.OPENAI_STT_MODEL
+            text = await transcribe_openai(
+                audio_b64,
+                sample_rate,
+                api_key=settings.OPENAI_API_KEY,
+                model=model_id,
+                language=state.stt_language,
+                timeout_seconds=settings.OPENAI_STT_TIMEOUT_S,
+                max_retries=settings.OPENAI_STT_MAX_RETRIES,
+                cost_per_minute_usd=settings.OPENAI_STT_COST_PER_MINUTE_USD,
+                user_id=state.agent_session._user_id,
+            )
+        else:
+            stt_model = await _get_stt_model(state)
+            text = await transcribe(
+                audio_b64, sample_rate, stt_model, state.stt_language, user_id=state.agent_session._user_id
+            )
     except Exception as exc:
         await websocket.send_json({"event": "error", "message": f"STT error: {exc}"})
         return
@@ -783,12 +1429,27 @@ async def _handle_transcribe_only(
     state: SessionState,
 ) -> None:
     """Run STT and return transcription to the client without starting an agent turn."""
-    from ..services.stt import transcribe
     audio_b64: str = msg.get("data", "")
     sample_rate: int = msg.get("sample_rate", 16000)
     try:
-        stt_model = await _get_stt_model(state)
-        text = await transcribe(audio_b64, sample_rate, stt_model, state.stt_language)
+        if state.stt_provider == "openai":
+            model_id = state.stt_model_size or settings.OPENAI_STT_MODEL
+            text = await transcribe_openai(
+                audio_b64,
+                sample_rate,
+                api_key=settings.OPENAI_API_KEY,
+                model=model_id,
+                language=state.stt_language,
+                timeout_seconds=settings.OPENAI_STT_TIMEOUT_S,
+                max_retries=settings.OPENAI_STT_MAX_RETRIES,
+                cost_per_minute_usd=settings.OPENAI_STT_COST_PER_MINUTE_USD,
+                user_id=state.agent_session._user_id,
+            )
+        else:
+            stt_model = await _get_stt_model(state)
+            text = await transcribe(
+                audio_b64, sample_rate, stt_model, state.stt_language, user_id=state.agent_session._user_id
+            )
         await websocket.send_json({"event": "transcription_only", "text": text})
     except Exception as exc:
         await websocket.send_json({"event": "error", "message": f"STT error: {exc}"})
@@ -806,7 +1467,6 @@ async def _handle_voice_message(
     The Claude API does not yet accept raw audio content blocks, so we run the
     recording through Whisper first, then proceed exactly like a typed message.
     """
-    from ..services.stt import transcribe_file
     if state.agent_task and not state.agent_task.done():
         await websocket.send_json({"event": "error", "message": "Agent turn already in progress"})
         return
@@ -814,9 +1474,26 @@ async def _handle_voice_message(
     audio_b64: str = msg.get("data", "")
     mime_type: str = msg.get("mime_type", "audio/webm")
 
+    stt_provider = state.stt_provider
     try:
-        stt_model = await _get_stt_model(state)
-        text = await transcribe_file(audio_b64, mime_type, stt_model, state.stt_language)
+        if stt_provider == "openai":
+            model_id = state.stt_model_size or settings.OPENAI_STT_MODEL
+            text = await transcribe_file_openai(
+                audio_b64,
+                mime_type,
+                api_key=settings.OPENAI_API_KEY,
+                model=model_id,
+                language=state.stt_language,
+                timeout_seconds=settings.OPENAI_STT_TIMEOUT_S,
+                max_retries=settings.OPENAI_STT_MAX_RETRIES,
+                cost_per_minute_usd=settings.OPENAI_STT_COST_PER_MINUTE_USD,
+                user_id=state.agent_session._user_id,
+            )
+        else:
+            stt_model = await _get_stt_model(state)
+            text = await transcribe_file(
+                audio_b64, mime_type, stt_model, state.stt_language, user_id=state.agent_session._user_id
+            )
     except Exception as exc:
         await websocket.send_json({"event": "error", "message": f"STT error: {exc}"})
         return

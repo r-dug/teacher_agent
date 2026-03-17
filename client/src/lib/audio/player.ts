@@ -12,10 +12,10 @@ export class AudioPlayer {
   private ctx: AudioContext
   /** LRU: audioTurns[turnIdx][chunkIdx] = AudioBuffer */
   private audioTurns: Map<number, Map<number, AudioBuffer>> = new Map()
-  /** Queue of pending [buffer, resolve] pairs */
-  private playQueue: Array<[AudioBuffer, () => void]> = []
-  private playing = false
-  private currentSource: AudioBufferSourceNode | null = null
+  /** Time when the next scheduled chunk should begin. */
+  private nextStartAt = 0
+  /** Active scheduled sources so stop() can cancel all quickly. */
+  private activeSources: Set<AudioBufferSourceNode> = new Set()
 
   constructor() {
     this.ctx = new AudioContext()
@@ -37,11 +37,9 @@ export class AudioPlayer {
     }
     this.audioTurns.get(turnIdx)!.set(chunkIdx, buffer)
 
-    // Enqueue for sequential playback
-    await new Promise<void>((resolve) => {
-      this.playQueue.push([buffer, resolve])
-      if (!this.playing) this._drainQueue()
-    })
+    // Keep the context awake and schedule the chunk against a rolling timeline.
+    if (this.ctx.state === 'suspended') await this.ctx.resume()
+    this._scheduleBuffer(buffer)
   }
 
   /** Replay all chunks of a stored turn in order. */
@@ -58,12 +56,11 @@ export class AudioPlayer {
 
   /** Stop all playback immediately and drain the queue. */
   stop() {
-    // Resolve (unblock) all pending enqueue() callers so they don't hang
-    for (const [, resolve] of this.playQueue) resolve()
-    this.playQueue = []
-    this.playing = false
-    try { this.currentSource?.stop() } catch { /* already ended */ }
-    this.currentSource = null
+    for (const source of this.activeSources) {
+      try { source.stop() } catch { /* already ended */ }
+    }
+    this.activeSources.clear()
+    this.nextStartAt = this.ctx.currentTime
   }
 
   suspend() {
@@ -74,25 +71,31 @@ export class AudioPlayer {
     return this.ctx.resume()
   }
 
-  private async _drainQueue() {
-    this.playing = true
-    while (this.playQueue.length > 0) {
-      const item = this.playQueue.shift()!
-      await this._playBuffer(item[0])
-      item[1]()    // resolve the enqueue() promise
-    }
-    this.playing = false
-  }
-
   private _playBuffer(buffer: AudioBuffer): Promise<void> {
     return new Promise((resolve) => {
       const source = this.ctx.createBufferSource()
       source.buffer = buffer
       source.connect(this.ctx.destination)
-      source.onended = () => { this.currentSource = null; resolve() }
-      this.currentSource = source
+      source.onended = () => resolve()
       source.start()
     })
+  }
+
+  private _scheduleBuffer(buffer: AudioBuffer) {
+    const source = this.ctx.createBufferSource()
+    source.buffer = buffer
+    source.connect(this.ctx.destination)
+
+    const now = this.ctx.currentTime
+    const lead = 0.03
+    const startAt = Math.max(now + lead, this.nextStartAt || 0)
+    this.nextStartAt = startAt + buffer.duration
+
+    source.onended = () => {
+      this.activeSources.delete(source)
+    }
+    this.activeSources.add(source)
+    source.start(startAt)
   }
 
   /** Evict turns beyond MAX_TURNS (keep the most recent). */

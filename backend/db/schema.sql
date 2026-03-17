@@ -49,6 +49,138 @@ CREATE TABLE IF NOT EXISTS courses (
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- ── Textbook Authoring ───────────────────────────────────────────────────────
+-- course_source_files stores the original textbook upload for a course.
+-- course_chapter_drafts stores editable chapter page ranges before full decomposition.
+-- textbook_toc_cache caches TOC-derived chapter outlines by PDF hash.
+-- decomposition_cache is the future section-cache store keyed by hash+range+prompt fingerprint.
+
+CREATE TABLE IF NOT EXISTS course_source_files (
+    course_id   TEXT PRIMARY KEY REFERENCES courses(id) ON DELETE CASCADE,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    pdf_hash    TEXT NOT NULL,
+    pdf_path    TEXT NOT NULL,
+    page_count  INTEGER NOT NULL,
+    toc_json    TEXT NOT NULL DEFAULT '[]',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_course_source_files_pdf_hash ON course_source_files(pdf_hash);
+
+CREATE TABLE IF NOT EXISTS course_chapter_drafts (
+    id          TEXT PRIMARY KEY,
+    course_id   TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    idx         INTEGER NOT NULL,
+    title       TEXT NOT NULL,
+    page_start  INTEGER NOT NULL,
+    page_end    INTEGER NOT NULL,
+    included    INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(course_id, idx)
+);
+CREATE INDEX IF NOT EXISTS idx_course_chapter_drafts_course ON course_chapter_drafts(course_id, idx);
+
+CREATE TABLE IF NOT EXISTS textbook_toc_cache (
+    pdf_hash      TEXT PRIMARY KEY,
+    page_count    INTEGER NOT NULL,
+    toc_json      TEXT NOT NULL DEFAULT '[]',
+    chapters_json TEXT NOT NULL DEFAULT '[]',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS decomposition_cache (
+    cache_key       TEXT PRIMARY KEY,
+    pdf_hash        TEXT NOT NULL,
+    page_start      INTEGER NOT NULL,
+    page_end        INTEGER NOT NULL,
+    objectives_hash TEXT NOT NULL DEFAULT '',
+    model           TEXT NOT NULL DEFAULT '',
+    prompt_version  TEXT NOT NULL DEFAULT '',
+    sections_json   TEXT NOT NULL DEFAULT '[]',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_decomposition_cache_lookup
+    ON decomposition_cache(pdf_hash, page_start, page_end, objectives_hash, model, prompt_version);
+
+CREATE TABLE IF NOT EXISTS course_chapter_lessons (
+    course_id    TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    chapter_id   TEXT NOT NULL REFERENCES course_chapter_drafts(id) ON DELETE CASCADE,
+    lesson_id    TEXT NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (course_id, chapter_id)
+);
+CREATE INDEX IF NOT EXISTS idx_course_chapter_lessons_lesson ON course_chapter_lessons(lesson_id);
+
+CREATE TABLE IF NOT EXISTS course_advisor_sessions (
+    course_id          TEXT PRIMARY KEY REFERENCES courses(id) ON DELETE CASCADE,
+    user_id            TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    transcript_json    TEXT NOT NULL DEFAULT '[]',
+    objectives_prompt  TEXT,
+    status             TEXT NOT NULL DEFAULT 'draft',  -- draft | finalized
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS course_decomposition_jobs (
+    id                TEXT PRIMARY KEY,
+    course_id         TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    user_id           TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    status            TEXT NOT NULL DEFAULT 'queued', -- queued | running | completed | failed
+    objectives_prompt TEXT NOT NULL DEFAULT '',
+    total_items       INTEGER NOT NULL DEFAULT 0,
+    completed_items   INTEGER NOT NULL DEFAULT 0,
+    failed_items      INTEGER NOT NULL DEFAULT 0,
+    notify_session_id TEXT,
+    error             TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at        TEXT,
+    finished_at       TEXT,
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_course_decomp_jobs_course ON course_decomposition_jobs(course_id, created_at);
+
+CREATE TABLE IF NOT EXISTS course_decomposition_job_items (
+    id           TEXT PRIMARY KEY,
+    job_id       TEXT NOT NULL REFERENCES course_decomposition_jobs(id) ON DELETE CASCADE,
+    chapter_id   TEXT NOT NULL REFERENCES course_chapter_drafts(id) ON DELETE CASCADE,
+    idx          INTEGER NOT NULL,
+    title        TEXT NOT NULL,
+    page_start   INTEGER NOT NULL,
+    page_end     INTEGER NOT NULL,
+    lesson_id    TEXT,
+    cache_key    TEXT,
+    status       TEXT NOT NULL DEFAULT 'queued', -- queued | running | completed | cached | failed
+    error        TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_course_decomp_items_job ON course_decomposition_job_items(job_id, idx);
+
+-- ── Published Course Copies ──────────────────────────────────────────────────
+-- Tracks admin course clones that were pushed to user accounts.
+
+CREATE TABLE IF NOT EXISTS course_publish_copies (
+    source_course_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    target_user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    target_course_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source_course_id, target_user_id)
+);
+
+CREATE TABLE IF NOT EXISTS lesson_publish_copies (
+    source_lesson_id TEXT NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
+    target_user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    target_lesson_id TEXT NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source_lesson_id, target_user_id)
+);
+
 -- ── Lessons ───────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS lessons (

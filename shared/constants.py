@@ -14,6 +14,24 @@ KOKORO_VOICES: dict[str, str] = {
 }
 DEFAULT_KOKORO_VOICE = "af_bella"
 
+# ── OpenAI TTS ─────────────────────────────────────────────────────────────────
+
+# OpenAI `/v1/audio/speech` PCM output is 24 kHz mono.
+OPENAI_TTS_SAMPLE_RATE = 24000
+
+# Representative voice IDs for gpt-4o-mini-tts.
+OPENAI_TTS_VOICES: dict[str, str] = {
+    "alloy": "en",
+    "ash": "en",
+    "ballad": "en",
+    "coral": "en",
+    "echo": "en",
+    "sage": "en",
+    "shimmer": "en",
+    "verse": "en",
+}
+DEFAULT_OPENAI_TTS_VOICE = "alloy"
+
 # ── Piper TTS ─────────────────────────────────────────────────────────────────
 
 # Maps shorthand name → Piper model ID

@@ -2,8 +2,8 @@
 Backend server entry point.
 
 Starts a FastAPI application on 127.0.0.1:8001 (loopback only).
-Models (STT, Kokoro TTS) are loaded once during startup and stored in
-app_state for reuse across requests and WebSocket sessions.
+Models (STT, TTS) are loaded once during startup and stored in app_state
+for reuse across requests and WebSocket sessions.
 
 Run with:
     python -m backend.main
@@ -74,11 +74,38 @@ async def lifespan(app: FastAPI):
     # STT model is loaded lazily on first transcription request (avoids blocking startup)
 
     print(f"Loading Kokoro TTS ({settings.DEFAULT_VOICE})...")
-    from .services.tts import load_kokoro_pipeline
+    from .services.tts import build_tts_providers, load_kokoro_pipeline
+
     app_state.kokoro_pipeline = await asyncio.to_thread(
         load_kokoro_pipeline, settings.DEFAULT_VOICE
     )
-    print("Kokoro ready.")
+    selected_provider = settings.effective_tts_provider()
+    app_state.tts_provider, app_state.tts_fallback_provider = build_tts_providers(
+        selected_provider=selected_provider,
+        kokoro_pipeline=app_state.kokoro_pipeline,
+        default_kokoro_voice=settings.DEFAULT_VOICE,
+        openai_api_key=settings.OPENAI_API_KEY,
+        openai_model=settings.OPENAI_TTS_MODEL,
+        openai_voice=settings.OPENAI_TTS_VOICE,
+        openai_format=settings.OPENAI_TTS_FORMAT,
+        openai_timeout_seconds=settings.OPENAI_TTS_TIMEOUT_S,
+        openai_max_retries=settings.OPENAI_TTS_MAX_RETRIES,
+        openai_cost_per_minute_usd=settings.OPENAI_TTS_COST_PER_MINUTE_USD,
+    )
+    app_state.active_tts_provider = selected_provider
+    if selected_provider == "openai":
+        print("TTS ready. Primary=openai, fallback=kokoro.")
+    else:
+        print("TTS ready. Primary=kokoro.")
+
+    teach_provider = (settings.TEACH_LLM_PROVIDER or "anthropic").strip().lower()
+    teach_model = settings.TEACH_LLM_MODEL or settings.LLM_MODEL
+    print(f"Teach LLM: provider={teach_provider}, model={teach_model}")
+    print(
+        "Decompose LLM: "
+        f"provider={settings.effective_decompose_llm_provider()}, "
+        f"model={settings.effective_decompose_llm_model()}"
+    )
 
     # Background usage aggregation
     bg_task = asyncio.create_task(_usage_background_task())

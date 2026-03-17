@@ -62,8 +62,15 @@ async def _proxy_patch(path: str, body: bytes, content_type: str, params: dict =
 # ── routes ─────────────────────────────────────────────────────────────────────
 
 @router.post("/decompose")
-async def decompose_pdf(request: Request, x_upload_token: str = Header(...)):
+async def decompose_pdf(
+    request: Request,
+    x_upload_token: str = Header(...),
+    x_session_id: str = Header(...),
+):
     """Forward multipart PDF upload to backend. Auth via X-Upload-Token."""
+    entry = _require_session(x_session_id)
+    if not entry.is_admin:
+        return Response(content='{"detail":"Admin access required"}', status_code=403, media_type="application/json")
     http = get_http()
     body = await request.body()
     resp = await http.post(

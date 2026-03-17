@@ -66,8 +66,10 @@ interface LiveEvent {
   event_type: string
   call_type: string
   model: string
+  stt_model: string
   cost_usd: number
   audio_seconds: number
+  tts_voice: string
   tts_characters: number
   user_id: string
 }
@@ -330,11 +332,11 @@ function LiveFeed({ sessionId }: { sessionId: string }) {
                   </td>
                   <td className="px-3 py-1.5 text-[hsl(var(--muted-foreground))]">
                     {e.event_type === 'api' ? `${e.call_type} · ${e.model}` :
-                     e.event_type === 'stt' ? `${fmtSecs(e.audio_seconds)} audio` :
-                     `${fmt(e.tts_characters)} chars`}
+                     e.event_type === 'stt' ? `${fmtSecs(e.audio_seconds)} audio · ${e.stt_model || 'stt'}` :
+                     `${fmt(e.tts_characters)} chars · ${e.tts_voice || 'tts'}`}
                   </td>
                   <td className="px-3 py-1.5 text-right tabular-nums">
-                    {e.event_type === 'api' ? fmtCost(e.cost_usd) : '—'}
+                    {e.cost_usd > 0 ? fmtCost(e.cost_usd) : '—'}
                   </td>
                 </tr>
               ))}
@@ -455,6 +457,30 @@ export function UsageDashboardPage({ sessionId, isAdmin }: Props) {
       .map(([ts, v]) => ({ ts: Number(ts), label: minuteLabel(Number(ts)), ...v }))
   }, [series])
 
+  const eventTypeChartData = useMemo(() => {
+    const byTs: Record<number, { api_cost: number; stt_cost: number; tts_cost: number }> = {}
+    for (const r of series) {
+      const ts = r.minute_ts ?? r.hour_ts ?? 0
+      if (!byTs[ts]) byTs[ts] = { api_cost: 0, stt_cost: 0, tts_cost: 0 }
+      if (r.event_type === 'api') byTs[ts].api_cost += r.cost_usd
+      if (r.event_type === 'stt') byTs[ts].stt_cost += r.cost_usd
+      if (r.event_type === 'tts') byTs[ts].tts_cost += r.cost_usd
+    }
+    return Object.entries(byTs)
+      .sort(([a], [b]) => Number(a) - Number(b))
+      .map(([ts, v]) => ({ ts: Number(ts), label: minuteLabel(Number(ts)), ...v }))
+  }, [series])
+
+  const costByEventType = useMemo(() => {
+    const costs = { api: 0, stt: 0, tts: 0 }
+    for (const r of series) {
+      if (r.event_type === 'api') costs.api += r.cost_usd
+      if (r.event_type === 'stt') costs.stt += r.cost_usd
+      if (r.event_type === 'tts') costs.tts += r.cost_usd
+    }
+    return costs
+  }, [series])
+
   const tokenLookup = useMemo(() => {
     const m = new Map<string, TokenEntry>()
     for (const r of series.filter(r => r.event_type === 'api')) {
@@ -557,7 +583,11 @@ export function UsageDashboardPage({ sessionId, isAdmin }: Props) {
 
         {/* Summary cards */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
-          <Card label="API cost" value={fmtCost(curTotals?.cost_usd ?? 0)} sub={`${fmt(curTotals?.calls ?? 0)} calls`} />
+          <Card
+            label="Total cost"
+            value={fmtCost(curTotals?.cost_usd ?? 0)}
+            sub={`API ${fmtCost(costByEventType.api)} · STT ${fmtCost(costByEventType.stt)} · TTS ${fmtCost(costByEventType.tts)}`}
+          />
           <Card label="Tokens" value={fmt((curTotals?.input_tokens ?? 0) + (curTotals?.output_tokens ?? 0))}
             sub={`${fmt(curTotals?.cache_read_tokens ?? 0)} cache reads`} />
           <Card label="STT audio" value={fmtSecs(curTotals?.audio_seconds ?? 0)}
@@ -581,6 +611,26 @@ export function UsageDashboardPage({ sessionId, isAdmin }: Props) {
                   <Line type="monotone" dataKey="cost_usd" name="Cost (USD)" dot={false}
                     stroke="hsl(var(--primary))" strokeWidth={2} />
                 </LineChart>
+              </ResponsiveContainer>
+            )}
+        </div>
+
+        <SectionTitle>Cost by event type</SectionTitle>
+        <div className="rounded-lg border border-[hsl(var(--border))] p-4 mb-4" style={{ height: 220 }}>
+          {eventTypeChartData.length === 0
+            ? <p className="text-xs text-[hsl(var(--muted-foreground))] text-center pt-10">No data.</p>
+            : (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={eventTypeChartData} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                  <XAxis dataKey="label" tick={{ fontSize: 10 }} />
+                  <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => fmtCost(Number(v))} width={64} />
+                  <Tooltip formatter={(v) => fmtCost(Number(v))} />
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                  <Bar dataKey="api_cost" name="API" stackId="a" fill="hsl(217 91% 60%)" />
+                  <Bar dataKey="stt_cost" name="STT" stackId="a" fill="hsl(142 71% 45%)" />
+                  <Bar dataKey="tts_cost" name="TTS" stackId="a" fill="hsl(266 67% 55%)" />
+                </BarChart>
               </ResponsiveContainer>
             )}
         </div>
@@ -718,7 +768,7 @@ export function UsageDashboardPage({ sessionId, isAdmin }: Props) {
               cols={[
                 { key: 'email', label: 'User' },
                 { key: 'calls', label: 'API calls', align: 'right' },
-                { key: 'cost', label: 'API cost', align: 'right' },
+                { key: 'cost', label: 'Total cost', align: 'right' },
                 { key: 'stt', label: 'STT audio', align: 'right' },
                 { key: 'tts', label: 'TTS chars', align: 'right' },
               ]}
@@ -727,7 +777,7 @@ export function UsageDashboardPage({ sessionId, isAdmin }: Props) {
                 const apiRows = uRows.filter(r => r.event_type === 'api')
                 const sttRows = uRows.filter(r => r.event_type === 'stt')
                 const ttsRows = uRows.filter(r => r.event_type === 'tts')
-                const cost = apiRows.reduce((s, r) => s + r.cost_usd, 0)
+                const cost = uRows.reduce((s, r) => s + r.cost_usd, 0)
                 const audioSecs = sttRows.reduce((s, r) => s + r.audio_seconds, 0)
                 const ttsChars = ttsRows.reduce((s, r) => s + r.tts_characters, 0)
                 const calls = apiRows.reduce((s, r) => s + r.calls, 0)

@@ -81,7 +81,7 @@ export function LessonDrawer({
 
         const uploadRes = await fetch('/api/lessons/decompose', {
           method: 'POST',
-          headers: { 'X-Upload-Token': token },
+          headers: { 'X-Upload-Token': token, 'X-Session-Id': sessionId },
           body: form,
         })
         if (!uploadRes.ok) throw new Error('Upload failed')

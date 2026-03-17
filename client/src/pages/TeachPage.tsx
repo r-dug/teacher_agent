@@ -38,8 +38,19 @@ import { TokenUsageDisplay } from '@/components/TokenUsageDisplay'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { useRecorder } from '@/hooks/useRecorder'
 import { useAudioPlayer } from '@/hooks/useAudioPlayer'
+import { useRealtimeStreamRecorder } from '@/hooks/useRealtimeStreamRecorder'
 
-import type { ServerEvent, CurriculumData, CurriculumState, Persona, Voice, SttLanguage, SttModel } from '@/lib/types'
+import type {
+  ServerEvent,
+  CurriculumData,
+  CurriculumState,
+  Persona,
+  Voice,
+  VoiceArch,
+  SttLanguage,
+  SttModel,
+  SttProvider,
+} from '@/lib/types'
 
 
 interface TeachPageProps {
@@ -103,6 +114,8 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
   // ── voices ───────────────────────────────────────────────────────────────
   const [voices, setVoices] = useState<Voice[]>([])
   const [selectedVoiceId, setSelectedVoiceId] = useState<string>('')
+  const [voiceArches, setVoiceArches] = useState<VoiceArch[]>([])
+  const [selectedVoiceArchId, setSelectedVoiceArchId] = useState<string>('')
 
   useEffect(() => {
     fetch('/api/voices')
@@ -113,6 +126,30 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
         if (def) setSelectedVoiceId(def.id)
       })
       .catch(() => {/* non-fatal */})
+  }, [])
+
+  useEffect(() => {
+    fetch('/api/voice-arches')
+      .then((r) => r.json())
+      .then((data: VoiceArch[]) => {
+        const options = data.length > 0
+          ? data
+          : [
+            { id: 'chained', label: 'Chained (STT -> LLM -> TTS)', is_default: true },
+            { id: 'realtime', label: 'Realtime (OpenAI audio in/out)', is_default: false },
+          ]
+        setVoiceArches(options)
+        const def = options.find((opt) => opt.is_default)?.id ?? options[0]?.id ?? 'chained'
+        setSelectedVoiceArchId(def)
+      })
+      .catch(() => {
+        const options = [
+          { id: 'chained', label: 'Chained (STT -> LLM -> TTS)', is_default: true },
+          { id: 'realtime', label: 'Realtime (OpenAI audio in/out)', is_default: false },
+        ]
+        setVoiceArches(options)
+        setSelectedVoiceArchId('chained')
+      })
   }, [])
 
   // ── STT languages ─────────────────────────────────────────────────────────
@@ -127,19 +164,48 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
   }, [])
 
   // ── STT models ────────────────────────────────────────────────────────────
+  const [sttProviders, setSttProviders] = useState<SttProvider[]>([])
+  const [selectedSttProviderId, setSelectedSttProviderId] = useState<string>('')
   const [sttModels, setSttModels] = useState<SttModel[]>([])
   const [selectedSttModelId, setSelectedSttModelId] = useState<string>('')
 
-  useEffect(() => {
-    fetch('/api/stt-models')
+  const loadSttModels = useCallback((providerId: string) => {
+    const qs = providerId ? `?provider=${encodeURIComponent(providerId)}` : ''
+    fetch(`/api/stt-models${qs}`)
       .then((r) => r.json())
       .then((data: SttModel[]) => {
         setSttModels(data)
-        const def = data.find((m) => m.is_default)
-        if (def) setSelectedSttModelId(def.id)
+        setSelectedSttModelId((prev) => {
+          if (prev && data.some((m) => m.id === prev)) return prev
+          const def = data.find((m) => m.is_default)
+          return def?.id ?? data[0]?.id ?? ''
+        })
       })
       .catch(() => {/* non-fatal */})
   }, [])
+
+  useEffect(() => {
+    fetch('/api/stt-providers')
+      .then((r) => r.json())
+      .then((data: SttProvider[]) => {
+        const providers = data.length > 0 ? data : [{ id: 'local', is_default: true }, { id: 'openai', is_default: false }]
+        setSttProviders(providers)
+        const def = providers.find((p) => p.is_default)?.id ?? providers[0]?.id ?? 'local'
+        setSelectedSttProviderId(def)
+        loadSttModels(def)
+      })
+      .catch(() => {
+        const providers = [{ id: 'local', is_default: true }, { id: 'openai', is_default: false }]
+        setSttProviders(providers)
+        setSelectedSttProviderId('local')
+        loadSttModels('local')
+      })
+  }, [loadSttModels])
+
+  useEffect(() => {
+    if (!selectedSttProviderId) return
+    loadSttModels(selectedSttProviderId)
+  }, [selectedSttProviderId, loadSttModels])
 
   // ── audio ────────────────────────────────────────────────────────────────
   const { enqueue, replay, stop: stopAudio } = useAudioPlayer()
@@ -153,20 +219,77 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
     switch (ev.event) {
       case 'transcription':
         lastTurnIdRef.current = ev.turn_id
-        setTurns((prev) => [...prev, { role: 'user', text: ev.text, complete: true }])
+        setTurns((prev) => {
+          const next = [...prev]
+
+          // De-dupe/update if this user turn already exists.
+          const existingIdx = next.findIndex((t) => t.role === 'user' && t.turnId === ev.turn_id)
+          if (existingIdx >= 0) {
+            next[existingIdx] = { ...next[existingIdx]!, text: ev.text, complete: true, turnId: ev.turn_id }
+            return next
+          }
+
+          const userTurn: Turn = { role: 'user', text: ev.text, complete: true, turnId: ev.turn_id }
+          const last = next[next.length - 1]
+
+          // If assistant has already started streaming, insert user text before
+          // the active assistant bubble so chunk routing remains stable.
+          if (last?.role === 'assistant' && !last.complete) {
+            next.splice(next.length - 1, 0, userTurn)
+          } else {
+            next.push(userTurn)
+          }
+          return next
+        })
         setAgentBusy(true)
         break
 
       case 'turn_start':
-        setTurns((prev) => [...prev, { role: 'assistant', text: '', complete: false }])
+        setTurns((prev) => {
+          const next = [...prev]
+          const last = next[next.length - 1]
+          if (last?.role === 'assistant' && !last.complete) return next
+          next.push({ role: 'assistant', text: '', complete: false })
+          return next
+        })
         break
 
       case 'text_chunk':
         setTurns((prev) => {
           const next = [...prev]
-          const last = next[next.length - 1]
-          if (last?.role === 'assistant') {
-            next[next.length - 1] = { ...last, text: last.text + ev.text, turnIdx: ev.turn_idx }
+
+          // Prefer exact turn_idx match for out-of-order event safety.
+          let targetIdx = -1
+          for (let i = next.length - 1; i >= 0; i -= 1) {
+            const t = next[i]
+            if (t?.role === 'assistant' && t.turnIdx === ev.turn_idx) {
+              targetIdx = i
+              break
+            }
+          }
+
+          // Fallback: attach to latest in-progress assistant without a turnIdx.
+          if (targetIdx === -1) {
+            for (let i = next.length - 1; i >= 0; i -= 1) {
+              const t = next[i]
+              if (t?.role === 'assistant' && !t.complete && t.turnIdx === undefined) {
+                targetIdx = i
+                break
+              }
+            }
+          }
+
+          if (targetIdx === -1) {
+            next.push({ role: 'assistant', text: ev.text, turnIdx: ev.turn_idx, complete: false })
+            return next
+          }
+
+          const target = next[targetIdx] as Turn
+          next[targetIdx] = {
+            ...target,
+            text: (target.text ?? '') + ev.text,
+            turnIdx: ev.turn_idx,
+            complete: false,
           }
           return next
         })
@@ -180,8 +303,23 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
         lastTurnIdRef.current = ev.turn_id
         setTurns((prev) => {
           const next = [...prev]
-          const last = next[next.length - 1]
-          if (last?.role === 'assistant') next[next.length - 1] = { ...last, complete: true }
+          let idx = -1
+          for (let i = next.length - 1; i >= 0; i -= 1) {
+            const t = next[i]
+            if (t?.role === 'assistant' && !t.complete) {
+              idx = i
+              break
+            }
+          }
+          if (idx === -1) {
+            for (let i = next.length - 1; i >= 0; i -= 1) {
+              if (next[i]?.role === 'assistant') {
+                idx = i
+                break
+              }
+            }
+          }
+          if (idx >= 0) next[idx] = { ...(next[idx] as Turn), complete: true }
           return next
         })
         setAgentBusy(false)
@@ -349,6 +487,12 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
     if (wsStatus !== 'connected') lessonStartedRef.current = false
   }, [wsStatus])
 
+  // Send set_voice_arch whenever conversation mode selection changes
+  useEffect(() => {
+    if (wsStatus !== 'connected' || !selectedVoiceArchId) return
+    send({ event: 'set_voice_arch', voice_arch: selectedVoiceArchId })
+  }, [selectedVoiceArchId, wsStatus, send])
+
   // Send set_instructions once personasReady; also send start_lesson on first connect.
   // Waiting for personasReady ensures the correct persona is applied before the lesson begins.
   useEffect(() => {
@@ -372,6 +516,12 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
     if (wsStatus !== 'connected') return
     send({ event: 'set_stt_language', language: selectedLangCode || null })
   }, [selectedLangCode, wsStatus, send])
+
+  // Send set_stt_provider whenever provider selection changes
+  useEffect(() => {
+    if (wsStatus !== 'connected' || !selectedSttProviderId) return
+    send({ event: 'set_stt_provider', provider: selectedSttProviderId })
+  }, [selectedSttProviderId, wsStatus, send])
 
   // Send set_stt_model whenever model selection changes
   useEffect(() => {
@@ -399,8 +549,35 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
       send({ event: 'audio_input', data, sample_rate: sampleRate })
     }, [send]),
   })
+  const {
+    isRecording: isRealtimeRecording,
+    isSpeaking: isRealtimeSpeaking,
+    start: startRealtimeRec,
+    stop: stopRealtimeRec,
+  } = useRealtimeStreamRecorder({
+    onChunk: useCallback((data: string, sampleRate: number) => {
+      send({ event: 'realtime_stream_chunk', data, sample_rate: sampleRate })
+    }, [send]),
+  })
+
+  const realtimeMode = selectedVoiceArchId === 'realtime'
+  const recordIsActive = realtimeMode ? isRealtimeRecording : isRecording
+  const recordIsSpeaking = realtimeMode ? isRealtimeSpeaking : isSpeaking
 
   function toggleRecord() {
+    if (realtimeMode) {
+      if (isRealtimeRecording) {
+        void stopRealtimeRec()
+        send({ event: 'realtime_stream_stop' })
+      } else {
+        send({ event: 'realtime_stream_start' })
+        void startRealtimeRec().catch((err) => {
+          setStatusMsg(`Realtime mic error: ${String(err)}`)
+          send({ event: 'realtime_stream_stop' })
+        })
+      }
+      return
+    }
     if (isRecording) stopRec()
     else void startRec()
   }
@@ -416,6 +593,21 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
     setTtsPlaying(false)
     setAgentBusy(false)
   }
+
+  useEffect(() => {
+    if (selectedVoiceArchId === 'realtime') return
+    if (isRealtimeRecording) {
+      void stopRealtimeRec()
+      send({ event: 'realtime_stream_stop' })
+    }
+  }, [selectedVoiceArchId, isRealtimeRecording, send, stopRealtimeRec])
+
+  useEffect(() => {
+    if (wsStatus === 'connected') return
+    if (isRealtimeRecording) {
+      void stopRealtimeRec()
+    }
+  }, [wsStatus, isRealtimeRecording, stopRealtimeRec])
 
   // ── sketchpad submit ─────────────────────────────────────────────────────
   function handleSketchSubmit(invocationId: string, drawing: string) {
@@ -533,9 +725,15 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
     voices,
     selectedVoiceId,
     onVoiceChange: setSelectedVoiceId,
+    voiceArches,
+    selectedVoiceArchId,
+    onVoiceArchChange: setSelectedVoiceArchId,
     sttLanguages,
     selectedLangCode,
     onLangChange: setSelectedLangCode,
+    sttProviders,
+    selectedSttProviderId,
+    onSttProviderChange: setSelectedSttProviderId,
     sttModels,
     selectedSttModelId,
     onSttModelChange: setSelectedSttModelId,
@@ -616,6 +814,19 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
                 )}
               </div>
             )}
+            {realtimeMode && (
+              <div className="flex justify-center border-t border-[hsl(var(--border))] py-1.5">
+                <Button
+                  variant={recordIsActive ? 'destructive' : 'secondary'}
+                  size="sm"
+                  onClick={toggleRecord}
+                  disabled={wsStatus !== 'connected'}
+                  className="text-xs"
+                >
+                  {recordIsActive ? 'Stop Live Mic' : 'Start Live Mic'}
+                </Button>
+              </div>
+            )}
             <InputBar
               disabled={wsStatus !== 'connected' || agentBusy}
               inputText={inputText}
@@ -673,9 +884,9 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
           pageEnd={slide.pageEnd}
           caption={slide.caption}
           onClose={() => setSlide(null)}
-          isRecording={isRecording}
-          isSpeaking={isSpeaking}
-          recordDisabled={wsStatus !== 'connected' || (agentBusy && !isRecording)}
+          isRecording={recordIsActive}
+          isSpeaking={recordIsSpeaking}
+          recordDisabled={wsStatus !== 'connected' || (!realtimeMode && agentBusy && !recordIsActive)}
           onRecord={toggleRecord}
           onAnnotate={handleAnnotate}
         />

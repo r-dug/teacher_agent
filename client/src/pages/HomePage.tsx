@@ -90,8 +90,11 @@ export function HomePage({ sessionId, onLogout, isAdmin }: HomePageProps) {
 
   // ── course handlers ───────────────────────────────────────────────────────
 
-  function handleCourseCreated(course: Course) {
+  function handleCourseCreated(course: Course, options?: { openChapters?: boolean }) {
     setCourses((prev) => [course, ...prev])
+    if (options?.openChapters) {
+      navigate(`/courses/${course.id}?chapters=1`)
+    }
   }
 
   function handleCourseUpdated(course: Course) {
@@ -148,7 +151,7 @@ export function HomePage({ sessionId, onLogout, isAdmin }: HomePageProps) {
               title="Courses"
               open={coursesOpen}
               onToggle={() => setCoursesOpen((v) => !v)}
-              action={
+              action={isAdmin ? (
                 <Button
                   size="sm"
                   variant="outline"
@@ -156,7 +159,7 @@ export function HomePage({ sessionId, onLogout, isAdmin }: HomePageProps) {
                 >
                   + New Course
                 </Button>
-              }
+              ) : undefined}
             />
 
             {coursesOpen && (
@@ -204,7 +207,7 @@ export function HomePage({ sessionId, onLogout, isAdmin }: HomePageProps) {
               title="Individual Lessons"
               open={lessonsOpen}
               onToggle={() => setLessonsOpen((v) => !v)}
-              action={
+              action={isAdmin ? (
                 <Button
                   size="sm"
                   variant="outline"
@@ -212,7 +215,7 @@ export function HomePage({ sessionId, onLogout, isAdmin }: HomePageProps) {
                 >
                   + Add Lesson
                 </Button>
-              }
+              ) : undefined}
             />
 
             {lessonsOpen && (

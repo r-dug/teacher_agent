@@ -41,8 +41,13 @@ export type ClientEvent =
   | { event: 'run_code'; invocation_id: string; code: string; runtime: string }
   | { event: 'set_instructions'; instructions: string }
   | { event: 'set_voice'; voice: string }
+  | { event: 'set_voice_arch'; voice_arch: string }
+  | { event: 'set_stt_provider'; provider: string }
   | { event: 'set_stt_language'; language: string | null }
   | { event: 'set_stt_model'; model_size: string }
+  | { event: 'realtime_stream_start' }
+  | { event: 'realtime_stream_chunk'; data: string; sample_rate: number }
+  | { event: 'realtime_stream_stop' }
   | { event: 'reconnect'; last_turn_id: string }
   | { event: 'start_lesson' }
   | { event: 'cancel_turn' }
@@ -137,5 +142,16 @@ export interface SttLanguage {
 
 export interface SttModel {
   id: string
+  is_default: boolean
+}
+
+export interface SttProvider {
+  id: string
+  is_default: boolean
+}
+
+export interface VoiceArch {
+  id: string
+  label: string
   is_default: boolean
 }

@@ -5,7 +5,16 @@
 import { Progress } from './ui/progress'
 import { cn } from '@/lib/utils'
 import { sortByRecency, recordRecent } from '@/lib/recency'
-import type { CurriculumData, CurriculumState, Persona, Voice, SttLanguage, SttModel } from '@/lib/types'
+import type {
+  CurriculumData,
+  CurriculumState,
+  Persona,
+  Voice,
+  VoiceArch,
+  SttLanguage,
+  SttModel,
+  SttProvider,
+} from '@/lib/types'
 
 interface CurriculumPanelProps {
   curriculum: CurriculumData | null
@@ -17,9 +26,15 @@ interface CurriculumPanelProps {
   voices: Voice[]
   selectedVoiceId: string
   onVoiceChange: (id: string) => void
+  voiceArches: VoiceArch[]
+  selectedVoiceArchId: string
+  onVoiceArchChange: (id: string) => void
   sttLanguages: SttLanguage[]
   selectedLangCode: string
   onLangChange: (code: string) => void
+  sttProviders: SttProvider[]
+  selectedSttProviderId: string
+  onSttProviderChange: (id: string) => void
   sttModels: SttModel[]
   selectedSttModelId: string
   onSttModelChange: (id: string) => void
@@ -51,14 +66,18 @@ export function CurriculumPanel({
   curriculum, state, complete,
   personas, selectedPersonaId, onPersonaChange,
   voices, selectedVoiceId, onVoiceChange,
+  voiceArches, selectedVoiceArchId, onVoiceArchChange,
   sttLanguages, selectedLangCode, onLangChange,
+  sttProviders, selectedSttProviderId, onSttProviderChange,
   sttModels, selectedSttModelId, onSttModelChange,
   isAdmin = false,
   onViewPage,
 }: CurriculumPanelProps) {
   const sortedPersonas   = sortByRecency(personas,     (p) => p.id,           (p) => p.name, 'persona')
   const sortedVoices     = sortByRecency(voices,       (v) => v.id,           (v) => v.id,   'voice')
+  const sortedVoiceArches = sortByRecency(voiceArches, (v) => v.id,           (v) => v.label, 'voice_arch')
   const sortedLanguages  = sortByRecency(sttLanguages, (l) => l.code ?? '',   (l) => l.name, 'stt_lang')
+  const sortedSttProviders = sortByRecency(sttProviders, (p) => p.id, (p) => p.id, 'stt_provider')
   const sortedSttModels  = sortByRecency(sttModels,    (m) => m.id,           (m) => m.id,   'stt_model')
 
   const controls = (
@@ -78,10 +97,28 @@ export function CurriculumPanel({
           ))}
         </SelectRow>
       )}
+      {sortedVoiceArches.length > 0 && (
+        <SelectRow
+          label="Conversation mode"
+          value={selectedVoiceArchId}
+          onChange={(id) => { recordRecent('voice_arch', id); onVoiceArchChange(id) }}
+        >
+          {sortedVoiceArches.map((v) => (
+            <option key={v.id} value={v.id}>{v.label}</option>
+          ))}
+        </SelectRow>
+      )}
       {sortedLanguages.length > 0 && (
         <SelectRow label="Speech language" value={selectedLangCode} onChange={(code) => { recordRecent('stt_lang', code); onLangChange(code) }}>
           {sortedLanguages.map((l) => (
             <option key={l.code ?? '__auto'} value={l.code ?? ''}>{l.name}</option>
+          ))}
+        </SelectRow>
+      )}
+      {isAdmin && sortedSttProviders.length > 0 && (
+        <SelectRow label="STT provider" value={selectedSttProviderId} onChange={(id) => { recordRecent('stt_provider', id); onSttProviderChange(id) }}>
+          {sortedSttProviders.map((p) => (
+            <option key={p.id} value={p.id}>{p.id}{p.is_default ? ' (default)' : ''}</option>
           ))}
         </SelectRow>
       )}
