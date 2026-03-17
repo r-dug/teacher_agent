@@ -855,9 +855,14 @@ class TeachingAgent:
         llm_model: str,
         teach_llm_provider: str = "anthropic",
         teach_llm_model: str | None = None,
+        decompose_llm_provider: str | None = None,
+        decompose_llm_model: str | None = None,
         openai_api_key: str | None = None,
         openai_timeout_seconds: float = 30.0,
         openai_max_retries: int = 1,
+        openai_decompose_timeout_seconds: float | None = None,
+        openai_decompose_max_retries: int | None = None,
+        openai_decompose_max_input_chars: int = 120000,
         tts_provider=None,
         fallback_tts_provider=None,
         tts_voice: str | None = None,
@@ -888,9 +893,28 @@ class TeachingAgent:
         self._llm_model = llm_model
         self._teach_llm_provider = (teach_llm_provider or "anthropic").strip().lower()
         self._teach_llm_model = teach_llm_model or llm_model
+        self._decompose_llm_provider = (decompose_llm_provider or self._teach_llm_provider or "anthropic").strip().lower()
+        self._decompose_llm_model = decompose_llm_model or llm_model
         self._openai_api_key = (openai_api_key or "").strip()
         self._openai_timeout_seconds = max(1.0, float(openai_timeout_seconds))
         self._openai_max_retries = max(0, int(openai_max_retries))
+        self._openai_decompose_timeout_seconds = max(
+            1.0,
+            float(
+                openai_decompose_timeout_seconds
+                if openai_decompose_timeout_seconds is not None
+                else self._openai_timeout_seconds
+            ),
+        )
+        self._openai_decompose_max_retries = max(
+            0,
+            int(
+                openai_decompose_max_retries
+                if openai_decompose_max_retries is not None
+                else self._openai_max_retries
+            ),
+        )
+        self._openai_decompose_max_input_chars = max(1000, int(openai_decompose_max_input_chars))
         self.tts_provider = tts_provider
         self.fallback_tts_provider = fallback_tts_provider
         self.tts_voice = tts_voice or kokoro_voice
@@ -955,14 +979,19 @@ class TeachingAgent:
 
         Synchronous; call from a background thread.
         """
-        import anthropic
         import fitz  # pymupdf
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        client = anthropic.Anthropic(max_retries=6)
+        decompose_provider = self._decompose_llm_provider
+        anthropic_client = None
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
-        supports_thinking = "haiku" not in self._llm_model
+        supports_thinking = "haiku" not in self._decompose_llm_model
+
+        if decompose_provider != "openai":
+            import anthropic
+
+            anthropic_client = anthropic.Anthropic(max_retries=6)
 
         goal_note = (
             f"\n\nSTUDENT GOAL: \"{student_goal}\"\n"
@@ -977,7 +1006,17 @@ class TeachingAgent:
         if on_progress:
             on_progress("Analysing document structure…")
 
-        segments, doc_title = _find_segments(doc, client, total_pages)
+        if decompose_provider == "openai":
+            toc_segs = _toc_segments(doc, total_pages, SEGMENT_TARGET_PAGES)
+            if toc_segs:
+                segments, doc_title = toc_segs, None
+            else:
+                segments, doc_title = [
+                    (start, min(start + SEGMENT_TARGET_PAGES, total_pages))
+                    for start in range(0, total_pages, SEGMENT_TARGET_PAGES)
+                ], None
+        else:
+            segments, doc_title = _find_segments(doc, anthropic_client, total_pages)
         n_segs = len(segments)
 
         if on_progress and n_segs > 1:
@@ -1006,9 +1045,25 @@ class TeachingAgent:
                     f"Decomposing pages {start + 1}–{end} of {total_pages}…"
                     if n_segs > 1 else "Decomposing document…"
                 )
+            if decompose_provider == "openai":
+                return idx, self._decompose_segment_bytes_openai(
+                    pdf_bytes,
+                    start,
+                    end,
+                    total_pages,
+                    goal_note,
+                    cancel_event,
+                )
             return idx, self._decompose_segment_bytes(
-                client, pdf_bytes, start, end, total_pages,
-                goal_note, supports_thinking, on_progress, cancel_event,
+                anthropic_client,
+                pdf_bytes,
+                start,
+                end,
+                total_pages,
+                goal_note,
+                supports_thinking,
+                on_progress,
+                cancel_event,
             )
 
         pool = ThreadPoolExecutor(max_workers=min(n_segs, MAX_SEGMENT_WORKERS))
@@ -1083,7 +1138,7 @@ class TeachingAgent:
                 return None, []
 
             with client.messages.stream(
-                model=self._llm_model,
+                model=self._decompose_llm_model,
                 max_tokens=32000,
                 **({"thinking": {"type": "adaptive"}} if supports_thinking else {}),
                 system=DECOMPOSE_SYSTEM,
@@ -1093,7 +1148,7 @@ class TeachingAgent:
                 response = stream.get_final_message()
 
             if self._on_token_usage:
-                self._on_token_usage("decompose_pdf", self._llm_model, response.usage)
+                self._on_token_usage("decompose_pdf", self._decompose_llm_model, response.usage)
 
             tool_block = next(
                 (b for b in response.content if getattr(b, "type", None) == "tool_use"),
@@ -1146,6 +1201,80 @@ class TeachingAgent:
                 }],
             })
 
+    def _decompose_segment_bytes_openai(
+        self,
+        pdf_bytes: bytes,
+        seg_start: int,
+        seg_end: int,
+        total_pages: int,
+        goal_note: str,
+        cancel_event: threading.Event | None = None,
+    ) -> tuple[str | None, list[dict]]:
+        """OpenAI fallback decomposition path for one PDF segment."""
+        import fitz
+
+        if cancel_event and cancel_event.is_set():
+            return None, []
+
+        seg_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            text_blocks: list[str] = []
+            for i, page in enumerate(seg_doc):
+                text = page.get_text().strip()
+                if not text:
+                    continue
+                absolute_page = seg_start + i + 1
+                text_blocks.append(f"[Page {absolute_page}]\n{text}")
+        finally:
+            seg_doc.close()
+
+        combined_text = "\n\n".join(text_blocks).strip()
+        if not combined_text:
+            return None, []
+        combined_text = combined_text[: self._openai_decompose_max_input_chars]
+
+        chunk_note = (
+            f"\nNote: This is pages {seg_start + 1}–{seg_end} of {total_pages}. "
+            "Extract sections only from these pages."
+            if total_pages > (seg_end - seg_start)
+            else ""
+        )
+        prompt = (
+            DECOMPOSE_PROMPT
+            + chunk_note
+            + goal_note
+            + "\n\nSOURCE TEXT EXTRACT:\n"
+            + combined_text
+            + "\n\nReturn JSON only."
+        )
+        content_blocks, content_text, usage = self._openai_chat_turn(
+            model=self._decompose_llm_model,
+            system=DECOMPOSE_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+            tools=None,
+            timeout_seconds=self._openai_decompose_timeout_seconds,
+            max_retries=self._openai_decompose_max_retries,
+        )
+        if self._on_token_usage:
+            self._on_token_usage("decompose_pdf", self._decompose_llm_model, usage)
+
+        raw = content_text.strip()
+        if not raw and content_blocks:
+            raw = "\n".join(
+                str(b.get("text", "")).strip()
+                for b in content_blocks
+                if isinstance(b, dict) and b.get("type") == "text"
+            ).strip()
+        if not raw:
+            raise ValueError("OpenAI decompose agent returned no text block")
+        raw = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`").strip()
+        start_idx = raw.find("{")
+        end_idx = raw.rfind("}")
+        if start_idx >= 0 and end_idx > start_idx:
+            raw = raw[start_idx : end_idx + 1]
+        data = json.loads(raw)
+        return data.get("title"), data.get("sections", [])
+
     def _run_web_search(self, query: str) -> str:
         """
         Guardrailed web search subagent.
@@ -1158,7 +1287,7 @@ class TeachingAgent:
         client = anthropic.Anthropic(max_retries=3)
         try:
             response = client.beta.messages.create(
-                model=self._llm_model,
+                model=self._decompose_llm_model,
                 max_tokens=1024,
                 system=SEARCH_GUARDRAIL_SYSTEM,
                 betas=["web-search-2025-03-05"],
@@ -1172,7 +1301,7 @@ class TeachingAgent:
                 }],
             )
             if self._on_token_usage:
-                self._on_token_usage("web_search", self._llm_model, response.usage)
+                self._on_token_usage("web_search", self._decompose_llm_model, response.usage)
             # Extract text content from the final response.
             for block in response.content:
                 if getattr(block, "type", None) == "text" and block.text.strip():
@@ -1692,6 +1821,8 @@ class TeachingAgent:
         system: str,
         messages: list[dict],
         tools: list | None,
+        timeout_seconds: float | None = None,
+        max_retries: int | None = None,
     ) -> tuple[list[dict], str, object]:
         """
         Execute one OpenAI chat-completions turn and return:
@@ -1715,10 +1846,12 @@ class TeachingAgent:
         headers = {"Authorization": f"Bearer {self._openai_api_key}"}
         url = "https://api.openai.com/v1/chat/completions"
         last_err: Exception | None = None
+        timeout_value = max(1.0, float(timeout_seconds if timeout_seconds is not None else self._openai_timeout_seconds))
+        retry_count = max(0, int(max_retries if max_retries is not None else self._openai_max_retries))
 
-        for attempt in range(self._openai_max_retries + 1):
+        for attempt in range(retry_count + 1):
             try:
-                with httpx.Client(timeout=self._openai_timeout_seconds) as client:
+                with httpx.Client(timeout=timeout_value) as client:
                     resp = client.post(url, headers=headers, json=payload)
                 if resp.status_code >= 400:
                     raise RuntimeError(_format_openai_chat_error(resp))
@@ -1776,7 +1909,7 @@ class TeachingAgent:
                 return content_blocks, content_text, usage_obj
             except Exception as exc:
                 last_err = exc
-                if attempt >= self._openai_max_retries:
+                if attempt >= retry_count:
                     break
                 time.sleep(min(0.2 * (2**attempt), 1.0))
 
