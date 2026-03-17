@@ -98,7 +98,7 @@ echo "[5/9] Installing Python dependencies..."
 
 echo "  Building React client..."
 source "$NVM_DIR/nvm.sh" && nvm use 20
-cd client && npm ci --silent && npm run copy-vad-assets && npm run build
+cd client && npm ci --silent && npm run build
 cd "$APP_DIR"
 
 # ── 6. Storage directory ──────────────────────────────────────────────────────

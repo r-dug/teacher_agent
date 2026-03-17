@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,95 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _coerce_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("content", "text", "summary", "description", "body", "value"):
+            txt = _coerce_text(value.get(key))
+            if txt:
+                return txt
+        return ""
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            txt = _coerce_text(item)
+            if txt:
+                parts.append(txt)
+        return "\n".join(parts).strip()
+    return str(value).strip()
+
+
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        m = re.search(r"-?\d+", value)
+        if m:
+            try:
+                return int(m.group(0))
+            except Exception:
+                return None
+    return None
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            text = _coerce_text(item)
+            if text:
+                out.append(text)
+        return out
+    if isinstance(value, str):
+        parts = re.split(r"[\n,;]+", value)
+        return [p.strip() for p in parts if p.strip()]
+    return []
+
+
+def _extract_sections_payload(parsed: dict[str, Any]) -> Any:
+    # Preferred shape.
+    sections = parsed.get("sections")
+    if isinstance(sections, list):
+        return sections
+    items = parsed.get("items")
+    if isinstance(items, list):
+        return items
+
+    # Common alternate wrappers from LLMs.
+    for path in (
+        ("curriculum", "sections"),
+        ("decomposition", "sections"),
+        ("result", "sections"),
+        ("output", "sections"),
+        ("lesson_plan", "sections"),
+    ):
+        node: Any = parsed
+        for key in path:
+            if not isinstance(node, dict):
+                node = None
+                break
+            node = node.get(key)
+        if isinstance(node, list):
+            return node
+
+    # Some models return "chapters" even for section prompts.
+    chapters = parsed.get("chapters")
+    if isinstance(chapters, list):
+        return chapters
+
+    # Last resort: treat a single section-like object as one section.
+    if any(k in parsed for k in ("content", "summary", "description", "title", "section_title", "name")):
+        return [parsed]
+    return []
+
+
 def _normalize_sections_or_raise(raw_sections: Any) -> list[dict[str, Any]]:
     """Normalize model/cache section payload and require at least one teachable section."""
     if not isinstance(raw_sections, list):
@@ -40,27 +130,72 @@ def _normalize_sections_or_raise(raw_sections: Any) -> list[dict[str, Any]]:
 
     normalized: list[dict[str, Any]] = []
     for idx, sec in enumerate(raw_sections):
+        if isinstance(sec, str):
+            sec = {"title": sec.strip()}
         if not isinstance(sec, dict):
             continue
 
-        title = str(sec.get("title") or "").strip() or f"Section {idx + 1}"
-        content = str(sec.get("content") or "").strip()
+        explicit_title = (
+            _coerce_text(sec.get("title"))
+            or _coerce_text(sec.get("section_title"))
+            or _coerce_text(sec.get("name"))
+        )
+        title = explicit_title or f"Section {idx + 1}"
+
+        content = ""
+        for key in (
+            "content",
+            "teaching_content",
+            "teaching_focus",
+            "summary",
+            "description",
+            "explanation",
+            "body",
+            "notes",
+        ):
+            content = _coerce_text(sec.get(key))
+            if content:
+                break
+
+        key_concepts: list[str] = []
+        for concepts_key in (
+            "key_concepts",
+            "keyConcepts",
+            "concepts",
+            "learning_objectives",
+            "objectives",
+            "outcomes",
+        ):
+            key_concepts = _coerce_string_list(sec.get(concepts_key))
+            if key_concepts:
+                break
+
         if not content:
-            # A section without content is not teachable; skip it.
+            # Some models omit content but provide strong section signals.
+            if key_concepts:
+                content = "Focus topics: " + "; ".join(key_concepts[:8]) + "."
+            elif explicit_title:
+                content = f"Teach the core ideas of {title} using the source chapter pages."
+
+        page_start = None
+        for ps_key in ("page_start", "pageStart", "start_page", "startPage", "from_page"):
+            page_start = _coerce_int(sec.get(ps_key))
+            if page_start is not None:
+                break
+
+        page_end = None
+        for pe_key in ("page_end", "pageEnd", "end_page", "endPage", "to_page"):
+            page_end = _coerce_int(sec.get(pe_key))
+            if page_end is not None:
+                break
+
+        if page_start is not None and page_end is None:
+            page_end = page_start
+        if page_end is not None and page_start is None:
+            page_start = page_end
+
+        if not content:
             continue
-
-        key_concepts_raw = sec.get("key_concepts")
-        if isinstance(key_concepts_raw, list):
-            key_concepts = [str(c).strip() for c in key_concepts_raw if str(c).strip()]
-        else:
-            key_concepts = []
-
-        page_start = sec.get("page_start")
-        page_end = sec.get("page_end")
-        if isinstance(page_start, bool) or not isinstance(page_start, int):
-            page_start = None
-        if isinstance(page_end, bool) or not isinstance(page_end, int):
-            page_end = None
 
         normalized.append(
             {
@@ -900,7 +1035,10 @@ def _decompose_chapter_openai_sync(
 
     combined_text = "\n\n".join(page_texts).strip()
     if not combined_text:
-        return []
+        raise ValueError(
+            f"No extractable text found for pages {page_start}–{page_end}. "
+            "This chapter may be image-only or require OCR."
+        )
     combined_text = combined_text[: max(1000, int(settings.OPENAI_DECOMPOSE_MAX_INPUT_CHARS))]
 
     chunk_note = (
@@ -933,9 +1071,12 @@ def _decompose_chapter_openai_sync(
         max_retries=settings.OPENAI_DECOMPOSE_MAX_RETRIES,
     )
     parsed = _extract_json_object(raw)
-    sections = parsed.get("sections") or []
+    sections = _extract_sections_payload(parsed)
     if not isinstance(sections, list):
-        raise ValueError("OpenAI decomposition response did not include a valid sections list.")
+        raise ValueError(
+            "OpenAI decomposition response did not include a valid sections list. "
+            f"Top-level keys: {sorted(parsed.keys())[:12]}"
+        )
     return sections
 
 
