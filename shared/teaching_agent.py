@@ -1462,6 +1462,11 @@ class TeachingAgent:
         Synchronous; call from a background thread.  Modifies messages in place.
         Fires callbacks throughout execution.
         """
+        if not curriculum.sections:
+            raise ValueError(
+                "No lesson sections are available for teaching. Decompose the document first."
+            )
+
         if not messages:
             messages.append({"role": "user", "content": "Please begin teaching."})
 

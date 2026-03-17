@@ -98,11 +98,19 @@ export function CourseDrawer({
 
   async function handleDelete() {
     if (!course) return
-    if (!confirm(`Delete course "${course.title}"? Lessons in this course will become individual lessons.`)) return
+    if (!confirm(`Delete course "${course.title}"?`)) return
+    const cascadeLessons = confirm(
+      'Also delete all lessons in this course?\n\n' +
+      'Press OK to delete the course and all course lessons.\n' +
+      'Press Cancel to keep lessons as individual lessons.'
+    )
     setSaving(true)
     setError(null)
     try {
-      const res = await fetch(`/api/courses/${course.id}`, {
+      const params = new URLSearchParams()
+      if (cascadeLessons) params.set('cascade_lessons', 'true')
+      const suffix = params.toString() ? `?${params.toString()}` : ''
+      const res = await fetch(`/api/courses/${course.id}${suffix}`, {
         method: 'DELETE',
         headers: { 'X-Session-Id': sessionId },
       })

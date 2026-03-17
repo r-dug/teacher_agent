@@ -358,6 +358,10 @@ async def ws_session(
             curriculum = await state.agent_session.decompose_pdf(
                 state.pdf_path, on_progress, student_goal=state.lesson_goal
             )
+            if not curriculum.sections:
+                raise RuntimeError(
+                    "Decomposition produced no sections. Try reducing chapter scope or adjusting the objective prompt."
+                )
             await models.upsert_sections(conn, lesson_id, curriculum.sections)
             await models.update_lesson(conn, lesson_id, title=curriculum.title)
             await registry.send(session_id, {
@@ -760,6 +764,15 @@ async def _send_loop(
                 "[send_loop] decompose_complete: curriculum updated (%d sections)",
                 len(state.curriculum.sections),
             )
+            if not state.curriculum.sections:
+                try:
+                    await websocket.send_json({
+                        "event": "error",
+                        "message": "Decomposition finished without sections. Adjust the objective prompt and retry decomposition.",
+                    })
+                except Exception:
+                    pass
+                continue
             if not (state.agent_task and not state.agent_task.done()):
                 if state.phase == "teaching" and state.first_teaching_task_fn:
                     # Goal already captured via intro — start first teaching turn.

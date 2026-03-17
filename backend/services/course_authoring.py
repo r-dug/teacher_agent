@@ -33,6 +33,50 @@ def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _normalize_sections_or_raise(raw_sections: Any) -> list[dict[str, Any]]:
+    """Normalize model/cache section payload and require at least one teachable section."""
+    if not isinstance(raw_sections, list):
+        raise ValueError("Sections payload must be a list.")
+
+    normalized: list[dict[str, Any]] = []
+    for idx, sec in enumerate(raw_sections):
+        if not isinstance(sec, dict):
+            continue
+
+        title = str(sec.get("title") or "").strip() or f"Section {idx + 1}"
+        content = str(sec.get("content") or "").strip()
+        if not content:
+            # A section without content is not teachable; skip it.
+            continue
+
+        key_concepts_raw = sec.get("key_concepts")
+        if isinstance(key_concepts_raw, list):
+            key_concepts = [str(c).strip() for c in key_concepts_raw if str(c).strip()]
+        else:
+            key_concepts = []
+
+        page_start = sec.get("page_start")
+        page_end = sec.get("page_end")
+        if isinstance(page_start, bool) or not isinstance(page_start, int):
+            page_start = None
+        if isinstance(page_end, bool) or not isinstance(page_end, int):
+            page_end = None
+
+        normalized.append(
+            {
+                "title": title,
+                "content": content,
+                "key_concepts": key_concepts,
+                "page_start": page_start,
+                "page_end": page_end,
+            }
+        )
+
+    if not normalized:
+        raise ValueError("No teachable sections were produced.")
+    return normalized
+
+
 def _extract_json_object(raw: str) -> dict[str, Any]:
     cleaned = (raw or "").strip()
     cleaned = cleaned.replace("```json", "").replace("```", "").strip()
@@ -696,9 +740,15 @@ async def _resolve_sections(
     ) as cur:
         row = await cur.fetchone()
     if row is not None:
-        return True, _json_loads(row[0], [])
+        try:
+            cached_sections = _normalize_sections_or_raise(_json_loads(row[0], []))
+            return True, cached_sections
+        except Exception:
+            # Existing cache row is empty/invalid; invalidate and recompute.
+            await conn.execute("DELETE FROM decomposition_cache WHERE cache_key = ?", (cache_key,))
+            await conn.commit()
 
-    sections = await asyncio.to_thread(
+    raw_sections = await asyncio.to_thread(
         _decompose_chapter_sync,
         source_pdf_rel,
         page_start,
@@ -708,6 +758,7 @@ async def _resolve_sections(
         decompose_provider,
         decompose_model,
     )
+    sections = _normalize_sections_or_raise(raw_sections)
     await conn.execute(
         """INSERT INTO decomposition_cache
            (cache_key, pdf_hash, page_start, page_end, objectives_hash, model, prompt_version, sections_json, created_at, updated_at)
@@ -900,6 +951,9 @@ async def _upsert_chapter_lesson(
     page_end: int,
     sections: list[dict[str, Any]],
 ) -> str:
+    if not sections:
+        raise ValueError("Cannot upsert chapter lesson with zero sections.")
+
     async with conn.execute(
         """SELECT lesson_id FROM course_chapter_lessons
            WHERE course_id = ? AND chapter_id = ?""",

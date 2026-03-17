@@ -98,10 +98,17 @@ async def update_course(course_id: str, request: Request, x_session_id: str = He
 
 
 @router.delete("/{course_id}", status_code=204)
-async def delete_course(course_id: str, x_session_id: str = Header(...)):
+async def delete_course(
+    course_id: str,
+    x_session_id: str = Header(...),
+    cascade_lessons: bool = False,
+):
     entry = _require_session(x_session_id)
     user_id = await _get_user_id(x_session_id, entry)
-    return await _proxy_delete(f"/courses/{course_id}", params={"user_id": user_id})
+    params: dict[str, str] = {"user_id": user_id}
+    if cascade_lessons:
+        params["cascade_lessons"] = "true"
+    return await _proxy_delete(f"/courses/{course_id}", params=params)
 
 
 @router.post("/{course_id}/publish")

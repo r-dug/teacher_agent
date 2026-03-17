@@ -283,9 +283,20 @@ async def update_course(course_id: str, user_id: str, body: CourseUpdate, conn: 
 
 
 @router.delete("/{course_id}", status_code=204)
-async def delete_course(course_id: str, user_id: str, conn: Conn):
+async def delete_course(
+    course_id: str,
+    user_id: str,
+    conn: Conn,
+    cascade_lessons: bool = False,
+):
     course = _course_or_404(await models.get_course(conn, course_id))
     _check_ownership(course, user_id)
+    if cascade_lessons:
+        await conn.execute(
+            "DELETE FROM lessons WHERE course_id = ? AND user_id = ?",
+            (course_id, user_id),
+        )
+        await conn.commit()
     await models.delete_course(conn, course_id)
 
 
