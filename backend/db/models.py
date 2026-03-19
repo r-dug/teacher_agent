@@ -96,14 +96,15 @@ async def consume_upload_token(
 
 async def create_course(
     conn: aiosqlite.Connection,
-    user_id: str,
+    creator_id: str,
     title: str,
     description: str | None = None,
+    visibility: str = "draft",
 ) -> Row:
     cid = new_id()
     await conn.execute(
-        "INSERT INTO courses (id, user_id, title, description) VALUES (?, ?, ?, ?)",
-        (cid, user_id, title, description),
+        "INSERT INTO courses (id, creator_id, title, description, visibility) VALUES (?, ?, ?, ?, ?)",
+        (cid, creator_id, title, description, visibility),
     )
     await conn.commit()
     async with conn.execute("SELECT * FROM courses WHERE id = ?", (cid,)) as cur:
@@ -121,8 +122,11 @@ async def list_courses(
     conn: aiosqlite.Connection,
     user_id: str,
 ) -> list[Row]:
+    """Return courses created by user_id or published to all users."""
     async with conn.execute(
-        "SELECT * FROM courses WHERE user_id = ? ORDER BY updated_at DESC",
+        """SELECT * FROM courses
+           WHERE creator_id = ? OR visibility = 'published'
+           ORDER BY updated_at DESC""",
         (user_id,),
     ) as cur:
         return _rows(await cur.fetchall())
@@ -131,7 +135,7 @@ async def list_courses(
 async def update_course(
     conn: aiosqlite.Connection, course_id: str, **kwargs: Any
 ) -> None:
-    allowed = {"title", "description"}
+    allowed = {"title", "description", "visibility"}
     for key, value in kwargs.items():
         if key not in allowed:
             continue
@@ -151,16 +155,17 @@ async def delete_course(conn: aiosqlite.Connection, course_id: str) -> None:
 
 async def create_lesson(
     conn: aiosqlite.Connection,
-    user_id: str,
+    creator_id: str,
     title: str,
     pdf_path: str | None = None,
     course_id: str | None = None,
     description: str | None = None,
+    visibility: str = "draft",
 ) -> str:
     lid = new_id()
     await conn.execute(
-        "INSERT INTO lessons (id, user_id, title, pdf_path, course_id, description) VALUES (?, ?, ?, ?, ?, ?)",
-        (lid, user_id, title, pdf_path, course_id, description),
+        "INSERT INTO lessons (id, creator_id, title, pdf_path, course_id, description, visibility) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (lid, creator_id, title, pdf_path, course_id, description, visibility),
     )
     await conn.commit()
     return lid
@@ -181,12 +186,20 @@ async def list_lessons(
     course_id: str | None = None,
     standalone: bool = False,
 ) -> list[Row]:
+    """
+    Return lessons accessible to user_id (created by them or published),
+    joined with their enrollment state (current_section_idx, completed).
+    """
     sql = (
         "SELECT l.*, "
+        "COALESCE(e.current_section_idx, 0) AS current_section_idx, "
+        "COALESCE(e.completed, 0) AS completed, "
         "(SELECT COUNT(*) FROM lesson_sections WHERE lesson_id = l.id) AS section_count "
-        "FROM lessons l WHERE l.user_id = ?"
+        "FROM lessons l "
+        "LEFT JOIN lesson_enrollments e ON e.lesson_id = l.id AND e.user_id = ? "
+        "WHERE (l.creator_id = ? OR l.visibility = 'published')"
     )
-    params: list[Any] = [user_id]
+    params: list[Any] = [user_id, user_id]
     if standalone:
         sql += " AND l.course_id IS NULL"
     elif course_id is not None:
@@ -203,16 +216,14 @@ _LESSON_UPDATE_SQL: dict[str, str] = {
     "description": "UPDATE lessons SET description = ?, updated_at = datetime('now') WHERE id = ?",
     "course_id": "UPDATE lessons SET course_id = ?, updated_at = datetime('now') WHERE id = ?",
     "pdf_path": "UPDATE lessons SET pdf_path = ?, updated_at = datetime('now') WHERE id = ?",
-    "current_section_idx": "UPDATE lessons SET current_section_idx = ?, updated_at = datetime('now') WHERE id = ?",
-    "completed": "UPDATE lessons SET completed = ?, updated_at = datetime('now') WHERE id = ?",
-    "lesson_goal": "UPDATE lessons SET lesson_goal = ?, updated_at = datetime('now') WHERE id = ?",
+    "visibility": "UPDATE lessons SET visibility = ?, updated_at = datetime('now') WHERE id = ?",
 }
 
 
 async def update_lesson(
     conn: aiosqlite.Connection, lesson_id: str, **kwargs: Any
 ) -> None:
-    """Update lesson columns.  Always bumps updated_at."""
+    """Update lesson template columns.  Always bumps updated_at."""
     for key, value in kwargs.items():
         sql = _LESSON_UPDATE_SQL.get(key)
         if sql is None:
@@ -223,6 +234,65 @@ async def update_lesson(
 
 async def delete_lesson(conn: aiosqlite.Connection, lesson_id: str) -> None:
     await conn.execute("DELETE FROM lessons WHERE id = ?", (lesson_id,))
+    await conn.commit()
+
+
+# ── lesson enrollments ─────────────────────────────────────────────────────────
+
+async def get_or_create_enrollment(
+    conn: aiosqlite.Connection,
+    lesson_id: str,
+    user_id: str,
+) -> Row:
+    """Return the enrollment row, creating it lazily if it doesn't exist."""
+    async with conn.execute(
+        "SELECT * FROM lesson_enrollments WHERE lesson_id = ? AND user_id = ?",
+        (lesson_id, user_id),
+    ) as cur:
+        row = _row(await cur.fetchone())
+    if row is not None:
+        return row
+    eid = new_id()
+    await conn.execute(
+        """INSERT INTO lesson_enrollments (id, lesson_id, user_id)
+           VALUES (?, ?, ?)""",
+        (eid, lesson_id, user_id),
+    )
+    await conn.commit()
+    async with conn.execute(
+        "SELECT * FROM lesson_enrollments WHERE id = ?", (eid,)
+    ) as cur:
+        return _row(await cur.fetchone())  # type: ignore[return-value]
+
+
+async def get_enrollment(
+    conn: aiosqlite.Connection,
+    lesson_id: str,
+    user_id: str,
+) -> Row | None:
+    async with conn.execute(
+        "SELECT * FROM lesson_enrollments WHERE lesson_id = ? AND user_id = ?",
+        (lesson_id, user_id),
+    ) as cur:
+        return _row(await cur.fetchone())
+
+
+_ENROLLMENT_UPDATE_SQL: dict[str, str] = {
+    "current_section_idx": "UPDATE lesson_enrollments SET current_section_idx = ?, updated_at = datetime('now') WHERE id = ?",
+    "completed": "UPDATE lesson_enrollments SET completed = ?, updated_at = datetime('now') WHERE id = ?",
+    "lesson_goal": "UPDATE lesson_enrollments SET lesson_goal = ?, updated_at = datetime('now') WHERE id = ?",
+}
+
+
+async def update_enrollment(
+    conn: aiosqlite.Connection, enrollment_id: str, **kwargs: Any
+) -> None:
+    """Update enrollment state columns.  Always bumps updated_at."""
+    for key, value in kwargs.items():
+        sql = _ENROLLMENT_UPDATE_SQL.get(key)
+        if sql is None:
+            continue
+        await conn.execute(sql, (value, enrollment_id))
     await conn.commit()
 
 
@@ -274,12 +344,12 @@ async def get_sections(
 
 async def upsert_messages(
     conn: aiosqlite.Connection,
-    lesson_id: str,
+    enrollment_id: str,
     messages: list[dict],
 ) -> None:
-    """Replace all messages for a lesson with a serialised list."""
+    """Replace all messages for an enrollment with a serialised list."""
     await conn.execute(
-        "DELETE FROM messages WHERE lesson_id = ?", (lesson_id,)
+        "DELETE FROM messages WHERE enrollment_id = ?", (enrollment_id,)
     )
     for idx, msg in enumerate(messages):
         content = msg["content"]
@@ -287,19 +357,19 @@ async def upsert_messages(
             json.dumps(content) if not isinstance(content, str) else content
         )
         await conn.execute(
-            "INSERT INTO messages (id, lesson_id, idx, role, content) VALUES (?, ?, ?, ?, ?)",
-            (new_id(), lesson_id, idx, msg["role"], content_json),
+            "INSERT INTO messages (id, enrollment_id, idx, role, content) VALUES (?, ?, ?, ?, ?)",
+            (new_id(), enrollment_id, idx, msg["role"], content_json),
         )
     await conn.commit()
 
 
 async def get_messages(
-    conn: aiosqlite.Connection, lesson_id: str
+    conn: aiosqlite.Connection, enrollment_id: str
 ) -> list[dict]:
     """Return messages as Anthropic SDK-compatible dicts."""
     async with conn.execute(
-        "SELECT role, content FROM messages WHERE lesson_id = ? ORDER BY idx",
-        (lesson_id,),
+        "SELECT role, content FROM messages WHERE enrollment_id = ? ORDER BY idx",
+        (enrollment_id,),
     ) as cur:
         rows = await cur.fetchall()
     result = []
@@ -313,7 +383,7 @@ async def get_messages(
         result.append({"role": role, "content": content})
 
     # Repair any dangling tool_use blocks (disconnect/save race condition).
-    from shared.teaching_agent import _strip_dangling_tool_use
+    from .util import _strip_dangling_tool_use
     _strip_dangling_tool_use(result)
 
     return result
@@ -451,7 +521,12 @@ BUILT_IN_PERSONAS = [
     {
         "id": "default",
         "name": "Default",
-        "instructions": "",
+        "instructions": (
+            "You are a helpful instructor."
+            "Guide the student through the course material,"
+            " answer their questions,"
+            " and encourage them to think critically."
+            "Always be patient and supportive."),
         "user_id": None,
     },
     {

@@ -11,8 +11,10 @@ async def test_create_and_get_lesson(mem_db):
     lesson = await models.get_lesson(mem_db, lid)
     assert lesson is not None
     assert lesson["title"] == "Test Lesson"
-    assert lesson["completed"] == 0
-    assert lesson["current_section_idx"] == 0
+    # enrollment state is separate — verify defaults via get_or_create_enrollment
+    enrollment = await models.get_or_create_enrollment(mem_db, lid, db.ANON_USER_ID)
+    assert enrollment["completed"] == 0
+    assert enrollment["current_section_idx"] == 0
 
 
 @pytest.mark.asyncio
@@ -29,12 +31,13 @@ async def test_list_lessons(mem_db):
 
 
 @pytest.mark.asyncio
-async def test_update_lesson(mem_db):
+async def test_update_enrollment_state(mem_db):
     lid = await models.create_lesson(mem_db, db.ANON_USER_ID, "Lesson")
-    await models.update_lesson(mem_db, lid, current_section_idx=3, completed=1)
-    lesson = await models.get_lesson(mem_db, lid)
-    assert lesson["current_section_idx"] == 3
-    assert lesson["completed"] == 1
+    enrollment = await models.get_or_create_enrollment(mem_db, lid, db.ANON_USER_ID)
+    await models.update_enrollment(mem_db, enrollment["id"], current_section_idx=3, completed=1)
+    updated = await models.get_enrollment(mem_db, lid, db.ANON_USER_ID)
+    assert updated["current_section_idx"] == 3
+    assert updated["completed"] == 1
 
 
 @pytest.mark.asyncio
@@ -81,12 +84,14 @@ async def test_upsert_sections_replaces(mem_db):
 @pytest.mark.asyncio
 async def test_upsert_and_get_messages(mem_db):
     lid = await models.create_lesson(mem_db, db.ANON_USER_ID, "WithMessages")
+    enrollment = await models.get_or_create_enrollment(mem_db, lid, db.ANON_USER_ID)
+    eid = enrollment["id"]
     msgs = [
         {"role": "user", "content": "Hello"},
         {"role": "assistant", "content": [{"type": "text", "text": "Hi there"}]},
     ]
-    await models.upsert_messages(mem_db, lid, msgs)
-    loaded = await models.get_messages(mem_db, lid)
+    await models.upsert_messages(mem_db, eid, msgs)
+    loaded = await models.get_messages(mem_db, eid)
     assert len(loaded) == 2
     assert loaded[0]["role"] == "user"
     assert loaded[0]["content"] == "Hello"
@@ -96,8 +101,10 @@ async def test_upsert_and_get_messages(mem_db):
 @pytest.mark.asyncio
 async def test_messages_replace(mem_db):
     lid = await models.create_lesson(mem_db, db.ANON_USER_ID, "MsgReplace")
-    await models.upsert_messages(mem_db, lid, [{"role": "user", "content": "old"}])
-    await models.upsert_messages(mem_db, lid, [{"role": "user", "content": "new"}])
-    loaded = await models.get_messages(mem_db, lid)
+    enrollment = await models.get_or_create_enrollment(mem_db, lid, db.ANON_USER_ID)
+    eid = enrollment["id"]
+    await models.upsert_messages(mem_db, eid, [{"role": "user", "content": "old"}])
+    await models.upsert_messages(mem_db, eid, [{"role": "user", "content": "new"}])
+    loaded = await models.get_messages(mem_db, eid)
     assert len(loaded) == 1
     assert loaded[0]["content"] == "new"

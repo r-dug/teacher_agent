@@ -7,22 +7,22 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from backend.services.tts import (
+from backend.services.voice.tts import (
     KokoroTTSProvider,
     OpenAITTSProvider,
     _decode_openai_audio,
     load_kokoro_pipeline,
     select_tts_provider,
 )
-from shared.constants import KOKORO_SAMPLE_RATE
+from backend.services.voice.config import KOKORO_SAMPLE_RATE
 
 def test_load_kokoro_pipeline_uses_lang_code():
     """load_kokoro_pipeline should resolve voice name to lang_code."""
     mock_pipeline_cls = MagicMock()
 
-    with patch("backend.services.tts.KPipeline", mock_pipeline_cls, create=True):
+    with patch("backend.services.voice.tts.KPipeline", mock_pipeline_cls, create=True):
         # Patch the import inside the function
-        import backend.services.tts as tts_mod
+        import backend.services.voice.tts as tts_mod
         with patch.dict("sys.modules", {"kokoro": MagicMock(KPipeline=mock_pipeline_cls)}):
             tts_mod.load_kokoro_pipeline("af_bella")
 
@@ -34,7 +34,7 @@ def test_load_kokoro_pipeline_unknown_voice_defaults():
     """Unknown voice should default to lang_code 'a'."""
     mock_pipeline_cls = MagicMock()
 
-    import backend.services.tts as tts_mod
+    import backend.services.voice.tts as tts_mod
     with patch.dict("sys.modules", {"kokoro": MagicMock(KPipeline=mock_pipeline_cls)}):
         tts_mod.load_kokoro_pipeline("unknown_voice_xyz")
 
@@ -104,7 +104,7 @@ def test_openai_provider_pcm_parsing_and_request_shape(monkeypatch):
             pcm = np.array([0, 16384, -16384], dtype=np.int16).tobytes()
             return _Resp(status_code=200, content=pcm)
 
-    monkeypatch.setattr("backend.services.tts.httpx.Client", _Client)
+    monkeypatch.setattr("backend.services.voice.tts.httpx.Client", _Client)
 
     provider = OpenAITTSProvider(
         api_key="test-key",

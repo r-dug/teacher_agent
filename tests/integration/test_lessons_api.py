@@ -47,7 +47,7 @@ async def test_list_lessons_multiple(client, mem_db):
 async def test_get_lesson_basic(client, mem_db):
     lesson_id = await models.create_lesson(mem_db, db.ANON_USER_ID, "Test Lesson")
 
-    resp = await client.get(f"/lessons/{lesson_id}")
+    resp = await client.get(f"/lessons/{lesson_id}", params={"user_id": db.ANON_USER_ID})
     assert resp.status_code == 200
     data = resp.json()
     assert data["id"] == lesson_id
@@ -74,12 +74,13 @@ async def test_get_lesson_with_sections_and_messages(client, mem_db):
             "page_end": 10,
         },
     ])
-    await models.upsert_messages(mem_db, lesson_id, [
+    enrollment = await models.get_or_create_enrollment(mem_db, lesson_id, db.ANON_USER_ID)
+    await models.upsert_messages(mem_db, enrollment["id"], [
         {"role": "user", "content": "Hello"},
         {"role": "assistant", "content": "Hi there!"},
     ])
 
-    resp = await client.get(f"/lessons/{lesson_id}")
+    resp = await client.get(f"/lessons/{lesson_id}", params={"user_id": db.ANON_USER_ID})
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["sections"]) == 2
@@ -91,45 +92,42 @@ async def test_get_lesson_with_sections_and_messages(client, mem_db):
 
 
 async def test_get_lesson_not_found(client, mem_db):
-    resp = await client.get("/lessons/does-not-exist")
+    resp = await client.get("/lessons/does-not-exist", params={"user_id": db.ANON_USER_ID})
     assert resp.status_code == 404
 
 
 # ── patch lesson ──────────────────────────────────────────────────────────────
 
-async def test_patch_lesson_section_index(client, mem_db):
-    lesson_id = await models.create_lesson(mem_db, db.ANON_USER_ID, "Patch Test")
-
-    resp = await client.patch(
-        f"/lessons/{lesson_id}", json={"current_section_idx": 3}
-    )
-    assert resp.status_code == 200
-    assert resp.json()["current_section_idx"] == 3
-
-
-async def test_patch_lesson_completed(client, mem_db):
-    lesson_id = await models.create_lesson(mem_db, db.ANON_USER_ID, "Patch Test")
-
-    resp = await client.patch(f"/lessons/{lesson_id}", json={"completed": True})
-    assert resp.status_code == 200
-    assert resp.json()["completed"] is True
-
-
-async def test_patch_lesson_both_fields(client, mem_db):
-    lesson_id = await models.create_lesson(mem_db, db.ANON_USER_ID, "Patch Test")
+async def test_patch_lesson_title(client, mem_db):
+    lesson_id = await models.create_lesson(mem_db, db.ANON_USER_ID, "Old Title")
 
     resp = await client.patch(
         f"/lessons/{lesson_id}",
-        json={"current_section_idx": 2, "completed": True},
+        params={"user_id": db.ANON_USER_ID},
+        json={"title": "New Title"},
     )
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["current_section_idx"] == 2
-    assert body["completed"] is True
+    assert resp.json()["title"] == "New Title"
+
+
+async def test_patch_lesson_visibility(client, mem_db):
+    lesson_id = await models.create_lesson(mem_db, db.ANON_USER_ID, "Draft Lesson")
+
+    resp = await client.patch(
+        f"/lessons/{lesson_id}",
+        params={"user_id": db.ANON_USER_ID},
+        json={"visibility": "published"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["visibility"] == "published"
 
 
 async def test_patch_lesson_not_found(client, mem_db):
-    resp = await client.patch("/lessons/nonexistent", json={"current_section_idx": 1})
+    resp = await client.patch(
+        "/lessons/nonexistent",
+        params={"user_id": db.ANON_USER_ID},
+        json={"title": "x"},
+    )
     assert resp.status_code == 404
 
 
@@ -138,7 +136,7 @@ async def test_patch_lesson_not_found(client, mem_db):
 async def test_delete_lesson(client, mem_db):
     lesson_id = await models.create_lesson(mem_db, db.ANON_USER_ID, "To Delete")
 
-    resp = await client.delete(f"/lessons/{lesson_id}")
+    resp = await client.delete(f"/lessons/{lesson_id}", params={"user_id": db.ANON_USER_ID})
     assert resp.status_code == 204
 
     # Confirm it's gone
@@ -146,13 +144,13 @@ async def test_delete_lesson(client, mem_db):
 
 
 async def test_delete_lesson_not_found(client, mem_db):
-    resp = await client.delete("/lessons/nonexistent")
+    resp = await client.delete("/lessons/nonexistent", params={"user_id": db.ANON_USER_ID})
     assert resp.status_code == 404
 
 
 async def test_delete_lesson_not_in_list_afterwards(client, mem_db):
     lesson_id = await models.create_lesson(mem_db, db.ANON_USER_ID, "Ephemeral")
-    await client.delete(f"/lessons/{lesson_id}")
+    await client.delete(f"/lessons/{lesson_id}", params={"user_id": db.ANON_USER_ID})
 
     resp = await client.get("/lessons", params={"user_id": db.ANON_USER_ID})
     ids = [item["id"] for item in resp.json()]
@@ -166,13 +164,14 @@ async def test_save_lesson_state_updates_progress(client, mem_db):
 
     resp = await client.post(
         f"/lessons/save/{lesson_id}",
+        params={"user_id": db.ANON_USER_ID},
         json={"current_section_idx": 2, "completed": False},
     )
     assert resp.status_code == 204
 
-    lesson = await models.get_lesson(mem_db, lesson_id)
-    assert lesson["current_section_idx"] == 2
-    assert not lesson["completed"]
+    enrollment = await models.get_enrollment(mem_db, lesson_id, db.ANON_USER_ID)
+    assert enrollment["current_section_idx"] == 2
+    assert not enrollment["completed"]
 
 
 async def test_save_lesson_state_persists_messages(client, mem_db):
@@ -186,10 +185,15 @@ async def test_save_lesson_state_persists_messages(client, mem_db):
             {"role": "assistant", "content": "Great question!"},
         ],
     }
-    resp = await client.post(f"/lessons/save/{lesson_id}", json=body)
+    resp = await client.post(
+        f"/lessons/save/{lesson_id}",
+        params={"user_id": db.ANON_USER_ID},
+        json=body,
+    )
     assert resp.status_code == 204
 
-    messages = await models.get_messages(mem_db, lesson_id)
+    enrollment = await models.get_enrollment(mem_db, lesson_id, db.ANON_USER_ID)
+    messages = await models.get_messages(mem_db, enrollment["id"])
     assert len(messages) == 2
     assert messages[0]["role"] == "user"
     assert messages[1]["role"] == "assistant"
@@ -211,7 +215,11 @@ async def test_save_lesson_state_persists_sections(client, mem_db):
             }
         ],
     }
-    resp = await client.post(f"/lessons/save/{lesson_id}", json=body)
+    resp = await client.post(
+        f"/lessons/save/{lesson_id}",
+        params={"user_id": db.ANON_USER_ID},
+        json=body,
+    )
     assert resp.status_code == 204
 
     sections = await models.get_sections(mem_db, lesson_id)
@@ -220,5 +228,9 @@ async def test_save_lesson_state_persists_sections(client, mem_db):
 
 
 async def test_save_lesson_state_not_found(client, mem_db):
-    resp = await client.post("/lessons/save/nonexistent", json={"current_section_idx": 0})
+    resp = await client.post(
+        "/lessons/save/nonexistent",
+        params={"user_id": db.ANON_USER_ID},
+        json={"current_section_idx": 0},
+    )
     assert resp.status_code == 404

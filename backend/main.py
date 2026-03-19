@@ -23,7 +23,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from .app_state import app_state
 from .config import settings
 from .db import connection as db, models
-from .routers import courses, internal, lessons, personas, voices, ws_session, usage
+from .routers import courses, internal, lessons, ws_session, usage
+from .routers.agents import personas
+from .routers.voice import voices
 
 
 # ── lifespan ───────────────────────────────────────────────────────────────────
@@ -74,7 +76,7 @@ async def lifespan(app: FastAPI):
     # STT model is loaded lazily on first transcription request (avoids blocking startup)
 
     print(f"Loading Kokoro TTS ({settings.DEFAULT_VOICE})...")
-    from .services.tts import build_tts_providers, load_kokoro_pipeline
+    from .services.voice.tts import build_tts_providers, load_kokoro_pipeline
 
     app_state.kokoro_pipeline = await asyncio.to_thread(
         load_kokoro_pipeline, settings.DEFAULT_VOICE

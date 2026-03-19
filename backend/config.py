@@ -36,6 +36,10 @@ class Settings:
     OPENAI_DECOMPOSE_MAX_INPUT_CHARS: int = int(
         os.getenv("OPENAI_DECOMPOSE_MAX_INPUT_CHARS", "120000")
     )
+    OPENAI_DECOMPOSE_ENABLE_VISION_OCR: bool = (
+        os.getenv("OPENAI_DECOMPOSE_ENABLE_VISION_OCR", "true").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
     DEFAULT_VOICE: str = os.getenv("DEFAULT_VOICE", "af_heart")
     ENV: str = os.getenv("ENV", "development")
     TTS_PROVIDER: str | None = os.getenv("TTS_PROVIDER")
@@ -68,12 +72,12 @@ class Settings:
     BACKEND_SHARED_SECRET: str | None = os.getenv("BACKEND_SHARED_SECRET")
 
     def effective_tts_provider(self) -> str:
-        from .services.tts import select_tts_provider
+        from .services.voice.tts import select_tts_provider
 
         return select_tts_provider(self.TTS_PROVIDER, self.ENV)
 
     def effective_stt_provider(self) -> str:
-        from .services.stt import select_stt_provider
+        from .services.voice.stt import select_stt_provider
 
         return select_stt_provider(self.STT_PROVIDER)
 

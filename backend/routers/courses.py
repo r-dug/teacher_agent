@@ -13,11 +13,11 @@ from pydantic import BaseModel
 
 from ..config import settings
 from ..db import connection as db, models
-from ..services.course_publish import (
+from ..services.documents.course_publish import (
     CoursePublishPreconditionError,
     publish_course_to_all_users,
 )
-from ..services.course_authoring import (
+from ..services.documents.course_authoring import (
     advisor_user_message,
     create_decomposition_job,
     ensure_advisor_session,
@@ -25,7 +25,7 @@ from ..services.course_authoring import (
     get_job_status as get_course_decompose_status,
     launch_decomposition_job,
 )
-from ..services.textbook_authoring import (
+from ..services.documents.textbook_authoring import (
     infer_chapter_drafts_from_pdf,
     normalize_chapter_drafts,
     sha256_file,
@@ -40,9 +40,10 @@ Conn = Annotated[aiosqlite.Connection, Depends(db.get)]
 
 class CourseResponse(BaseModel):
     id: str
-    user_id: str
+    creator_id: str
     title: str
     description: str | None
+    visibility: str
     created_at: str
     updated_at: str
 
@@ -174,7 +175,13 @@ def _course_or_404(course: dict | None) -> dict:
 
 
 def _check_ownership(course: dict, user_id: str) -> None:
-    if course["user_id"] != user_id:
+    if course["creator_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+
+def _check_read_access(course: dict, user_id: str) -> None:
+    """Allow the creator, or any user for published courses."""
+    if course["creator_id"] != user_id and course.get("visibility") != "published":
         raise HTTPException(status_code=403, detail="Access denied")
 
 
@@ -185,7 +192,7 @@ async def _require_admin(conn: aiosqlite.Connection, user_id: str) -> None:
 
 async def _source_or_404(conn: aiosqlite.Connection, course_id: str) -> dict:
     async with conn.execute(
-        """SELECT course_id, user_id, pdf_hash, pdf_path, page_count, toc_json
+        """SELECT course_id, creator_id, pdf_hash, pdf_path, page_count, toc_json
            FROM course_source_files
            WHERE course_id = ?""",
         (course_id,),
@@ -238,8 +245,9 @@ async def _replace_chapters(
         )
 
 
-def _course_source_path(user_id: str, course_id: str) -> Path:
-    return settings.STORAGE_DIR / user_id / "course_sources" / f"{course_id}.pdf"
+def _course_source_path(course_id: str) -> Path:
+    """New storage layout: STORAGE_DIR/courses/{course_id}.pdf"""
+    return settings.STORAGE_DIR / "courses" / f"{course_id}.pdf"
 
 
 # ── routes ─────────────────────────────────────────────────────────────────────
@@ -263,7 +271,7 @@ async def create_course(user_id: str, body: CourseCreate, conn: Conn):
 @router.get("/{course_id}", response_model=CourseResponse)
 async def get_course(course_id: str, user_id: str, conn: Conn):
     course = _course_or_404(await models.get_course(conn, course_id))
-    _check_ownership(course, user_id)
+    _check_read_access(course, user_id)
     return CourseResponse(**course)
 
 
@@ -293,7 +301,7 @@ async def delete_course(
     _check_ownership(course, user_id)
     if cascade_lessons:
         await conn.execute(
-            "DELETE FROM lessons WHERE course_id = ? AND user_id = ?",
+            "DELETE FROM lessons WHERE course_id = ? AND creator_id = ?",
             (course_id, user_id),
         )
         await conn.commit()
@@ -336,7 +344,7 @@ async def create_textbook_draft(
 
     course = await models.create_course(conn, user_id, course_title, description)
     course_id = course["id"]
-    pdf_path = _course_source_path(user_id, course_id)
+    pdf_path = _course_source_path(course_id)
     try:
         pdf_path.parent.mkdir(parents=True, exist_ok=True)
         with pdf_path.open("wb") as f:
@@ -377,10 +385,10 @@ async def create_textbook_draft(
         rel_path = str(pdf_path.relative_to(settings.STORAGE_DIR))
         await conn.execute(
             """INSERT INTO course_source_files
-               (course_id, user_id, pdf_hash, pdf_path, page_count, toc_json, created_at, updated_at)
+               (course_id, creator_id, pdf_hash, pdf_path, page_count, toc_json, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
                ON CONFLICT(course_id) DO UPDATE SET
-                 user_id = excluded.user_id,
+                 creator_id = excluded.creator_id,
                  pdf_hash = excluded.pdf_hash,
                  pdf_path = excluded.pdf_path,
                  page_count = excluded.page_count,
@@ -505,6 +513,79 @@ async def update_course_chapters(
                 title=str(r["title"]),
                 page_start=int(r["page_start"]),
                 page_end=int(r["page_end"]),
+                included=bool(r["included"]),
+            )
+            for r in rows
+        ],
+    )
+
+
+class ChapterMoveRequest(BaseModel):
+    direction: str  # 'up' | 'down'
+
+
+@router.post("/{course_id}/chapters/{chapter_id}/move", response_model=ChapterDraftListResponse)
+async def move_chapter(
+    course_id: str,
+    chapter_id: str,
+    user_id: str,
+    body: ChapterMoveRequest,
+    conn: Conn,
+):
+    """Move a chapter up or down within the course's chapter list."""
+    await _require_admin(conn, user_id)
+    course = _course_or_404(await models.get_course(conn, course_id))
+    _check_ownership(course, user_id)
+    source = await _source_or_404(conn, course_id)
+
+    if body.direction not in ("up", "down"):
+        raise HTTPException(status_code=422, detail="direction must be 'up' or 'down'")
+
+    rows = await _load_chapter_rows(conn, course_id)
+    ids = [r["id"] for r in rows]
+    if chapter_id not in ids:
+        raise HTTPException(status_code=404, detail="Chapter not found in this course")
+
+    pos = ids.index(chapter_id)
+    swap_pos = pos - 1 if body.direction == "up" else pos + 1
+    if swap_pos < 0 or swap_pos >= len(ids):
+        # Already at boundary — no-op, return current order
+        return ChapterDraftListResponse(
+            course_id=course_id,
+            pdf_hash=str(source["pdf_hash"]),
+            page_count=int(source["page_count"]),
+            chapters=[
+                ChapterDraftResponse(
+                    id=str(r["id"]), idx=int(r["idx"]), title=str(r["title"]),
+                    page_start=int(r["page_start"]), page_end=int(r["page_end"]),
+                    included=bool(r["included"]),
+                )
+                for r in rows
+            ],
+        )
+
+    # Swap idx values of the two chapters
+    a_id, b_id = ids[pos], ids[swap_pos]
+    a_idx, b_idx = rows[pos]["idx"], rows[swap_pos]["idx"]
+    await conn.execute(
+        "UPDATE course_chapter_drafts SET idx = ?, updated_at = datetime('now') WHERE id = ?",
+        (b_idx, a_id),
+    )
+    await conn.execute(
+        "UPDATE course_chapter_drafts SET idx = ?, updated_at = datetime('now') WHERE id = ?",
+        (a_idx, b_id),
+    )
+    await conn.commit()
+
+    rows = await _load_chapter_rows(conn, course_id)
+    return ChapterDraftListResponse(
+        course_id=course_id,
+        pdf_hash=str(source["pdf_hash"]),
+        page_count=int(source["page_count"]),
+        chapters=[
+            ChapterDraftResponse(
+                id=str(r["id"]), idx=int(r["idx"]), title=str(r["title"]),
+                page_start=int(r["page_start"]), page_end=int(r["page_end"]),
                 included=bool(r["included"]),
             )
             for r in rows

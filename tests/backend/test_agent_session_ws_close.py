@@ -1,11 +1,11 @@
-"""Tests for websocket close handling in BackendAgentSession."""
+"""Tests for websocket close handling in AgentSession."""
 
 from __future__ import annotations
 
 import asyncio
 from concurrent.futures import Future
 
-from backend.services.agent import BackendAgentSession
+from backend.services.agents.session import AgentSession
 
 
 def test_fire_swallow_send_after_close_error():
@@ -14,7 +14,7 @@ def test_fire_swallow_send_after_close_error():
     async def _send(_event: dict) -> None:
         return
 
-    sess = BackendAgentSession(
+    sess = AgentSession(
         send=_send,
         loop=loop,
         tts_provider=None,

@@ -1,23 +1,21 @@
-"""Tests for admin course publication service."""
+"""Tests for admin course publication service (visibility-based model)."""
 
 from __future__ import annotations
 
 import pytest
 
 from backend.db import models
-from backend.services.course_publish import (
+from backend.services.documents.course_publish import (
     CoursePublishPreconditionError,
     publish_course_to_all_users,
 )
 
 
 @pytest.mark.asyncio
-async def test_publish_only_decomposed_lessons(mem_db):
-    # admin source user
+async def test_publish_sets_visibility_on_decomposed_lessons_only(mem_db):
     admin = await models.create_user(mem_db, "admin@example.com", "pw")
     await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (admin["id"],))
-    # target non-admin user
-    user = await models.create_user(mem_db, "student@example.com", "pw")
+    student = await models.create_user(mem_db, "student@example.com", "pw")
     await mem_db.commit()
 
     course = await models.create_course(mem_db, admin["id"], "Starter JP", "desc")
@@ -28,7 +26,6 @@ async def test_publish_only_decomposed_lessons(mem_db):
         decomposed_id,
         [{"title": "s", "content": "c", "key_concepts": ["k"], "page_start": 1, "page_end": 1}],
     )
-    await models.upsert_messages(mem_db, decomposed_id, [{"role": "assistant", "content": "old"}])
 
     result = await publish_course_to_all_users(
         mem_db,
@@ -36,33 +33,34 @@ async def test_publish_only_decomposed_lessons(mem_db):
         actor_user_id=admin["id"],
     )
 
-    assert result["target_users"] == 1
     assert result["published_courses"] == 1
     assert result["published_lessons"] == 1
     assert result["skipped_lessons"] == 1
 
-    target_courses = await models.list_courses(mem_db, user["id"])
-    assert len(target_courses) == 1
-    cloned_lessons = await models.list_lessons(
-        mem_db, user["id"], course_id=target_courses[0]["id"], limit=20, offset=0
-    )
-    assert len(cloned_lessons) == 1
-    cloned = cloned_lessons[0]
-    assert cloned["title"] == "L1"
-    assert cloned["current_section_idx"] == 0
-    assert cloned["completed"] == 0
-    assert await models.get_messages(mem_db, cloned["id"]) == []
-    sections = await models.get_sections(mem_db, cloned["id"])
-    assert len(sections) == 1
-    assert sections[0]["content"] == "c"
-    assert undecomposed_id != cloned["id"]
+    # Course is now published
+    updated_course = await models.get_course(mem_db, course["id"])
+    assert updated_course["visibility"] == "published"
+
+    # Decomposed lesson is published; undecomposed stays draft
+    decomposed = await models.get_lesson(mem_db, decomposed_id)
+    assert decomposed["visibility"] == "published"
+    undecomposed = await models.get_lesson(mem_db, undecomposed_id)
+    assert undecomposed["visibility"] == "draft"
+
+    # Student can see the published course and lesson via list queries
+    student_courses = await models.list_courses(mem_db, student["id"])
+    assert any(c["id"] == course["id"] for c in student_courses)
+
+    student_lessons = await models.list_lessons(mem_db, student["id"], course_id=course["id"])
+    assert len(student_lessons) == 1
+    assert student_lessons[0]["id"] == decomposed_id
 
 
 @pytest.mark.asyncio
-async def test_publish_is_idempotent_and_updates_existing_clone(mem_db):
+async def test_publish_is_idempotent(mem_db):
     admin = await models.create_user(mem_db, "admin2@example.com", "pw")
     await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (admin["id"],))
-    user = await models.create_user(mem_db, "student2@example.com", "pw")
+    student = await models.create_user(mem_db, "student2@example.com", "pw")
     await mem_db.commit()
 
     course = await models.create_course(mem_db, admin["id"], "Course A", "desc A")
@@ -76,36 +74,26 @@ async def test_publish_is_idempotent_and_updates_existing_clone(mem_db):
     first = await publish_course_to_all_users(mem_db, source_course_id=course["id"], actor_user_id=admin["id"])
     assert first["published_lessons"] == 1
 
-    # change source content and republish; clone should update, not duplicate
+    # Update source content and republish
     await models.update_course(mem_db, course["id"], title="Course A v2")
     await models.update_lesson(mem_db, lesson_id, title="Lesson A v2")
-    await models.upsert_sections(
-        mem_db,
-        lesson_id,
-        [{"title": "S1", "content": "C2", "key_concepts": ["x"]}],
-    )
+
     second = await publish_course_to_all_users(mem_db, source_course_id=course["id"], actor_user_id=admin["id"])
     assert second["published_lessons"] == 1
 
-    target_courses = await models.list_courses(mem_db, user["id"])
-    assert len(target_courses) == 1
-    assert target_courses[0]["title"] == "Course A v2"
+    # Still one course and one lesson visible to student — no duplicates
+    student_courses = await models.list_courses(mem_db, student["id"])
+    assert sum(1 for c in student_courses if c["id"] == course["id"]) == 1
 
-    cloned_lessons = await models.list_lessons(
-        mem_db, user["id"], course_id=target_courses[0]["id"], limit=20, offset=0
-    )
-    assert len(cloned_lessons) == 1
-    assert cloned_lessons[0]["title"] == "Lesson A v2"
-    sections = await models.get_sections(mem_db, cloned_lessons[0]["id"])
-    assert len(sections) == 1
-    assert sections[0]["content"] == "C2"
+    student_lessons = await models.list_lessons(mem_db, student["id"], course_id=course["id"])
+    assert len(student_lessons) == 1
+    assert student_lessons[0]["title"] == "Lesson A v2"
 
 
 @pytest.mark.asyncio
 async def test_publish_requires_at_least_one_decomposed_lesson(mem_db):
     admin = await models.create_user(mem_db, "admin3@example.com", "pw")
     await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (admin["id"],))
-    user = await models.create_user(mem_db, "student3@example.com", "pw")
     await mem_db.commit()
 
     course = await models.create_course(mem_db, admin["id"], "Course Empty", "desc")
@@ -114,5 +102,6 @@ async def test_publish_requires_at_least_one_decomposed_lesson(mem_db):
     with pytest.raises(CoursePublishPreconditionError):
         await publish_course_to_all_users(mem_db, source_course_id=course["id"], actor_user_id=admin["id"])
 
-    target_courses = await models.list_courses(mem_db, user["id"])
-    assert target_courses == []
+    # Course stays draft
+    updated_course = await models.get_course(mem_db, course["id"])
+    assert updated_course["visibility"] == "draft"

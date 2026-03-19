@@ -38,7 +38,7 @@ async def _create_admin_textbook_course(mem_db) -> tuple[dict, str]:
     course_id = str(course["id"])
 
     pdf_bytes = _build_textbook_pdf_bytes()
-    rel_pdf_path = f"{admin['id']}/course_sources/{course_id}.pdf"
+    rel_pdf_path = f"courses/{course_id}.pdf"
     full_pdf_path = settings.STORAGE_DIR / rel_pdf_path
     full_pdf_path.parent.mkdir(parents=True, exist_ok=True)
     full_pdf_path.write_bytes(pdf_bytes)
@@ -46,7 +46,7 @@ async def _create_admin_textbook_course(mem_db) -> tuple[dict, str]:
 
     await mem_db.execute(
         """INSERT INTO course_source_files
-           (course_id, user_id, pdf_hash, pdf_path, page_count, toc_json, created_at, updated_at)
+           (course_id, creator_id, pdf_hash, pdf_path, page_count, toc_json, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))""",
         (course_id, admin["id"], pdf_hash, rel_pdf_path, 8, json.dumps([])),
     )
@@ -69,11 +69,11 @@ async def _create_admin_textbook_course(mem_db) -> tuple[dict, str]:
 @pytest.mark.asyncio
 async def test_advisor_start_message_finalize_roundtrip(client, mem_db, monkeypatch):
     monkeypatch.setattr(
-        "backend.services.course_authoring._advisor_reply_sync",
+        "backend.services.documents.course_authoring._advisor_reply_sync",
         lambda **_kwargs: "What level of assessment rigor do you want?",
     )
     monkeypatch.setattr(
-        "backend.services.course_authoring._objectives_prompt_sync",
+        "backend.services.documents.course_authoring._objectives_prompt_sync",
         lambda **_kwargs: "Use explicit objectives for each chapter and map quiz checkpoints.",
     )
 

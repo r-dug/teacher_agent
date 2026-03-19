@@ -39,7 +39,7 @@ def ws_test_client(tmp_path):
 
     Patches applied for the duration of the fixture:
       - backend.routers.ws_session.transcribe  → AsyncMock returning "hello teacher"
-      - shared.teaching_agent.TeachingAgent.run_turn → fast sync mock
+      - backend.services.agents.teacher_agent.TeacherAgent.run_turn → fast sync mock
       - app_state.stt_model                    → MagicMock
       - app_state.kokoro_pipeline              → None
     """
@@ -105,7 +105,7 @@ def ws_test_client(tmp_path):
         new=AsyncMock(return_value="hello teacher"),
     ):
         with patch(
-            "shared.teaching_agent.TeachingAgent.run_turn",
+            "backend.services.agents.teacher_agent.TeacherAgent.run_turn",
             new=_fake_run_turn,
         ):
             # Skip lifespan by NOT using TestClient as a context manager.

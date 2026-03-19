@@ -43,7 +43,8 @@ def _setup_lesson(loop, conn, *, with_sections=True, with_messages=False) -> str
                 "page_end": 3,
             }])
         if with_messages:
-            await models.upsert_messages(conn, lesson_id, [
+            enrollment = await models.get_or_create_enrollment(conn, lesson_id, db.ANON_USER_ID)
+            await models.upsert_messages(conn, enrollment["id"], [
                 {"role": "user", "content": "Hello"},
                 {"role": "assistant", "content": "Hi there!"},
             ])
@@ -170,6 +171,9 @@ def test_reconnect_ack_includes_curriculum(ws_test_client):
     lesson_id = _setup_lesson(loop, conn, with_sections=True, with_messages=True)
 
     with client.websocket_connect(f"/ws/{session_id}?lesson_id={lesson_id}") as ws:
+        # Drain connect-phase events (sections → decompose_complete, messages → history)
+        _collect_until(ws, {"decompose_complete"})
+        _collect_until(ws, {"history"})
         ws.send_json({"event": "reconnect", "last_turn_id": "old-id"})
         msg = ws.receive_json()
 
@@ -208,6 +212,9 @@ def test_auto_start_does_not_fire_when_messages_exist(ws_test_client):
     lesson_id = _setup_lesson(loop, conn, with_sections=True, with_messages=True)
 
     with client.websocket_connect(f"/ws/{session_id}?lesson_id={lesson_id}") as ws:
+        # Drain connect-phase events (sections → decompose_complete, messages → history)
+        _collect_until(ws, {"decompose_complete"})
+        _collect_until(ws, {"history"})
         ws.send_json({"event": "ping"})
         msg = ws.receive_json()
     assert msg["event"] == "pong"
@@ -304,7 +311,10 @@ def test_messages_saved_to_db_after_turn(ws_test_client):
         })
         _collect_until(ws, {"turn_complete", "error"})
 
-    messages = loop.run_until_complete(models.get_messages(conn, lesson_id))
+    async def _get_msgs():
+        enrollment = await models.get_or_create_enrollment(conn, lesson_id, db.ANON_USER_ID)
+        return await models.get_messages(conn, enrollment["id"])
+    messages = loop.run_until_complete(_get_msgs())
     roles = [m["role"] for m in messages]
     assert "user" in roles
     assert "assistant" in roles
@@ -325,9 +335,12 @@ def test_lesson_progress_saved_on_disconnect(ws_test_client):
         _collect_until(ws, {"turn_complete", "error"})
         # Disconnect normally
 
-    lesson = loop.run_until_complete(models.get_lesson(conn, lesson_id))
-    # current_section_idx is 0; confirm it was written (not left as None/corrupt)
-    assert lesson["current_section_idx"] == 0
+    # Enrollment is created lazily on WS connect; current_section_idx should be 0.
+    async def _check():
+        return await models.get_enrollment(conn, lesson_id, db.ANON_USER_ID)
+    enrollment = loop.run_until_complete(_check())
+    assert enrollment is not None
+    assert enrollment["current_section_idx"] == 0
 
 
 # ── session isolation ─────────────────────────────────────────────────────────

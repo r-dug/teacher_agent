@@ -254,21 +254,23 @@ export function CoursePage({ sessionId, isAdmin = false }: CoursePageProps) {
         )}
       </Drawer>
 
-      {/* Chapter draft editor */}
-      <Drawer
-        open={chaptersDrawerOpen}
-        onClose={() => setChaptersDrawerOpen(false)}
-        title="Chapter Drafts"
-      >
-        {courseId ? (
-          <CourseChaptersEditor
-            sessionId={sessionId}
-            courseId={courseId}
-          />
-        ) : (
-          <p className="text-sm text-[hsl(var(--muted-foreground))]">Course not found.</p>
-        )}
-      </Drawer>
+      {/* Chapter draft editor — admin only */}
+      {isAdmin && (
+        <Drawer
+          open={chaptersDrawerOpen}
+          onClose={() => setChaptersDrawerOpen(false)}
+          title="Chapter Drafts"
+        >
+          {courseId ? (
+            <CourseChaptersEditor
+              sessionId={sessionId}
+              courseId={courseId}
+            />
+          ) : (
+            <p className="text-sm text-[hsl(var(--muted-foreground))]">Course not found.</p>
+          )}
+        </Drawer>
+      )}
     </div>
   )
 }

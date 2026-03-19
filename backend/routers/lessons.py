@@ -40,7 +40,7 @@ async def get_lesson_page(
     lesson = await models.get_lesson(conn, lesson_id)
     if lesson is None:
         raise HTTPException(status_code=404, detail="Lesson not found")
-    _check_ownership(lesson, user_id)
+    _check_access(lesson, user_id)
     if not lesson.get("pdf_path"):
         raise HTTPException(status_code=404, detail="No PDF associated with this lesson")
 
@@ -74,11 +74,12 @@ async def get_lesson_page(
 
 class LessonResponse(BaseModel):
     id: str
-    user_id: str
+    creator_id: str
     course_id: str | None
     title: str
     description: str | None
     pdf_path: str | None
+    visibility: str
     current_section_idx: int
     completed: bool
     section_count: int = 0
@@ -92,18 +93,18 @@ class LessonDetailResponse(LessonResponse):
 
 
 class LessonUpdate(BaseModel):
-    current_section_idx: int | None = None
-    completed: bool | None = None
     title: str | None = None
     description: str | None = None
+    visibility: str | None = None
     # course_id uses model_fields_set so explicit null (remove from course) is detectable
     course_id: str | None = None
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
-def _pdf_storage_path(user_id: str, lesson_id: str) -> Path:
-    return settings.STORAGE_DIR / user_id / "pdfs" / f"{lesson_id}.pdf"
+def _lesson_pdf_path(lesson_id: str) -> Path:
+    """New storage layout: STORAGE_DIR/lessons/{lesson_id}.pdf"""
+    return settings.STORAGE_DIR / "lessons" / f"{lesson_id}.pdf"
 
 
 def _lesson_or_404(lesson: dict | None) -> dict:
@@ -112,8 +113,15 @@ def _lesson_or_404(lesson: dict | None) -> dict:
     return lesson
 
 
-def _check_ownership(lesson: dict, user_id: str) -> None:
-    if lesson["user_id"] != user_id:
+def _check_access(lesson: dict, user_id: str) -> None:
+    """Allow if user is creator OR lesson is published."""
+    if lesson["creator_id"] != user_id and lesson.get("visibility") != "published":
+        raise HTTPException(status_code=403, detail="Access denied")
+
+
+def _check_creator(lesson: dict, user_id: str) -> None:
+    """Allow only the creator (for write operations)."""
+    if lesson["creator_id"] != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
 
 
@@ -128,6 +136,17 @@ def _validate_pdf_path(pdf_full_path: Path) -> None:
         raise
     except Exception:
         raise HTTPException(status_code=403, detail="Access denied")
+
+
+def _lesson_to_response(lesson: dict, section_count: int = 0) -> LessonResponse:
+    return LessonResponse(
+        **{
+            **lesson,
+            "current_section_idx": lesson.get("current_section_idx") or 0,
+            "completed": bool(lesson.get("completed", 0)),
+            "section_count": section_count,
+        }
+    )
 
 
 # ── routes ─────────────────────────────────────────────────────────────────────
@@ -146,17 +165,26 @@ async def list_lessons(
         conn, user_id, limit=limit, offset=offset,
         course_id=course_id, standalone=standalone,
     )
-    return [LessonResponse(**{**r, "completed": bool(r["completed"])}) for r in rows]
+    return [_lesson_to_response(r, r.get("section_count", 0)) for r in rows]
 
 
 @router.get("/{lesson_id}", response_model=LessonDetailResponse)
 async def get_lesson(lesson_id: str, user_id: str, conn: Conn):
     lesson = _lesson_or_404(await models.get_lesson(conn, lesson_id))
-    _check_ownership(lesson, user_id)
+    _check_access(lesson, user_id)
     sections = await models.get_sections(conn, lesson_id)
-    messages = await models.get_messages(conn, lesson_id)
+    # Load messages via enrollment
+    enrollment = await models.get_enrollment(conn, lesson_id, user_id)
+    messages = await models.get_messages(conn, enrollment["id"]) if enrollment else []
+    enrollment_idx = enrollment["current_section_idx"] if enrollment else 0
+    enrollment_completed = bool(enrollment["completed"]) if enrollment else False
     return LessonDetailResponse(
-        **{**lesson, "completed": bool(lesson["completed"]), "section_count": len(sections)},
+        **{
+            **lesson,
+            "current_section_idx": enrollment_idx,
+            "completed": enrollment_completed,
+            "section_count": len(sections),
+        },
         sections=sections,
         messages=messages,
     )
@@ -165,16 +193,16 @@ async def get_lesson(lesson_id: str, user_id: str, conn: Conn):
 @router.patch("/{lesson_id}", response_model=LessonResponse)
 async def update_lesson(lesson_id: str, user_id: str, body: LessonUpdate, conn: Conn):
     lesson = _lesson_or_404(await models.get_lesson(conn, lesson_id))
-    _check_ownership(lesson, user_id)
+    _check_creator(lesson, user_id)
     updates: dict = {}
-    if body.current_section_idx is not None:
-        updates["current_section_idx"] = body.current_section_idx
-    if body.completed is not None:
-        updates["completed"] = int(body.completed)
     if body.title is not None:
         updates["title"] = body.title.strip() or lesson["title"]
     if body.description is not None:
         updates["description"] = body.description
+    if body.visibility is not None:
+        if body.visibility not in ("draft", "published"):
+            raise HTTPException(status_code=422, detail="visibility must be 'draft' or 'published'")
+        updates["visibility"] = body.visibility
     if "course_id" in body.model_fields_set:
         updates["course_id"] = body.course_id  # can be None to remove from course
     if updates:
@@ -185,15 +213,13 @@ async def update_lesson(lesson_id: str, user_id: str, body: LessonUpdate, conn: 
     ) as cur:
         cnt_row = await cur.fetchone()
     section_count = cnt_row[0] if cnt_row else 0
-    return LessonResponse(
-        **{**lesson, "completed": bool(lesson["completed"]), "section_count": section_count}
-    )
+    return _lesson_to_response(lesson, section_count)  # type: ignore[arg-type]
 
 
 @router.delete("/{lesson_id}", status_code=204)
 async def delete_lesson(lesson_id: str, user_id: str, conn: Conn):
     lesson = _lesson_or_404(await models.get_lesson(conn, lesson_id))
-    _check_ownership(lesson, user_id)
+    _check_creator(lesson, user_id)
     # Remove PDF file if present
     if lesson.get("pdf_path"):
         full = settings.STORAGE_DIR / lesson["pdf_path"]
@@ -213,17 +239,18 @@ async def save_lesson_state(
     Body: {current_section_idx, completed, sections (optional), messages}.
     """
     lesson = _lesson_or_404(await models.get_lesson(conn, lesson_id))
-    _check_ownership(lesson, user_id)
-    await models.update_lesson(
+    _check_access(lesson, user_id)
+    enrollment = await models.get_or_create_enrollment(conn, lesson_id, user_id)
+    await models.update_enrollment(
         conn,
-        lesson_id,
+        enrollment["id"],
         current_section_idx=body.get("current_section_idx", 0),
         completed=int(body.get("completed", False)),
     )
     if sections := body.get("sections"):
         await models.upsert_sections(conn, lesson_id, sections)
     if messages := body.get("messages"):
-        await models.upsert_messages(conn, lesson_id, messages)
+        await models.upsert_messages(conn, enrollment["id"], messages)
 
 
 # ── PDF decomposition ──────────────────────────────────────────────────────────
@@ -268,8 +295,8 @@ async def decompose_pdf(
         description=description or None,
     )
 
-    # Save PDF to storage
-    pdf_path = _pdf_storage_path(user_id, lesson_id)
+    # Save PDF to new storage layout
+    pdf_path = _lesson_pdf_path(lesson_id)
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
     with pdf_path.open("wb") as f:
         shutil.copyfileobj(file.file, f)

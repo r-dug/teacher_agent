@@ -39,12 +39,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 -- ── Courses ───────────────────────────────────────────────────────────────────
+-- Admin-authored templates. visibility='published' makes them accessible to all users.
 
 CREATE TABLE IF NOT EXISTS courses (
     id          TEXT PRIMARY KEY,
-    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    creator_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     title       TEXT NOT NULL,
     description TEXT,
+    visibility  TEXT NOT NULL DEFAULT 'draft',  -- 'draft' | 'published'
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -57,7 +59,7 @@ CREATE TABLE IF NOT EXISTS courses (
 
 CREATE TABLE IF NOT EXISTS course_source_files (
     course_id   TEXT PRIMARY KEY REFERENCES courses(id) ON DELETE CASCADE,
-    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    creator_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     pdf_hash    TEXT NOT NULL,
     pdf_path    TEXT NOT NULL,
     page_count  INTEGER NOT NULL,
@@ -117,7 +119,7 @@ CREATE INDEX IF NOT EXISTS idx_course_chapter_lessons_lesson ON course_chapter_l
 
 CREATE TABLE IF NOT EXISTS course_advisor_sessions (
     course_id          TEXT PRIMARY KEY REFERENCES courses(id) ON DELETE CASCADE,
-    user_id            TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    creator_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     transcript_json    TEXT NOT NULL DEFAULT '[]',
     objectives_prompt  TEXT,
     status             TEXT NOT NULL DEFAULT 'draft',  -- draft | finalized
@@ -128,7 +130,7 @@ CREATE TABLE IF NOT EXISTS course_advisor_sessions (
 CREATE TABLE IF NOT EXISTS course_decomposition_jobs (
     id                TEXT PRIMARY KEY,
     course_id         TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
-    user_id           TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    creator_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     status            TEXT NOT NULL DEFAULT 'queued', -- queued | running | completed | failed
     objectives_prompt TEXT NOT NULL DEFAULT '',
     total_items       INTEGER NOT NULL DEFAULT 0,
@@ -160,43 +162,37 @@ CREATE TABLE IF NOT EXISTS course_decomposition_job_items (
 );
 CREATE INDEX IF NOT EXISTS idx_course_decomp_items_job ON course_decomposition_job_items(job_id, idx);
 
--- ── Published Course Copies ──────────────────────────────────────────────────
--- Tracks admin course clones that were pushed to user accounts.
-
-CREATE TABLE IF NOT EXISTS course_publish_copies (
-    source_course_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
-    target_user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    target_course_id TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
-    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (source_course_id, target_user_id)
-);
-
-CREATE TABLE IF NOT EXISTS lesson_publish_copies (
-    source_lesson_id TEXT NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
-    target_user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    target_lesson_id TEXT NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
-    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (source_lesson_id, target_user_id)
-);
-
 -- ── Lessons ───────────────────────────────────────────────────────────────────
+-- Admin-authored templates.  Per-user state lives in lesson_enrollments.
+-- pdf_path is relative to STORAGE_DIR: 'lessons/{lesson_id}.pdf'
 
 CREATE TABLE IF NOT EXISTS lessons (
+    id          TEXT PRIMARY KEY,
+    creator_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    course_id   TEXT REFERENCES courses(id) ON DELETE SET NULL,
+    title       TEXT NOT NULL,
+    description TEXT,
+    pdf_path    TEXT,
+    visibility  TEXT NOT NULL DEFAULT 'draft',  -- 'draft' | 'published'
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ── Lesson Enrollments ────────────────────────────────────────────────────────
+-- Per-user progress state for a lesson.  Created lazily on first WS connect.
+
+CREATE TABLE IF NOT EXISTS lesson_enrollments (
     id                  TEXT PRIMARY KEY,
+    lesson_id           TEXT NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
     user_id             TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    course_id           TEXT REFERENCES courses(id) ON DELETE SET NULL,
-    title               TEXT NOT NULL,
-    description         TEXT,
-    -- Relative path under STORAGE_DIR, e.g. "{user_id}/pdfs/{lesson_id}.pdf"
-    pdf_path            TEXT,
     current_section_idx INTEGER NOT NULL DEFAULT 0,
     completed           INTEGER NOT NULL DEFAULT 0,   -- boolean (0/1)
-    lesson_goal         TEXT,                         -- captured during intro phase
+    lesson_goal         TEXT,
     created_at          TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (lesson_id, user_id)
 );
+CREATE INDEX IF NOT EXISTS idx_lesson_enrollments_user ON lesson_enrollments(user_id);
 
 -- ── Lesson Sections ───────────────────────────────────────────────────────────
 -- Populated after PDF decomposition.
@@ -214,16 +210,34 @@ CREATE TABLE IF NOT EXISTS lesson_sections (
     UNIQUE (lesson_id, idx)
 );
 
+-- ── Section Assets ────────────────────────────────────────────────────────────
+-- Typed visual aids attached to a lesson section.
+-- asset_type: 'pdf_pages' (range from the lesson PDF) | 'ai_image' (generated image)
+
+CREATE TABLE IF NOT EXISTS section_assets (
+    id         TEXT PRIMARY KEY,
+    section_id TEXT NOT NULL REFERENCES lesson_sections(id) ON DELETE CASCADE,
+    asset_type TEXT NOT NULL,    -- 'pdf_pages' | 'ai_image'
+    page_start INTEGER,          -- for pdf_pages: first page (1-based)
+    page_end   INTEGER,          -- for pdf_pages: last page (inclusive)
+    image_path TEXT,             -- for ai_image: relative path under STORAGE_DIR
+    caption    TEXT,
+    idx        INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (section_id, idx)
+);
+
 -- ── Conversation Messages ─────────────────────────────────────────────────────
+-- Keyed by enrollment so each user has their own message history.
 -- content is JSON-serialised to match Anthropic SDK message format.
 
 CREATE TABLE IF NOT EXISTS messages (
-    id        TEXT PRIMARY KEY,
-    lesson_id TEXT NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
-    idx       INTEGER NOT NULL,
-    role      TEXT NOT NULL,    -- 'user' | 'assistant' | 'tool' | 'tool_result'
-    content   TEXT NOT NULL,    -- JSON string
-    UNIQUE (lesson_id, idx)
+    id            TEXT PRIMARY KEY,
+    enrollment_id TEXT NOT NULL REFERENCES lesson_enrollments(id) ON DELETE CASCADE,
+    idx           INTEGER NOT NULL,
+    role          TEXT NOT NULL,    -- 'user' | 'assistant' | 'tool' | 'tool_result'
+    content       TEXT NOT NULL,    -- JSON string
+    UNIQUE (enrollment_id, idx)
 );
 
 -- ── Teaching Personas ─────────────────────────────────────────────────────────

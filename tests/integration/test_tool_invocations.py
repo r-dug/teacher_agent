@@ -1,7 +1,7 @@
 """
 Integration tests for tool-invocation events: show_slide and open_sketchpad.
 
-Each test overrides the shared.teaching_agent.TeachingAgent.run_turn patch set
+Each test overrides the backend.services.agents.teacher_agent.TeacherAgent.run_turn patch set
 by the ws_test_client fixture with a more specific mock that exercises a
 particular callback path.
 
@@ -41,7 +41,8 @@ def _setup_lesson(loop, conn, *, with_sections=True, with_messages=True) -> str:
             }])
         if with_messages:
             # Pre-seed a message so auto-start does not fire
-            await models.upsert_messages(conn, lesson_id, [
+            enrollment = await models.get_or_create_enrollment(conn, lesson_id, db.ANON_USER_ID)
+            await models.upsert_messages(conn, enrollment["id"], [
                 {"role": "assistant", "content": "Let's begin."},
             ])
         return lesson_id
@@ -69,15 +70,15 @@ def test_show_slide_event_received(ws_test_client):
     When the agent calls on_show_slide, the client receives a show_slide event
     with the correct page number and caption.
     """
-    def _fake_with_slide(self, curriculum, messages, agent_instructions):
-        self._on_show_slide(3, "A test caption for page 3")
+    def _fake_with_slide(self, curriculum, messages, agent_instructions, lesson_goal=None):
+        self._callbacks.on_show_slide(3, 3, "A test caption for page 3")
         messages.append({"role": "assistant", "content": "Please look at the slide."})
 
     client, conn, loop = ws_test_client
     session_id = _setup_session(loop, conn)
     lesson_id = _setup_lesson(loop, conn)
 
-    with patch("shared.teaching_agent.TeachingAgent.run_turn", new=_fake_with_slide):
+    with patch("backend.services.agents.teacher_agent.TeacherAgent.run_turn", new=_fake_with_slide):
         with client.websocket_connect(f"/ws/{session_id}?lesson_id={lesson_id}") as ws:
             ws.send_json({
                 "event": "audio_input",
@@ -88,7 +89,7 @@ def test_show_slide_event_received(ws_test_client):
 
     slide_events = [e for e in events if e["event"] == "show_slide"]
     assert len(slide_events) == 1
-    assert slide_events[0]["page"] == 3
+    assert slide_events[0]["page_start"] == 3
     assert slide_events[0]["caption"] == "A test caption for page 3"
     assert any(e["event"] == "turn_complete" for e in events)
     assert not any(e["event"] == "error" for e in events)
@@ -96,16 +97,16 @@ def test_show_slide_event_received(ws_test_client):
 
 def test_show_slide_does_not_block_turn_completion(ws_test_client):
     """show_slide is fire-and-forget; the turn must still complete."""
-    def _fake_multi_slide(self, curriculum, messages, agent_instructions):
-        self._on_show_slide(1, "First")
-        self._on_show_slide(2, "Second")
+    def _fake_multi_slide(self, curriculum, messages, agent_instructions, lesson_goal=None):
+        self._callbacks.on_show_slide(1, 1, "First")
+        self._callbacks.on_show_slide(2, 2, "Second")
         messages.append({"role": "assistant", "content": "Two slides shown."})
 
     client, conn, loop = ws_test_client
     session_id = _setup_session(loop, conn)
     lesson_id = _setup_lesson(loop, conn)
 
-    with patch("shared.teaching_agent.TeachingAgent.run_turn", new=_fake_multi_slide):
+    with patch("backend.services.agents.teacher_agent.TeacherAgent.run_turn", new=_fake_multi_slide):
         with client.websocket_connect(f"/ws/{session_id}?lesson_id={lesson_id}") as ws:
             ws.send_json({
                 "event": "audio_input",
@@ -126,10 +127,10 @@ def test_open_sketchpad_event_received(ws_test_client):
     When the agent calls on_open_sketchpad, the client receives an
     open_sketchpad event with a prompt and an invocation_id.
     """
-    def _fake_with_sketchpad(self, curriculum, messages, agent_instructions):
+    def _fake_with_sketchpad(self, curriculum, messages, agent_instructions, lesson_goal=None):
         result_holder: list = []
         done_event = threading.Event()
-        self._on_open_sketchpad("Draw a triangle.", result_holder, done_event)
+        self._callbacks.on_open_sketchpad("Draw a triangle.", result_holder, done_event)
         done_event.wait(timeout=5.0)
         messages.append({"role": "assistant", "content": "Drawing received."})
 
@@ -137,7 +138,7 @@ def test_open_sketchpad_event_received(ws_test_client):
     session_id = _setup_session(loop, conn)
     lesson_id = _setup_lesson(loop, conn)
 
-    with patch("shared.teaching_agent.TeachingAgent.run_turn", new=_fake_with_sketchpad):
+    with patch("backend.services.agents.teacher_agent.TeacherAgent.run_turn", new=_fake_with_sketchpad):
         with client.websocket_connect(f"/ws/{session_id}?lesson_id={lesson_id}") as ws:
             ws.send_json({
                 "event": "audio_input",
@@ -174,10 +175,10 @@ def test_open_sketchpad_drawing_reaches_agent(ws_test_client):
     """
     received_drawings: list = []
 
-    def _fake_captures_drawing(self, curriculum, messages, agent_instructions):
+    def _fake_captures_drawing(self, curriculum, messages, agent_instructions, lesson_goal=None):
         result_holder: list = []
         done_event = threading.Event()
-        self._on_open_sketchpad("Draw anything.", result_holder, done_event)
+        self._callbacks.on_open_sketchpad("Draw anything.", result_holder, done_event)
         done_event.wait(timeout=5.0)
         received_drawings.extend(result_holder)
         messages.append({"role": "assistant", "content": "Got drawing."})
@@ -186,7 +187,7 @@ def test_open_sketchpad_drawing_reaches_agent(ws_test_client):
     session_id = _setup_session(loop, conn)
     lesson_id = _setup_lesson(loop, conn)
 
-    with patch("shared.teaching_agent.TeachingAgent.run_turn", new=_fake_captures_drawing):
+    with patch("backend.services.agents.teacher_agent.TeacherAgent.run_turn", new=_fake_captures_drawing):
         with client.websocket_connect(f"/ws/{session_id}?lesson_id={lesson_id}") as ws:
             ws.send_json({
                 "event": "audio_input",
@@ -221,6 +222,9 @@ def test_invalid_invocation_id_is_harmless(ws_test_client):
     lesson_id = _setup_lesson(loop, conn)
 
     with client.websocket_connect(f"/ws/{session_id}?lesson_id={lesson_id}") as ws:
+        # Drain initial connect-phase events (decompose_complete + history)
+        _collect_until(ws, {"decompose_complete"})
+        _collect_until(ws, {"history"})
         ws.send_json({
             "event": "tool_result",
             "invocation_id": "nonexistent-id",

@@ -6,9 +6,9 @@ loops:
   - receive_loop: processes inbound messages from the frontend server
   - send_loop: forwards events from the per-session asyncio.Queue to the client
 
-The TeachingAgent runs inside asyncio.to_thread() so it never blocks the event
+The TeacherAgent runs inside asyncio.to_thread() so it never blocks the event
 loop.  Agent callbacks schedule WS sends back onto the event loop via
-asyncio.run_coroutine_threadsafe() (see BackendAgentSession in services/agent.py).
+asyncio.run_coroutine_threadsafe() (see AgentSession in services/agents/session.py).
 """
 
 from __future__ import annotations
@@ -31,15 +31,15 @@ from websockets.asyncio.client import connect as ws_connect
 from ..app_state import app_state, registry
 from ..config import settings
 from ..db import connection as db, models
-from ..services.agent import BackendAgentSession
-from ..services.realtime import (
+from ..services.agents.session import AgentSession
+from ..services.voice.realtime import (
     float32_b64_to_pcm16_b64,
     pcm16_b64_to_float32,
     run_realtime_voice_turn,
     usage_from_realtime,
 )
-from ..services.stt import (
-    OPENAI_STT_MODELS,
+from ..services.voice.config import OPENAI_STT_MODELS
+from ..services.voice.stt import (
     select_stt_provider,
     transcribe,
     transcribe_file,
@@ -47,7 +47,7 @@ from ..services.stt import (
     transcribe_openai,
     load_stt_model,
 )
-from shared.lesson import Curriculum
+from ..services.agents.curriculum import Curriculum
 
 router = APIRouter(tags=["ws"])
 
@@ -73,14 +73,16 @@ class SessionState:
         self,
         session_id: str,
         lesson_id: str,
+        enrollment_id: str,
         curriculum: Curriculum,
         messages: list[dict],
         agent_instructions: str | None,
-        agent_session: BackendAgentSession,
+        agent_session: AgentSession,
         pdf_path: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.lesson_id = lesson_id
+        self.enrollment_id = enrollment_id
         self.curriculum = curriculum
         self.messages = messages
         self.agent_instructions = agent_instructions
@@ -159,18 +161,23 @@ async def ws_session(
         await websocket.close(code=4004)
         return
 
-    # Verify lesson belongs to the session's user
-    if lesson["user_id"] != session["user_id"]:
+    # Check access: creator or published lesson
+    user_id: str = session["user_id"]
+    if lesson["creator_id"] != user_id and lesson.get("visibility") != "published":
         await websocket.send_json({"event": "error", "message": "Access denied"})
         await websocket.close(code=4003)
         return
 
+    # Lazy enrollment: get or create per-user state row
+    enrollment = await models.get_or_create_enrollment(conn, lesson_id, user_id)
+    enrollment_id: str = enrollment["id"]
+
     sections = await models.get_sections(conn, lesson_id)
-    messages = await models.get_messages(conn, lesson_id)
+    messages = await models.get_messages(conn, enrollment_id)
     curriculum = Curriculum(
         title=lesson["title"],
         sections=[_section_to_dict(s) for s in sections],
-        idx=lesson["current_section_idx"],
+        idx=enrollment["current_section_idx"],
     )
 
     # For existing lessons, send the curriculum to the client immediately so it
@@ -207,7 +214,7 @@ async def ws_session(
     default_tts_voice = (
         getattr(app_state.tts_provider, "default_voice", "") or settings.default_tts_voice()
     )
-    agent_session = BackendAgentSession(
+    agent_session = AgentSession(
         send=_send,
         loop=loop,
         tts_provider=app_state.tts_provider,
@@ -234,6 +241,7 @@ async def ws_session(
     state = SessionState(
         session_id=session_id,
         lesson_id=lesson_id,
+        enrollment_id=enrollment_id,
         curriculum=curriculum,
         messages=messages,
         agent_instructions=None,  # set by client via set_instructions event
@@ -241,7 +249,7 @@ async def ws_session(
         pdf_path=pdf_full_path,
     )
     # Restore persisted lesson_goal (captured during intro, saved before decomposition).
-    state.lesson_goal = lesson.get("lesson_goal") or None
+    state.lesson_goal = enrollment.get("lesson_goal") or None
     # Skip intro for resumed lessons (messages exist) or already-decomposed lessons (sections exist).
     if messages or sections:
         state.phase = "teaching"
@@ -288,7 +296,7 @@ async def ws_session(
                 # Agent captured the goal on the very first exchange (rare but valid).
                 state.lesson_goal = goal
                 state.phase = "teaching"
-                await models.update_lesson(conn, lesson_id, lesson_goal=goal)
+                await models.update_enrollment(conn, state.enrollment_id, lesson_goal=goal)
                 if state.deferred_decompose_fn:
                     asyncio.create_task(state.deferred_decompose_fn())
                 elif state.first_teaching_task_fn:
@@ -324,7 +332,7 @@ async def ws_session(
             if goal:
                 state.lesson_goal = goal
                 state.phase = "teaching"
-                await models.update_lesson(conn, lesson_id, lesson_goal=goal)
+                await models.update_enrollment(conn, state.enrollment_id, lesson_goal=goal)
                 if state.deferred_decompose_fn:
                     asyncio.create_task(state.deferred_decompose_fn())
                 elif state.first_teaching_task_fn:
@@ -416,6 +424,11 @@ async def ws_session(
         # Auto-start is client-driven: the client sends 'start_lesson' after it has
         # dispatched its initial config (set_instructions, set_voice, etc.).
         # For fresh lessons, auto-start also fires from _send_loop after decompose_complete.
+        # For lessons that already have sections but no conversation history, kick off
+        # the first teaching turn immediately (decompose_complete was sent directly above,
+        # not via the queue, so _send_loop won't trigger it).
+        if state.phase == "teaching" and not state.messages and state.first_teaching_task_fn:
+            state.agent_task = state.first_teaching_task_fn()
 
         done, pending = await asyncio.wait(
             {receive_task, send_task},
@@ -595,7 +608,7 @@ _OUTPUT_MAX_BYTES = 1_024_000   # 1 MB output limit
 
 async def _handle_run_code(websocket: WebSocket, msg: dict, state: SessionState) -> None:
     """Stream sandboxed code execution output back to the client."""
-    from ..services.code_runner import stream_execution
+    from ..services.agents.code_runner import stream_execution
 
     inv_id = msg.get("invocation_id", "")
     code = msg.get("code", "")
@@ -785,7 +798,7 @@ async def _send_loop(
 # ── event handlers ─────────────────────────────────────────────────────────────
 
 def _make_realtime_system_prompt(state: SessionState) -> str:
-    from shared.teaching_agent import make_teaching_prompt
+    from ..services.agents.prompts.teaching import make_teaching_prompt
 
     system = make_teaching_prompt(
         state.curriculum.title,
@@ -1196,7 +1209,7 @@ async def _handle_audio_input_realtime_turn(
     tts_playing_sent = False
 
     # Reuse the section-aware teaching system prompt to keep behavior aligned.
-    from shared.teaching_agent import make_teaching_prompt
+    from ..services.agents.prompts.teaching import make_teaching_prompt
 
     system = make_teaching_prompt(
         state.curriculum.title,
@@ -1641,14 +1654,13 @@ async def _handle_reconnect(
 async def _save_state(
     conn: aiosqlite.Connection, state: SessionState
 ) -> None:
-    from shared.lesson import LessonStore
-    await models.update_lesson(
+    await models.update_enrollment(
         conn,
-        state.lesson_id,
+        state.enrollment_id,
         current_section_idx=state.curriculum.idx,
         completed=int(state.curriculum.is_last and state.turn_status == "complete"),
     )
-    await models.upsert_messages(conn, state.lesson_id, state.messages)
+    await models.upsert_messages(conn, state.enrollment_id, state.messages)
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────

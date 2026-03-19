@@ -6,7 +6,7 @@ import base64
 import pytest
 from unittest.mock import MagicMock
 
-from backend.services.stt import (
+from backend.services.voice.stt import (
     _transcribe_sync,
     select_stt_provider,
     transcribe_file_openai,
@@ -63,7 +63,7 @@ def test_transcribe_cleans_up_temp_file_sync(tmp_path, monkeypatch):
         created_paths.append(path)
         return original_write(path, *args, **kwargs)
 
-    monkeypatch.setattr("backend.services.stt.sf.write", tracking_write)
+    monkeypatch.setattr("backend.services.voice.stt.sf.write", tracking_write)
 
     mock_model = MagicMock()
     mock_model.transcribe.return_value = "test"
@@ -119,7 +119,7 @@ async def test_transcribe_openai_posts_audio(monkeypatch):
             captured["files"] = files
             return _Resp()
 
-    monkeypatch.setattr("backend.services.stt.httpx.AsyncClient", _Client)
+    monkeypatch.setattr("backend.services.voice.stt.httpx.AsyncClient", _Client)
 
     text = await transcribe_openai(
         _make_audio_b64(),
@@ -169,7 +169,7 @@ async def test_transcribe_file_openai_posts_file(monkeypatch):
             captured["files"] = files
             return _Resp()
 
-    monkeypatch.setattr("backend.services.stt.httpx.AsyncClient", _Client)
+    monkeypatch.setattr("backend.services.voice.stt.httpx.AsyncClient", _Client)
     fake_file_b64 = base64.b64encode(b"webm-data").decode()
 
     text = await transcribe_file_openai(
@@ -202,7 +202,7 @@ async def test_transcribe_openai_records_estimated_cost(monkeypatch):
 
     from backend.app_state import app_state
 
-    monkeypatch.setattr("backend.services.stt._openai_transcribe_bytes", _fake_openai_transcribe_bytes)
+    monkeypatch.setattr("backend.services.voice.stt._openai_transcribe_bytes", _fake_openai_transcribe_bytes)
     monkeypatch.setattr(app_state, "token_tracker", _Tracker())
 
     text = await transcribe_openai(

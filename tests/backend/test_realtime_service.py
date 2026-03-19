@@ -8,7 +8,7 @@ import json
 import numpy as np
 import pytest
 
-from backend.services.realtime import (
+from backend.services.voice.realtime import (
     float32_b64_to_pcm16_b64,
     run_realtime_voice_turn,
     pcm16_b64_to_float32,
@@ -89,7 +89,7 @@ async def test_run_realtime_voice_turn_accepts_audio_transcript_deltas(monkeypat
     def _fake_connect(*args, **kwargs):
         return _FakeCtx(ws)
 
-    monkeypatch.setattr("backend.services.realtime.connect", _fake_connect)
+    monkeypatch.setattr("backend.services.voice.realtime.connect", _fake_connect)
 
     audio = np.zeros(1600, dtype=np.float32)
     audio_b64 = base64.b64encode(audio.tobytes()).decode()
