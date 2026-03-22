@@ -125,7 +125,7 @@ export function CoursePage({ sessionId, isAdmin = false }: CoursePageProps) {
     <div className="mx-auto max-w-2xl px-4 py-8 space-y-6">
       {/* Header */}
       <div className="flex items-center gap-3">
-        <Button variant="ghost" size="sm" onClick={() => navigate('/')}>
+        <Button variant="ghost" size="sm" onClick={() => navigate('/')} data-page-transition>
           ← Back
         </Button>
         <div className="flex-1 min-w-0">
@@ -186,6 +186,7 @@ export function CoursePage({ sessionId, isAdmin = false }: CoursePageProps) {
                 key={lesson.id}
                 className="cursor-pointer hover:border-[hsl(var(--primary))] transition-colors"
                 onClick={() => navigate(`/teach/${lesson.id}`)}
+                data-pixel-transition
               >
                 <CardHeader className="p-4 pb-2">
                   <CardTitle className="text-base flex items-center justify-between gap-2">

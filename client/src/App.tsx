@@ -97,21 +97,14 @@ export default function App() {
     setAuthPage('pending')
   }
 
-  // ── loading ──────────────────────────────────────────────────────────────
-  if (authState === 'loading') {
-    return (
-      <ThemeProvider>
+  // ── single persistent ThemeProvider wrapping all states ──────────────────
+  return (
+    <ThemeProvider>
+      {authState === 'loading' ? (
         <div className="flex h-screen items-center justify-center">
           <p className="text-sm text-[hsl(var(--muted-foreground))]">Loading…</p>
         </div>
-      </ThemeProvider>
-    )
-  }
-
-  // ── authenticated app ────────────────────────────────────────────────────
-  if (authState === 'authenticated' && sessionId) {
-    return (
-      <ThemeProvider>
+      ) : authState === 'authenticated' && sessionId ? (
         <BrowserRouter>
           <Routes>
             <Route path="/" element={<HomePage sessionId={sessionId} onLogout={onLogout} isAdmin={isAdmin} />} />
@@ -125,39 +118,34 @@ export default function App() {
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </BrowserRouter>
-      </ThemeProvider>
-    )
-  }
-
-  // ── unauthenticated ──────────────────────────────────────────────────────
-  return (
-    <ThemeProvider>
-      <BrowserRouter>
-        <Routes>
-          <Route
-            path="/auth/verify"
-            element={<EmailVerifyPage onLogin={onLogin} onGoLogin={() => setAuthPage('login')} />}
-          />
-          <Route
-            path="/auth/reset-password"
-            element={<ResetPasswordPage onGoLogin={() => setAuthPage('login')} />}
-          />
-          <Route
-            path="*"
-            element={
-              authPage === 'pending' ? (
-                <EmailPendingPage email={pendingEmail} onGoLogin={() => setAuthPage('login')} />
-              ) : authPage === 'register' ? (
-                <RegisterPage onPending={onRegisterSuccess} onGoLogin={() => setAuthPage('login')} />
-              ) : authPage === 'forgot' ? (
-                <ForgotPasswordPage onGoLogin={() => setAuthPage('login')} />
-              ) : (
-                <LoginPage onLogin={onLogin} onGoRegister={() => setAuthPage('register')} onForgotPassword={() => setAuthPage('forgot')} />
-              )
-            }
-          />
-        </Routes>
-      </BrowserRouter>
+      ) : (
+        <BrowserRouter>
+          <Routes>
+            <Route
+              path="/auth/verify"
+              element={<EmailVerifyPage onLogin={onLogin} onGoLogin={() => setAuthPage('login')} />}
+            />
+            <Route
+              path="/auth/reset-password"
+              element={<ResetPasswordPage onGoLogin={() => setAuthPage('login')} />}
+            />
+            <Route
+              path="*"
+              element={
+                authPage === 'pending' ? (
+                  <EmailPendingPage email={pendingEmail} onGoLogin={() => setAuthPage('login')} />
+                ) : authPage === 'register' ? (
+                  <RegisterPage onPending={onRegisterSuccess} onGoLogin={() => setAuthPage('login')} />
+                ) : authPage === 'forgot' ? (
+                  <ForgotPasswordPage onGoLogin={() => setAuthPage('login')} />
+                ) : (
+                  <LoginPage onLogin={onLogin} onGoRegister={() => setAuthPage('register')} onForgotPassword={() => setAuthPage('forgot')} />
+                )
+              }
+            />
+          </Routes>
+        </BrowserRouter>
+      )}
     </ThemeProvider>
   )
 }

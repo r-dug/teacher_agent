@@ -65,6 +65,9 @@ npm run build                   # outputs to frontend/static/
 Model optimization (evals, fine-tuning, distillation): `.notes/model_optimization/`
 Use `/evals` or `/fine-tune` skills to load relevant context when working in this area.
 
+## Test Credentials
+- Non-admin login: `test@mail.com` / `aaaaaaaa`
+
 ## Test Status
 - 166 passed, 1 skipped (as of 2026-03-18)
 - Auth tests in `tests/frontend/test_auth.py` fail due to pre-existing `/api` prefix mismatch — known, not regression

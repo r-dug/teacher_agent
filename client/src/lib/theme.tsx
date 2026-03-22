@@ -86,47 +86,34 @@ function synthwaveTransition(btn: Element) {
   requestAnimationFrame(frame)
 }
 
-// ── Drawer pixel reveal ───────────────────────────────────────────────────────
-// Called by Drawer when it opens in synthwave theme.
-// Covers the panel with a neon pixel grid that dissolves to reveal the content.
+// ── Shared pixel-grid dissolve ────────────────────────────────────────────────
+// Used by both drawer reveal and full-screen lesson transition.
 
-const D_PIXEL   = 16
-const D_GAP     = 2
-const D_FADE_DUR = 0.42
-const D_TOTAL_MS = 750
-
-export function drawerPixelReveal(panel: HTMLElement) {
-  const vw = window.innerWidth
-  const vh = window.innerHeight
-  const w  = panel.offsetWidth
-  const h  = vh
-  const left = vw - w
-
+function pixelDissolve(
+  left: number, top: number, w: number, h: number,
+  pixelSize: number, fadeDur: number, totalMs: number,
+) {
   const canvas = document.createElement('canvas')
-  canvas.width  = w
-  canvas.height = h
+  canvas.width  = Math.ceil(w)
+  canvas.height = Math.ceil(h)
   Object.assign(canvas.style, {
     position: 'fixed',
-    left: `${left}px`,
-    top: '0',
-    width: `${w}px`,
-    height: `${h}px`,
-    zIndex: '9999',
-    pointerEvents: 'none',
+    left: `${left}px`, top: `${top}px`,
+    width: `${w}px`,   height: `${h}px`,
+    zIndex: '9999', pointerEvents: 'none',
   })
   document.body.appendChild(canvas)
   const ctx = canvas.getContext('2d')!
 
-  const cols  = Math.ceil(w / D_PIXEL)
-  const rows  = Math.ceil(h / D_PIXEL)
+  const GAP   = 2
+  const cols  = Math.ceil(w / pixelSize)
+  const rows  = Math.ceil(h / pixelSize)
   const total = cols * rows
 
   const colors = new Array<string>(total)
   for (let i = 0; i < total; i++) {
-    const col = i % cols
-    const row = Math.floor(i / cols)
-    const nx  = col / Math.max(cols - 1, 1)
-    const ny  = row / Math.max(rows - 1, 1)
+    const nx = (i % cols) / Math.max(cols - 1, 1)
+    const ny = Math.floor(i / cols) / Math.max(rows - 1, 1)
     const hue = 185 + (320 - 185) * nx + (Math.random() * 18 - 9)
     const sat = 90  + Math.random() * 10
     const lit = 52  + (1 - ny) * 12 + Math.random() * 8
@@ -140,29 +127,43 @@ export function drawerPixelReveal(panel: HTMLElement) {
   }
   const fadeStart = new Float32Array(total)
   for (let i = 0; i < total; i++) {
-    fadeStart[order[i]] = (i / total) * (1 - D_FADE_DUR)
+    fadeStart[order[i]] = (i / total) * (1 - fadeDur)
   }
 
   const start = performance.now()
   function frame(now: number) {
-    const t    = Math.min((now - start) / D_TOTAL_MS, 1)
-    const pixT = t
+    const pixT = Math.min((now - start) / totalMs, 1)
     ctx.clearRect(0, 0, w, h)
     for (let i = 0; i < total; i++) {
       const fs = fadeStart[i]
-      if (pixT >= fs + D_FADE_DUR) continue
-      const alpha = pixT <= fs ? 1 : 1 - (pixT - fs) / D_FADE_DUR
+      if (pixT >= fs + fadeDur) continue
+      const alpha = pixT <= fs ? 1 : 1 - (pixT - fs) / fadeDur
       const col = i % cols
       const row = Math.floor(i / cols)
       ctx.globalAlpha = alpha
       ctx.fillStyle = colors[i]
-      ctx.fillRect(col * D_PIXEL + D_GAP, row * D_PIXEL + D_GAP, D_PIXEL - D_GAP, D_PIXEL - D_GAP)
+      ctx.fillRect(col * pixelSize + GAP, row * pixelSize + GAP, pixelSize - GAP, pixelSize - GAP)
     }
     ctx.globalAlpha = 1
-    if (t < 1) requestAnimationFrame(frame)
+    if (pixT < 1) requestAnimationFrame(frame)
     else canvas.remove()
   }
   requestAnimationFrame(frame)
+}
+
+// ── Drawer pixel reveal ───────────────────────────────────────────────────────
+
+export function drawerPixelReveal(panel: HTMLElement) {
+  const vw = window.innerWidth
+  const vh = window.innerHeight
+  const w  = panel.offsetWidth
+  pixelDissolve(vw - w, 0, w, vh, 16, 0.42, 750)
+}
+
+// ── Full-screen pixel reveal (lesson transition) ───────────────────────────────
+
+export function screenPixelReveal() {
+  pixelDissolve(0, 0, window.innerWidth, window.innerHeight, 22, 0.48, 1100)
 }
 
 // ── ThemeProvider ─────────────────────────────────────────────────────────────
@@ -186,14 +187,18 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     if (theme === 'light') return
 
     function onMouseDown(e: MouseEvent) {
-      const btn = (e.target as Element).closest('button:not([disabled])')
-      if (!btn) return
+      const target = e.target as Element
 
-      if (theme === 'synthwave' && (btn as HTMLElement).dataset.pageTransition !== undefined) {
-        synthwaveTransition(btn)
+      if (theme === 'synthwave') {
+        const transEl  = target.closest('[data-page-transition]')
+        const pixelEl  = target.closest('[data-pixel-transition]')
+        if (transEl)  synthwaveTransition(transEl)
+        else if (pixelEl) screenPixelReveal()
       }
 
-      // Small button feedback pulse (all non-light themes)
+      // Small pulse feedback — buttons only
+      const btn = target.closest('button:not([disabled])')
+      if (!btn) return
       btn.classList.remove('btn-clicked')
       void (btn as HTMLElement).offsetWidth
       btn.classList.add('btn-clicked')
