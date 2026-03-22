@@ -3,8 +3,9 @@
  * No external dependencies — just CSS transitions.
  */
 
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { cn } from '@/lib/utils'
+import { useTheme, drawerPixelReveal } from '@/lib/theme'
 
 interface DrawerProps {
   open: boolean
@@ -15,6 +16,9 @@ interface DrawerProps {
 }
 
 export function Drawer({ open, onClose, title, children, width = 'w-96' }: DrawerProps) {
+  const { theme } = useTheme()
+  const panelRef  = useRef<HTMLDivElement>(null)
+
   // Close on Escape
   useEffect(() => {
     if (!open) return
@@ -24,6 +28,12 @@ export function Drawer({ open, onClose, title, children, width = 'w-96' }: Drawe
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [open, onClose])
+
+  // Synthwave: pixel reveal when drawer opens
+  useEffect(() => {
+    if (!open || theme !== 'synthwave' || !panelRef.current) return
+    drawerPixelReveal(panelRef.current)
+  }, [open, theme])
 
   return (
     <>
@@ -38,9 +48,11 @@ export function Drawer({ open, onClose, title, children, width = 'w-96' }: Drawe
 
       {/* Panel */}
       <div
+        ref={panelRef}
         className={cn(
           'fixed right-0 top-0 z-50 h-full bg-[hsl(var(--card))] shadow-xl',
-          'flex flex-col transition-transform duration-200',
+          'flex flex-col',
+          theme !== 'synthwave' && 'transition-transform duration-200',
           width,
           open ? 'translate-x-0' : 'translate-x-full',
         )}

@@ -12,6 +12,7 @@ import { Badge } from '@/components/ui/badge'
 import { Drawer } from '@/components/Drawer'
 import { LessonDrawer } from '@/components/LessonDrawer'
 import { CourseDrawer } from '@/components/CourseDrawer'
+import { ThemePicker } from '@/components/ThemePicker'
 import type { Course, Lesson } from '@/lib/types'
 
 interface HomePageProps {
@@ -128,12 +129,13 @@ export function HomePage({ sessionId, onLogout, isAdmin }: HomePageProps) {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">My Learning</h1>
         <div className="flex items-center gap-2">
+          <ThemePicker />
           {isAdmin && (
-            <Button variant="ghost" size="sm" onClick={() => navigate('/admin/usage')}>
+            <Button variant="ghost" size="sm" onClick={() => navigate('/admin/usage')} data-page-transition>
               Usage
             </Button>
           )}
-          <Button variant="ghost" size="sm" onClick={onLogout}>
+          <Button variant="ghost" size="sm" onClick={onLogout} data-page-transition>
             Log out
           </Button>
         </div>

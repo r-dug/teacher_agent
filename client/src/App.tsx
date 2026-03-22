@@ -19,6 +19,7 @@
 
 import { lazy, Suspense, useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { ThemeProvider } from './lib/theme'
 
 import { HomePage } from './pages/HomePage'
 import { CoursePage } from './pages/CoursePage'
@@ -99,58 +100,64 @@ export default function App() {
   // ── loading ──────────────────────────────────────────────────────────────
   if (authState === 'loading') {
     return (
-      <div className="flex h-screen items-center justify-center">
-        <p className="text-sm text-[hsl(var(--muted-foreground))]">Loading…</p>
-      </div>
+      <ThemeProvider>
+        <div className="flex h-screen items-center justify-center">
+          <p className="text-sm text-[hsl(var(--muted-foreground))]">Loading…</p>
+        </div>
+      </ThemeProvider>
     )
   }
 
   // ── authenticated app ────────────────────────────────────────────────────
   if (authState === 'authenticated' && sessionId) {
     return (
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<HomePage sessionId={sessionId} onLogout={onLogout} isAdmin={isAdmin} />} />
-          <Route path="/courses/:courseId" element={<CoursePage sessionId={sessionId} isAdmin={isAdmin} />} />
-          <Route path="/teach/:lessonId" element={<TeachPage sessionId={sessionId} isAdmin={isAdmin} />} />
-          <Route path="/admin/usage" element={
-            <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
-              <UsageDashboardPage sessionId={sessionId} isAdmin={isAdmin} />
-            </Suspense>
-          } />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </BrowserRouter>
+      <ThemeProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/" element={<HomePage sessionId={sessionId} onLogout={onLogout} isAdmin={isAdmin} />} />
+            <Route path="/courses/:courseId" element={<CoursePage sessionId={sessionId} isAdmin={isAdmin} />} />
+            <Route path="/teach/:lessonId" element={<TeachPage sessionId={sessionId} isAdmin={isAdmin} />} />
+            <Route path="/admin/usage" element={
+              <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
+                <UsageDashboardPage sessionId={sessionId} isAdmin={isAdmin} />
+              </Suspense>
+            } />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </BrowserRouter>
+      </ThemeProvider>
     )
   }
 
   // ── unauthenticated ──────────────────────────────────────────────────────
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route
-          path="/auth/verify"
-          element={<EmailVerifyPage onLogin={onLogin} onGoLogin={() => setAuthPage('login')} />}
-        />
-        <Route
-          path="/auth/reset-password"
-          element={<ResetPasswordPage onGoLogin={() => setAuthPage('login')} />}
-        />
-        <Route
-          path="*"
-          element={
-            authPage === 'pending' ? (
-              <EmailPendingPage email={pendingEmail} onGoLogin={() => setAuthPage('login')} />
-            ) : authPage === 'register' ? (
-              <RegisterPage onPending={onRegisterSuccess} onGoLogin={() => setAuthPage('login')} />
-            ) : authPage === 'forgot' ? (
-              <ForgotPasswordPage onGoLogin={() => setAuthPage('login')} />
-            ) : (
-              <LoginPage onLogin={onLogin} onGoRegister={() => setAuthPage('register')} onForgotPassword={() => setAuthPage('forgot')} />
-            )
-          }
-        />
-      </Routes>
-    </BrowserRouter>
+    <ThemeProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route
+            path="/auth/verify"
+            element={<EmailVerifyPage onLogin={onLogin} onGoLogin={() => setAuthPage('login')} />}
+          />
+          <Route
+            path="/auth/reset-password"
+            element={<ResetPasswordPage onGoLogin={() => setAuthPage('login')} />}
+          />
+          <Route
+            path="*"
+            element={
+              authPage === 'pending' ? (
+                <EmailPendingPage email={pendingEmail} onGoLogin={() => setAuthPage('login')} />
+              ) : authPage === 'register' ? (
+                <RegisterPage onPending={onRegisterSuccess} onGoLogin={() => setAuthPage('login')} />
+              ) : authPage === 'forgot' ? (
+                <ForgotPasswordPage onGoLogin={() => setAuthPage('login')} />
+              ) : (
+                <LoginPage onLogin={onLogin} onGoRegister={() => setAuthPage('register')} onForgotPassword={() => setAuthPage('forgot')} />
+              )
+            }
+          />
+        </Routes>
+      </BrowserRouter>
+    </ThemeProvider>
   )
 }

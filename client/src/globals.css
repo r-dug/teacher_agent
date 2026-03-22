@@ -49,6 +49,35 @@
   --ring: 220 90% 65%;
 }
 
+.synthwave {
+  --brand: 320 100% 65%;
+  --brand-foreground: 0 0% 100%;
+  --background: 268 80% 7%;
+  --foreground: 300 8% 92%;
+  --card: 270 55% 11%;
+  --card-foreground: 300 8% 92%;
+  --popover: 270 55% 11%;
+  --popover-foreground: 300 8% 92%;
+  --primary: 320 100% 65%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 280 45% 16%;
+  --secondary-foreground: 300 8% 92%;
+  --muted: 270 40% 14%;
+  --muted-foreground: 285 25% 65%;
+  --accent: 185 100% 55%;
+  --accent-foreground: 268 80% 7%;
+  --destructive: 0 90% 58%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 285 50% 28%;
+  --input: 280 45% 16%;
+  --ring: 320 100% 65%;
+}
+
+.synthwave body {
+  background: linear-gradient(160deg, hsl(268 80% 7%) 0%, hsl(290 60% 12%) 50%, hsl(250 70% 9%) 100%);
+  min-height: 100vh;
+}
+
 * {
   border-color: hsl(var(--border));
 }
@@ -57,4 +86,72 @@ body {
   background-color: hsl(var(--background));
   color: hsl(var(--foreground));
   font-feature-settings: "rlig" 1, "calt" 1;
+}
+
+/* ── Light: business / vanilla ─────────────────────────────────────────────── */
+
+:root button:not([disabled]) {
+  transition: transform 200ms ease, box-shadow 200ms ease;
+}
+:root button:not([disabled]):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 8px hsl(220 90% 56% / 0.10), 0 1px 2px hsl(0 0% 0% / 0.05);
+}
+:root button:not([disabled]):active {
+  transform: translateY(0) scale(0.98);
+  box-shadow: 0 1px 2px hsl(220 90% 56% / 0.06);
+  transition-duration: 80ms;
+}
+
+/* ── Dark: negatives ───────────────────────────────────────────────────────── */
+
+@keyframes dark-flash {
+  0%   { filter: invert(0) brightness(1); }
+  15%  { filter: invert(0.7) brightness(1.4); }
+  45%  { filter: invert(0.7) brightness(1); }
+  100% { filter: invert(0) brightness(1); }
+}
+
+.dark button:not([disabled]) {
+  transition: filter 300ms ease, transform 200ms ease;
+}
+.dark button:not([disabled]):hover {
+  filter: invert(0.6);
+}
+.dark button:not([disabled]).btn-clicked {
+  animation: dark-flash 500ms ease-out forwards;
+}
+
+/* ── Synthwave: neon glow + gentle pulse on click ──────────────────────────── */
+
+@keyframes synthwave-neon-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 4px 1px hsl(320 100% 65% / 0.30),
+      0 0 10px 2px hsl(320 100% 65% / 0.12);
+  }
+  50% {
+    box-shadow:
+      0 0 6px 2px hsl(320 100% 65% / 0.50),
+      0 0 18px 5px hsl(320 100% 65% / 0.22),
+      0 0 30px 8px hsl(185 100% 55% / 0.10);
+  }
+}
+
+@keyframes synthwave-click-pulse {
+  0%   { transform: scale(1);    box-shadow: 0 0  4px 2px hsl(320 100% 65% / 0.4), 0 0 12px  4px hsl(185 100% 55% / 0.2); }
+  30%  { transform: scale(1.06); box-shadow: 0 0 14px 5px hsl(320 100% 65% / 0.6), 0 0 28px 10px hsl(185 100% 55% / 0.3); }
+  65%  { transform: scale(0.97); box-shadow: 0 0  8px 3px hsl(320 100% 65% / 0.3); }
+  100% { transform: scale(1);    box-shadow: 0 0  4px 1px hsl(320 100% 65% / 0.15); }
+}
+
+.synthwave button:not([disabled]) {
+  transition: color 200ms ease;
+}
+.synthwave button:not([disabled]):hover {
+  animation: synthwave-neon-pulse 2s ease-in-out infinite;
+  color: hsl(320 100% 78%);
+}
+.synthwave button:not([disabled]).btn-clicked {
+  animation: synthwave-click-pulse 500ms ease-out forwards;
 }

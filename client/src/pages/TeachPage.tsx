@@ -821,7 +821,7 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
         <div className="flex flex-1 flex-col overflow-hidden">
           {/* Nav */}
           <div className="flex items-center gap-2 border-b border-[hsl(var(--border))] px-4 py-2">
-            <Button variant="ghost" size="icon" onClick={() => navigate('/')} aria-label="Back">
+            <Button variant="ghost" size="icon" onClick={() => navigate('/')} aria-label="Back" data-page-transition>
               <ArrowLeft className="h-4 w-4" />
             </Button>
             <span className="flex-1 text-sm font-medium truncate">{lessonTitle || lessonId}</span>
