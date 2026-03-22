@@ -16,12 +16,14 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from .logging_config import configure_logging
 from .config import settings
@@ -85,6 +87,10 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(_SecurityHeadersMiddleware)
 
+# Trust X-Forwarded-For from the nginx reverse proxy so that
+# request.client.host returns the real client IP (used by rate limiters).
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="127.0.0.1")
+
 _wildcard_origins = settings.ALLOWED_ORIGINS == ["*"]
 app.add_middleware(
     CORSMiddleware,
@@ -106,6 +112,12 @@ app.include_router(personas.router, prefix="/api")
 app.include_router(voices.router, prefix="/api")
 app.include_router(ws_proxy.router)  # /ws/... — no /api prefix
 app.include_router(usage.router, prefix="/api")
+
+
+@app.exception_handler(httpx.ConnectError)
+@app.exception_handler(httpx.TimeoutException)
+async def _backend_unreachable_handler(request: Request, exc: Exception):
+    return JSONResponse(status_code=502, content={"detail": "Backend service unavailable"})
 
 
 @app.get("/health")

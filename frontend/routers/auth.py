@@ -28,7 +28,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import secrets
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 import bcrypt
 from email_validator import EmailNotValidError, validate_email
@@ -222,8 +228,9 @@ async def logout(x_session_id: str = Header(...)):
     entry = store.get(x_session_id)
     if entry:
         store.remove(x_session_id)
-        http = get_http()
-        await http.delete(f"/internal/sessions/{x_session_id}")
+        if _UUID_RE.match(x_session_id):
+            http = get_http()
+            await http.delete(f"/internal/sessions/{x_session_id}")
 
 
 @router.get("/me", response_model=MeResponse)
@@ -231,6 +238,9 @@ async def me(x_session_id: str = Header(...)):
     entry = store.get(x_session_id)
     if entry is None:
         # BFF restarted — try to restore the session from the backend DB.
+        # Validate UUID format first to prevent path traversal in the URL.
+        if not _UUID_RE.match(x_session_id):
+            raise HTTPException(status_code=401, detail="Invalid or expired session")
         http = get_http()
         resp = await http.get(f"/internal/auth/user-by-session/{x_session_id}")
         if not resp.is_success:
