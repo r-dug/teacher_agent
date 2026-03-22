@@ -815,33 +815,41 @@ async def _send_loop(
 
 # ── event handlers ─────────────────────────────────────────────────────────────
 
-def _make_realtime_system_prompt(state: SessionState) -> str:
-    from ..services.agents.prompts.teaching import make_teaching_prompt
-
-    system = make_teaching_prompt(
-        state.curriculum.title,
-        state.curriculum.sections,
-        state.curriculum.idx,
-        state.lesson_goal,
+def _make_realtime_instructions(state: SessionState) -> str:
+    """Lightweight instructions for the realtime session.
+    The session is used as a VAD+STT relay — the chained teacher handles all
+    reasoning — but keeping instructions ensures correct behaviour if the model
+    ever speaks (e.g. a future fallback path) and keeps the persona consistent.
+    """
+    base = (
+        "You are a helpful voice assistant relaying a teaching conversation. "
+        "Keep any responses very short (one sentence). "
+        "Plain prose only — no markdown or lists."
     )
     if state.agent_instructions:
-        system += f"\n\nADDITIONAL STYLE INSTRUCTIONS:\n{state.agent_instructions}"
-    return system
+        base += f"\n\n{state.agent_instructions}"
+    return base
 
 
 def _realtime_session_update_payload(state: SessionState) -> dict:
+    """
+    Configure the realtime session as a VAD + STT relay.
+    create_response=False means the realtime model never generates a reply —
+    transcripts are handed off to the chained teacher (Anthropic/Sonnet).
+    voice and instructions are kept so the session is correctly configured
+    if responses are ever re-enabled (e.g. fallback path).
+    """
     return {
         "type": "session.update",
         "session": {
-            "instructions": _make_realtime_system_prompt(state),
+            "instructions": _make_realtime_instructions(state),
             "voice": settings.OPENAI_REALTIME_VOICE,
             "input_audio_format": "pcm16",
             "output_audio_format": "pcm16",
             "modalities": ["text", "audio"],
             "turn_detection": {
                 "type": "server_vad",
-                "create_response": True,
-                "interrupt_response": settings.OPENAI_REALTIME_INTERRUPT_RESPONSE,
+                "create_response": False,
                 "threshold": settings.OPENAI_REALTIME_VAD_THRESHOLD,
                 "prefix_padding_ms": settings.OPENAI_REALTIME_VAD_PREFIX_MS,
                 "silence_duration_ms": settings.OPENAI_REALTIME_VAD_SILENCE_MS,
@@ -1010,6 +1018,71 @@ async def _finalize_realtime_stream_turn(
     state.realtime_stream_turn = None
 
 
+async def _dispatch_realtime_transcript_to_teacher(
+    websocket: WebSocket,
+    state: SessionState,
+    conn: aiosqlite.Connection,
+    text: str,
+    turn_id: str,
+) -> None:
+    """
+    Route a VAD-transcribed utterance through the chained teaching pipeline.
+
+    The realtime session is used only for audio I/O (VAD + STT). All curriculum
+    reasoning, tool calls, and TTS generation run through the existing chained
+    teacher — so section advancement, student profiling, and slides all work.
+    """
+    if state.phase == "intro":
+        if state.handle_intro_turn_fn:
+            state.agent_task = asyncio.create_task(
+                state.handle_intro_turn_fn(text, turn_id)
+            )
+        return
+
+    # Drop stale trailing user messages from any previously failed turn.
+    while state.messages and state.messages[-1].get("role") == "user":
+        state.messages.pop()
+    state.messages.append({"role": "user", "content": text})
+    await websocket.send_json({"event": "status", "message": "Thinking..."})
+
+    async def _run_turn() -> None:
+        try:
+            await state.agent_session.run_turn(
+                state.curriculum, state.agent_instructions,
+                lesson_goal=state.lesson_goal,
+            )
+            state.turn_status = "complete"
+            await _save_state(conn, state)
+            await websocket.send_json({"event": "turn_complete", "turn_id": turn_id})
+            # Inject teacher reply into realtime session so it has conversation context.
+            if state.realtime_stream_connected and state.realtime_ws:
+                teacher_text = next(
+                    (m.get("content", "") for m in reversed(state.messages)
+                     if m.get("role") == "assistant" and isinstance(m.get("content"), str)),
+                    "",
+                )
+                if teacher_text:
+                    try:
+                        await _realtime_send(state, {
+                            "type": "conversation.item.create",
+                            "item": {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": teacher_text}],
+                            },
+                        })
+                    except Exception:
+                        pass  # Non-critical — context injection only
+        except asyncio.CancelledError:
+            state.turn_status = "failed"
+        except Exception as exc:
+            log.exception("[realtime-teacher] turn raised")
+            state.turn_status = "failed"
+            await websocket.send_json({"event": "error", "message": str(exc) or type(exc).__name__})
+
+    state.agent_task = asyncio.create_task(_run_turn())
+
+
 async def _realtime_stream_reader(
     websocket: WebSocket,
     state: SessionState,
@@ -1031,53 +1104,19 @@ async def _realtime_stream_reader(
                     if not turn.transcript_sent:
                         turn.transcript_sent = True
                         await websocket.send_json({"event": "transcription", "text": turn.user_text, "turn_id": turn.turn_id})
-
-            elif etype in {
-                "response.output_text.delta",
-                "response.text.delta",
-                "response.audio_transcript.delta",
-                "response.output_audio_transcript.delta",
-            }:
-                delta = event.get("delta", "")
-                if isinstance(delta, str) and delta:
-                    turn = _ensure_realtime_turn(state)
-                    await _emit_realtime_turn_start_if_needed(websocket, turn)
-                    turn.assistant_text += delta
-                    await websocket.send_json({
-                        "event": "text_chunk",
-                        "text": delta,
-                        "turn_idx": turn.turn_idx,
-                    })
-
-            elif etype in {"response.output_audio.delta", "response.audio.delta"}:
-                delta_b64 = event.get("delta", "")
-                if isinstance(delta_b64, str) and delta_b64:
-                    turn = _ensure_realtime_turn(state)
-                    await _emit_realtime_turn_start_if_needed(websocket, turn)
-                    if not turn.tts_playing_sent:
-                        turn.tts_playing_sent = True
-                        await websocket.send_json({"event": "tts_playing", "playing": True})
-                    audio = pcm16_b64_to_float32(delta_b64)
-                    data = base64.b64encode(audio.tobytes()).decode()
-                    await websocket.send_json({
-                        "event": "audio_chunk",
-                        "data": data,
-                        "sample_rate": settings.OPENAI_REALTIME_SAMPLE_RATE,
-                        "turn_idx": turn.turn_idx,
-                        "chunk_idx": turn.chunk_idx,
-                    })
-                    turn.chunk_idx += 1
-
-            elif etype == "response.done":
-                response = event.get("response") or {}
-                usage = response.get("usage") or {}
-                await _finalize_realtime_stream_turn(websocket, state, conn, usage=usage)
+                    state.realtime_stream_turn = None  # reset for next utterance
+                    # Hand off to chained teacher if not already running a turn.
+                    if not (state.agent_task and not state.agent_task.done()):
+                        state.last_turn_id = turn.turn_id
+                        state.turn_status = "running"
+                        await _dispatch_realtime_transcript_to_teacher(
+                            websocket, state, conn, turn.user_text, turn.turn_id
+                        )
 
             elif etype == "error":
                 err = event.get("error") or {}
                 msg = err.get("message") or str(err) or "Unknown realtime error"
                 await websocket.send_json({"event": "error", "message": f"Realtime stream error: {msg}"})
-                break
     except asyncio.CancelledError:
         pass
     except Exception as exc:

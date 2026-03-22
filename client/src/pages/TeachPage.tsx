@@ -225,6 +225,23 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
   const { enqueue, replay, stop: stopAudio } = useAudioPlayer()
   const [ttsPlaying, setTtsPlaying] = useState(false)
 
+  // Mute the realtime mic while TTS is playing + 1.5 s cooldown after it stops.
+  // This prevents the teacher's own TTS audio from bleeding into the mic and
+  // producing phantom "user" transcriptions (self-interruption).
+  const [micMuted, setMicMuted] = useState(false)
+  const muteCooldownRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (ttsPlaying) {
+      if (muteCooldownRef.current) clearTimeout(muteCooldownRef.current)
+      setMicMuted(true)
+    } else {
+      muteCooldownRef.current = setTimeout(() => setMicMuted(false), 500)
+    }
+    return () => {
+      if (muteCooldownRef.current) clearTimeout(muteCooldownRef.current)
+    }
+  }, [ttsPlaying])
+
   // Stop audio playback when navigating away
   useEffect(() => () => { stopAudio() }, [stopAudio])
 
@@ -618,6 +635,7 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
     onChunk: useCallback((data: string, sampleRate: number) => {
       send({ event: 'realtime_stream_chunk', data, sample_rate: sampleRate })
     }, [send]),
+    muted: micMuted,
   })
 
   const realtimeMode = selectedVoiceArchId === 'realtime'

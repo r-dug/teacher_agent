@@ -62,7 +62,7 @@ class Settings:
     OPENAI_REALTIME_MAX_RETRIES: int = int(os.getenv("OPENAI_REALTIME_MAX_RETRIES", "1"))
     OPENAI_REALTIME_VAD_THRESHOLD: float = float(os.getenv("OPENAI_REALTIME_VAD_THRESHOLD", "0.5"))
     OPENAI_REALTIME_VAD_PREFIX_MS: int = int(os.getenv("OPENAI_REALTIME_VAD_PREFIX_MS", "400"))
-    OPENAI_REALTIME_VAD_SILENCE_MS: int = int(os.getenv("OPENAI_REALTIME_VAD_SILENCE_MS", "900"))
+    OPENAI_REALTIME_VAD_SILENCE_MS: int = int(os.getenv("OPENAI_REALTIME_VAD_SILENCE_MS", "1500"))
     OPENAI_REALTIME_INTERRUPT_RESPONSE: bool = (
         os.getenv("OPENAI_REALTIME_INTERRUPT_RESPONSE", "false").strip().lower() in {"1", "true", "yes", "on"}
     )

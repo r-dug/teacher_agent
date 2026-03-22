@@ -1,0 +1,125 @@
+[  129909ms] [WARNING] The ScriptProcessorNode is deprecated. Use AudioWorkletNode instead. (https://bit.ly/audio-worklet) @ https://localhost:5173/src/hooks/useRealtimeStreamRecorder.ts:70
+[ 1086120ms] [ERROR] React has detected a change in the order of Hooks called by %s. This will lead to bugs and errors if not fixed. For more information, read the Rules of Hooks: https://react.dev/link/rules-of-hooks
+
+   Previous render            Next render
+   ------------------------------------------------------
+%s   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ TeachPage 1. useContext                 useContext
+2. useContext                 useContext
+3. useContext                 useContext
+4. useContext                 useContext
+5. useContext                 useContext
+6. useContext                 useContext
+7. useContext                 useContext
+8. useContext                 useContext
+9. useRef                     useRef
+10. useContext                useContext
+11. useLayoutEffect           useLayoutEffect
+12. useCallback               useCallback
+13. useState                  useState
+14. useState                  useState
+15. useState                  useState
+16. useState                  useState
+17. useState                  useState
+18. useState                  useState
+19. useState                  useState
+20. useState                  useState
+21. useState                  useState
+22. useState                  useState
+23. useState                  useState
+24. useState                  useState
+25. useState                  useState
+26. useRef                    useRef
+27. useState                  useState
+28. useState                  useState
+29. useState                  useState
+30. useState                  useState
+31. useState                  useState
+32. useState                  useState
+33. useState                  useState
+34. useState                  useState
+35. useState                  useState
+36. useState                  useState
+37. useRef                    useRef
+38. useState                  useState
+39. useState                  useState
+40. useState                  useState
+41. useRef                    useRef
+42. useEffect                 useEffect
+43. useEffect                 useEffect
+44. useState                  useState
+45. useState                  useState
+46. useState                  useState
+47. useState                  useState
+48. useEffect                 useEffect
+49. useEffect                 useEffect
+50. useState                  useState
+51. useState                  useState
+52. useEffect                 useEffect
+53. useState                  useState
+54. useState                  useState
+55. useState                  useState
+56. useState                  useState
+57. useCallback               useCallback
+58. useEffect                 useEffect
+59. useEffect                 useEffect
+60. useRef                    useRef
+61. useCallback               useCallback
+62. useCallback               useCallback
+63. useCallback               useCallback
+64. useState                  useState
+65. useEffect                 useEffect
+66. useCallback               useCallback
+67. useState                  useState
+68. useRef                    useRef
+69. useEffect                 useEffect
+70. useCallback               useCallback
+71. useRef                    useRef
+72. useEffect                 useEffect
+73. useEffect                 useEffect
+74. useEffect                 useEffect
+75. useEffect                 useEffect
+76. useEffect                 useEffect
+77. useEffect                 useEffect
+78. useEffect                 useEffect
+79. useEffect                 useEffect
+80. useCallback               useCallback
+81. useCallback               useCallback
+82. useCallback               useCallback
+83. useCallback               useCallback
+84. useCallback               useCallback
+85. useState                  useState
+86. useState                  useState
+87. useRef                    useRef
+88. useCallback               useCallback
+89. useCallback               useCallback
+90. useCallback               useCallback
+91. useState                  useState
+92. useState                  useState
+93. useRef                    useRef
+94. useRef                    useRef
+95. useRef                    useRef
+96. useRef                    useRef
+97. useRef                    useRef
+98. useRef                    useRef
+99. useRef                    useRef
+100. useRef                   useRef
+101. useRef                   useRef
+102. useCallback              useRef
+ @ https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:5593
+[ 1086123ms] Error: Rendered more hooks than during the previous render.
+    at updateWorkInProgressHook (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:5792:19)
+    at updateEffectImpl (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:6414:20)
+    at Object.useEffect (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:18946:11)
+    at exports.useEffect (https://localhost:5173/node_modules/.vite/deps/chunk-6KCF6AHO.js?v=c04c90b0:923:36)
+    at TeachPage (https://localhost:5173/src/pages/TeachPage.tsx?t=1774198969753:521:3)
+    at Object.react_stack_bottom_frame (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:18509:20)
+    at renderWithHooks (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:5654:24)
+    at updateFunctionComponent (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:7475:21)
+    at beginWork (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:8525:20)
+    at runWithFiberInDEV (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:997:72)
+[ 1086123ms] [WARNING] %s
+
+%s
+ An error occurred in the <TeachPage> component. Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries. @ https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:6965

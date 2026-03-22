@@ -5,7 +5,7 @@
 
 import { useEffect, useRef } from 'react'
 import { cn } from '@/lib/utils'
-import { useTheme, drawerPixelReveal } from '@/lib/theme'
+import { useTheme, drawerPixelReveal, darkLightDrawerReveal } from '@/lib/theme'
 
 interface DrawerProps {
   open: boolean
@@ -29,10 +29,11 @@ export function Drawer({ open, onClose, title, children, width = 'w-96' }: Drawe
     return () => window.removeEventListener('keydown', onKey)
   }, [open, onClose])
 
-  // Synthwave: pixel reveal when drawer opens
+  // Canvas reveal when drawer opens
   useEffect(() => {
-    if (!open || theme !== 'synthwave' || !panelRef.current) return
-    drawerPixelReveal(panelRef.current)
+    if (!open || !panelRef.current) return
+    if (theme === 'synthwave') drawerPixelReveal(panelRef.current)
+    else darkLightDrawerReveal(panelRef.current, theme === 'dark')
   }, [open, theme])
 
   return (
@@ -52,7 +53,6 @@ export function Drawer({ open, onClose, title, children, width = 'w-96' }: Drawe
         className={cn(
           'fixed right-0 top-0 z-50 h-full bg-[hsl(var(--card))] shadow-xl',
           'flex flex-col',
-          theme !== 'synthwave' && 'transition-transform duration-200',
           width,
           open ? 'translate-x-0' : 'translate-x-full',
         )}

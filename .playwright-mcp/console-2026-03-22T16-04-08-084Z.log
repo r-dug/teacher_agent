@@ -1,0 +1,66 @@
+[  336744ms] [WARNING] The ScriptProcessorNode is deprecated. Use AudioWorkletNode instead. (https://bit.ly/audio-worklet) @ https://localhost:5173/src/hooks/useRealtimeStreamRecorder.ts:70
+[  375888ms] [WARNING] The ScriptProcessorNode is deprecated. Use AudioWorkletNode instead. (https://bit.ly/audio-worklet) @ https://localhost:5173/src/hooks/useRealtimeStreamRecorder.ts:70
+[ 2314752ms] [WARNING] [WS] Cannot send — socket not open {event: reconnect, last_turn_id: 7f0de7e1-6990-47a5-b863-57e715b5ab48} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2314753ms] [WARNING] [WS] Cannot send — socket not open {event: set_voice_arch, voice_arch: realtime} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2314753ms] [WARNING] [WS] Cannot send — socket not open {event: set_instructions, instructions: } @ https://localhost:5173/src/lib/ws.ts:41
+[ 2314753ms] [WARNING] [WS] Cannot send — socket not open {event: start_lesson} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2314753ms] [WARNING] [WS] Cannot send — socket not open {event: set_voice, voice: shimmer} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2314753ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_language, language: null} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2314753ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_provider, provider: openai} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2314753ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_model, model_size: gpt-4o-mini-transcribe} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2319121ms] [WARNING] [WS] Cannot send — socket not open {event: reconnect, last_turn_id: 7f0de7e1-6990-47a5-b863-57e715b5ab48} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2319121ms] [WARNING] [WS] Cannot send — socket not open {event: set_voice_arch, voice_arch: realtime} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2319121ms] [WARNING] [WS] Cannot send — socket not open {event: set_instructions, instructions: } @ https://localhost:5173/src/lib/ws.ts:41
+[ 2319121ms] [WARNING] [WS] Cannot send — socket not open {event: start_lesson} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2319121ms] [WARNING] [WS] Cannot send — socket not open {event: set_voice, voice: shimmer} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2319121ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_language, language: null} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2319121ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_provider, provider: openai} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2319121ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_model, model_size: gpt-4o-mini-transcribe} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2319649ms] [WARNING] [WS] Cannot send — socket not open {event: reconnect, last_turn_id: 7f0de7e1-6990-47a5-b863-57e715b5ab48} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2319649ms] [WARNING] [WS] Cannot send — socket not open {event: set_voice_arch, voice_arch: realtime} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2319649ms] [WARNING] [WS] Cannot send — socket not open {event: set_instructions, instructions: } @ https://localhost:5173/src/lib/ws.ts:41
+[ 2319650ms] [WARNING] [WS] Cannot send — socket not open {event: start_lesson} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2319650ms] [WARNING] [WS] Cannot send — socket not open {event: set_voice, voice: shimmer} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2319650ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_language, language: null} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2319650ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_provider, provider: openai} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2319650ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_model, model_size: gpt-4o-mini-transcribe} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2320180ms] [WARNING] [WS] Cannot send — socket not open {event: reconnect, last_turn_id: 7f0de7e1-6990-47a5-b863-57e715b5ab48} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2320180ms] [WARNING] [WS] Cannot send — socket not open {event: set_voice_arch, voice_arch: realtime} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2320180ms] [WARNING] [WS] Cannot send — socket not open {event: set_instructions, instructions: } @ https://localhost:5173/src/lib/ws.ts:41
+[ 2320180ms] [WARNING] [WS] Cannot send — socket not open {event: start_lesson} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2320180ms] [WARNING] [WS] Cannot send — socket not open {event: set_voice, voice: shimmer} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2320181ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_language, language: null} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2320181ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_provider, provider: openai} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2320181ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_model, model_size: gpt-4o-mini-transcribe} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2320710ms] [WARNING] [WS] Cannot send — socket not open {event: reconnect, last_turn_id: 7f0de7e1-6990-47a5-b863-57e715b5ab48} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2320710ms] [WARNING] [WS] Cannot send — socket not open {event: set_voice_arch, voice_arch: realtime} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2320710ms] [WARNING] [WS] Cannot send — socket not open {event: set_instructions, instructions: } @ https://localhost:5173/src/lib/ws.ts:41
+[ 2320710ms] [WARNING] [WS] Cannot send — socket not open {event: start_lesson} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2320710ms] [WARNING] [WS] Cannot send — socket not open {event: set_voice, voice: shimmer} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2320710ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_language, language: null} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2320711ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_provider, provider: openai} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2320711ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_model, model_size: gpt-4o-mini-transcribe} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2321239ms] [WARNING] [WS] Cannot send — socket not open {event: reconnect, last_turn_id: 7f0de7e1-6990-47a5-b863-57e715b5ab48} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2321239ms] [WARNING] [WS] Cannot send — socket not open {event: set_voice_arch, voice_arch: realtime} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2321239ms] [WARNING] [WS] Cannot send — socket not open {event: set_instructions, instructions: } @ https://localhost:5173/src/lib/ws.ts:41
+[ 2321239ms] [WARNING] [WS] Cannot send — socket not open {event: start_lesson} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2321239ms] [WARNING] [WS] Cannot send — socket not open {event: set_voice, voice: shimmer} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2321240ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_language, language: null} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2321240ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_provider, provider: openai} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2321240ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_model, model_size: gpt-4o-mini-transcribe} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2321768ms] [WARNING] [WS] Cannot send — socket not open {event: reconnect, last_turn_id: 7f0de7e1-6990-47a5-b863-57e715b5ab48} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2321768ms] [WARNING] [WS] Cannot send — socket not open {event: set_voice_arch, voice_arch: realtime} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2321768ms] [WARNING] [WS] Cannot send — socket not open {event: set_instructions, instructions: } @ https://localhost:5173/src/lib/ws.ts:41
+[ 2321768ms] [WARNING] [WS] Cannot send — socket not open {event: start_lesson} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2321769ms] [WARNING] [WS] Cannot send — socket not open {event: set_voice, voice: shimmer} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2321769ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_language, language: null} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2321769ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_provider, provider: openai} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2321769ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_model, model_size: gpt-4o-mini-transcribe} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2322298ms] [WARNING] [WS] Cannot send — socket not open {event: reconnect, last_turn_id: 7f0de7e1-6990-47a5-b863-57e715b5ab48} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2322299ms] [WARNING] [WS] Cannot send — socket not open {event: set_voice_arch, voice_arch: realtime} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2322299ms] [WARNING] [WS] Cannot send — socket not open {event: set_instructions, instructions: } @ https://localhost:5173/src/lib/ws.ts:41
+[ 2322299ms] [WARNING] [WS] Cannot send — socket not open {event: start_lesson} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2322299ms] [WARNING] [WS] Cannot send — socket not open {event: set_voice, voice: shimmer} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2322299ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_language, language: null} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2322299ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_provider, provider: openai} @ https://localhost:5173/src/lib/ws.ts:41
+[ 2322299ms] [WARNING] [WS] Cannot send — socket not open {event: set_stt_model, model_size: gpt-4o-mini-transcribe} @ https://localhost:5173/src/lib/ws.ts:41

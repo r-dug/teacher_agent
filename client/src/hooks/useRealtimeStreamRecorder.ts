@@ -8,12 +8,14 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 interface UseRealtimeStreamRecorderOptions {
   onChunk: (data: string, sampleRate: number) => void
+  /** When true, audio chunks are captured but not forwarded (mic muted during TTS playback). */
+  muted?: boolean
 }
 
 const CHUNK_MS = 200
 const SPEAKING_THRESHOLD = 0.012
 
-export function useRealtimeStreamRecorder({ onChunk }: UseRealtimeStreamRecorderOptions) {
+export function useRealtimeStreamRecorder({ onChunk, muted = false }: UseRealtimeStreamRecorderOptions) {
   const [isRecording, setIsRecording] = useState(false)
   const [isSpeaking, setIsSpeaking] = useState(false)
 
@@ -26,6 +28,8 @@ export function useRealtimeStreamRecorder({ onChunk }: UseRealtimeStreamRecorder
   const speakingFramesRef = useRef(0)
   const silenceFramesRef = useRef(0)
   const runningRef = useRef(false)
+  const mutedRef = useRef(muted)
+  mutedRef.current = muted
 
   const emitChunk = useCallback((pcm: Float32Array, sampleRate: number) => {
     if (pcm.length === 0) return
@@ -132,7 +136,9 @@ export function useRealtimeStreamRecorder({ onChunk }: UseRealtimeStreamRecorder
 
       let offset = 0
       while (offset + chunkSamples <= merged.length) {
-        emitChunk(merged.slice(offset, offset + chunkSamples), ctx.sampleRate)
+        if (!mutedRef.current) {
+          emitChunk(merged.slice(offset, offset + chunkSamples), ctx.sampleRate)
+        }
         offset += chunkSamples
       }
       remainderRef.current = merged.slice(offset)

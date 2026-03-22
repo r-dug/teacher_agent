@@ -151,6 +151,131 @@ function pixelDissolve(
   requestAnimationFrame(frame)
 }
 
+// ── Dark/Light: page transition ───────────────────────────────────────────────
+//
+// Phase 1 (easeOut): clicked element expands as solid black/white to fill viewport
+// Phase 2 (easeIn):  block slides off toward bottom-left with gradient wipe edge
+
+const DL_TRANS_MS = 700
+const DL_GROW_END = 0.40
+
+function darkLightPageTransition(el: Element, isDark: boolean) {
+  const rect = (el as HTMLElement).getBoundingClientRect()
+  const vw   = window.innerWidth
+  const vh   = window.innerHeight
+  const solid = isDark ? '#000' : '#fff'
+  const r = isDark ? 0 : 255
+
+  const canvas = document.createElement('canvas')
+  canvas.width = vw; canvas.height = vh
+  Object.assign(canvas.style, { position: 'fixed', inset: '0', zIndex: '9999', pointerEvents: 'none' })
+  document.body.appendChild(canvas)
+  const ctx = canvas.getContext('2d')!
+  const start = performance.now()
+
+  function frame(now: number) {
+    const t = Math.min((now - start) / DL_TRANS_MS, 1)
+    ctx.clearRect(0, 0, vw, vh)
+
+    if (t <= DL_GROW_END) {
+      // Phase 1: lerp from element rect to full viewport
+      const p = easeOut(t / DL_GROW_END)
+      const x = rect.left   * (1 - p)
+      const y = rect.top    * (1 - p)
+      const w = rect.width  + (vw - rect.width)  * p
+      const h = rect.height + (vh - rect.height) * p
+      ctx.fillStyle = solid
+      ctx.fillRect(x, y, w, h)
+    } else {
+      // Phase 2: slide toward bottom-left; gradient fades transparent at top-right edge
+      const p  = easeIn((t - DL_GROW_END) / (1 - DL_GROW_END))
+      const tx = -p * vw
+      const ty =  p * vh
+      ctx.save()
+      ctx.translate(tx, ty)
+      const grad = ctx.createLinearGradient(vw, 0, vw * 0.5, vh * 0.5)
+      grad.addColorStop(0,    `rgba(${r},${r},${r},0)`)
+      grad.addColorStop(0.45, `rgba(${r},${r},${r},1)`)
+      grad.addColorStop(1,    `rgba(${r},${r},${r},1)`)
+      ctx.fillStyle = grad
+      ctx.fillRect(0, 0, vw, vh)
+      ctx.restore()
+    }
+
+    if (t < 1) requestAnimationFrame(frame)
+    else canvas.remove()
+  }
+
+  requestAnimationFrame(frame)
+}
+
+// ── Dark/Light: drawer reveal ─────────────────────────────────────────────────
+//
+// Phase 1 (easeOut): solid fill sweeps in from right edge to cover drawer
+// Phase 2 (easeIn):  block slides off toward bottom-right with gradient wipe edge
+
+export function darkLightDrawerReveal(panel: HTMLElement, isDark: boolean) {
+  const vh   = window.innerHeight
+  const dw   = panel.offsetWidth
+  const left = window.innerWidth - dw
+  const solid = isDark ? '#000' : '#fff'
+  const r = isDark ? 0 : 255
+
+  const canvas = document.createElement('canvas')
+  canvas.width = dw; canvas.height = vh
+  Object.assign(canvas.style, {
+    position: 'fixed', left: `${left}px`, top: '0',
+    width: `${dw}px`, height: `${vh}px`,
+    zIndex: '9999', pointerEvents: 'none',
+  })
+  document.body.appendChild(canvas)
+  const ctx = canvas.getContext('2d')!
+
+  const TOTAL = 700, SPLIT = 0.42
+  const start = performance.now()
+
+  function frame(now: number) {
+    const t = Math.min((now - start) / TOTAL, 1)
+    ctx.clearRect(0, 0, dw, vh)
+
+    if (t <= SPLIT) {
+      // Phase 1: fill sweeps in from right edge leftward
+      const p     = easeOut(t / SPLIT)
+      const fillW = dw * p
+      const x     = dw - fillW
+      const soft  = fillW * 0.25
+      // gradient on leading (left) edge, solid behind it
+      const grad = ctx.createLinearGradient(x, 0, x + soft, 0)
+      grad.addColorStop(0, `rgba(${r},${r},${r},0)`)
+      grad.addColorStop(1, `rgba(${r},${r},${r},1)`)
+      ctx.fillStyle = grad
+      ctx.fillRect(x, 0, soft, vh)
+      ctx.fillStyle = solid
+      if (fillW > soft) ctx.fillRect(x + soft, 0, fillW - soft, vh)
+    } else {
+      // Phase 2: slide toward bottom-right; gradient fades transparent at top-left edge
+      const p  = easeIn((t - SPLIT) / (1 - SPLIT))
+      const tx = p * dw
+      const ty = p * vh
+      ctx.save()
+      ctx.translate(tx, ty)
+      const soft = Math.min(dw, vh) * 0.4
+      const grad = ctx.createLinearGradient(0, 0, soft, soft)
+      grad.addColorStop(0,   `rgba(${r},${r},${r},0)`)
+      grad.addColorStop(0.5, `rgba(${r},${r},${r},1)`)
+      grad.addColorStop(1,   `rgba(${r},${r},${r},1)`)
+      ctx.fillStyle = grad
+      ctx.fillRect(-dw, -vh, dw * 3, vh * 3)
+      ctx.restore()
+    }
+
+    if (t < 1) requestAnimationFrame(frame)
+    else canvas.remove()
+  }
+
+  requestAnimationFrame(frame)
+}
+
 // ── Drawer pixel reveal ───────────────────────────────────────────────────────
 
 export function drawerPixelReveal(panel: HTMLElement) {
@@ -184,8 +309,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
   // Click animations
   useEffect(() => {
-    if (theme === 'light') return
-
     function onMouseDown(e: MouseEvent) {
       const target = e.target as Element
 
@@ -194,6 +317,11 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
         const pixelEl  = target.closest('[data-pixel-transition]')
         if (transEl)  synthwaveTransition(transEl)
         else if (pixelEl) screenPixelReveal()
+      } else {
+        const transEl  = target.closest('[data-page-transition]')
+        const pixelEl  = target.closest('[data-pixel-transition]')
+        if (transEl)  darkLightPageTransition(transEl, theme === 'dark')
+        else if (pixelEl) darkLightPageTransition(pixelEl, theme === 'dark')
       }
 
       // Small pulse feedback — buttons only
