@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.40.0",
+    "openai>=1.0.0",
     "faster-whisper>=1.0.0",
     "kokoro>=0.9.4",
     "pymupdf>=1.27.1",
@@ -20,10 +21,16 @@ dependencies = [
     "bcrypt>=4.0.0",
     "email-validator>=2.0.0",
     "resend>=2.0.0",
+    # spacy model required by kokoro/misaki G2P — installed as a wheel so pip is not needed at runtime
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.25.0",
+    "pytest-timeout>=2.3.0",
 ]
+
+[tool.pytest.ini_options]
+timeout = 30

@@ -78,33 +78,26 @@ def test_kokoro_provider_synthesize_returns_float32_pcm():
 def test_openai_provider_pcm_parsing_and_request_shape(monkeypatch):
     captured: dict = {}
 
-    @dataclass
-    class _Resp:
-        status_code: int
-        content: bytes
-        text: str = ""
+    class _Speech:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            pcm = np.array([0, 16384, -16384], dtype=np.int16).tobytes()
+            from types import SimpleNamespace
+            resp = SimpleNamespace()
+            resp.read = lambda: pcm
+            return resp
 
-        def json(self):
-            return {}
+    class _AudioAPI:
+        speech = _Speech()
 
     class _Client:
-        def __init__(self, timeout: float):
-            captured["timeout"] = timeout
+        def __init__(self, **kwargs):
+            captured["api_key"] = kwargs.get("api_key")
+            captured["timeout"] = kwargs.get("timeout")
 
-        def __enter__(self):
-            return self
+        audio = _AudioAPI()
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def post(self, url: str, headers: dict, json: dict):
-            captured["url"] = url
-            captured["headers"] = headers
-            captured["json"] = json
-            pcm = np.array([0, 16384, -16384], dtype=np.int16).tobytes()
-            return _Resp(status_code=200, content=pcm)
-
-    monkeypatch.setattr("backend.services.voice.tts.httpx.Client", _Client)
+    monkeypatch.setattr("backend.services.voice.tts.openai.OpenAI", _Client)
 
     provider = OpenAITTSProvider(
         api_key="test-key",
@@ -117,11 +110,11 @@ def test_openai_provider_pcm_parsing_and_request_shape(monkeypatch):
     )
     out = provider.synthesize("hello world", "alloy")
 
-    assert captured["url"] == "https://api.openai.com/v1/audio/speech"
-    assert captured["headers"]["Authorization"] == "Bearer test-key"
-    assert captured["json"]["model"] == "gpt-4o-mini-tts"
-    assert captured["json"]["voice"] == "alloy"
-    assert captured["json"]["format"] == "pcm16"
+    assert captured["api_key"] == "test-key"
+    assert captured["timeout"] == 7.5
+    assert captured["model"] == "gpt-4o-mini-tts"
+    assert captured["voice"] == "alloy"
+    assert captured["response_format"] == "pcm16"
     assert out.sample_rate == KOKORO_SAMPLE_RATE
     np.testing.assert_allclose(out.audio, np.array([0.0, 0.5, -0.5], dtype=np.float32), atol=1e-4)
     assert out.estimated_cost_usd > 0

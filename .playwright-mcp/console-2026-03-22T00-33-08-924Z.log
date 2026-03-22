@@ -1,0 +1,3 @@
+[     149ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ https://localhost:5173/api/auth/me:0
+[     156ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ https://localhost:5173/api/auth/me:0
+[    9119ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ https://localhost:5173/api/auth/login:0

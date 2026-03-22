@@ -9,6 +9,7 @@ from typing import Annotated
 
 import aiosqlite
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from ..config import settings
@@ -68,6 +69,36 @@ async def get_lesson_page(
         raise HTTPException(status_code=500, detail=f"PDF render error: {exc}")
 
     return Response(content=img_bytes, media_type="image/png")
+
+
+# ── Enrollment assets (generated images) ───────────────────────────────────────
+
+@router.get("/assets/enrollment_assets/{enrollment_id}/{filename}")
+async def get_enrollment_asset(
+    enrollment_id: str,
+    filename: str,
+    user_id: str,
+    conn: Conn,
+):
+    """Serve a user-generated image asset.
+
+    Validates that the requesting user owns the enrollment before serving.
+    Path matches the URL shape produced by AgentSession._generate_and_send.
+    """
+    # Security: verify the user owns this enrollment
+    enrollment = await models.get_enrollment_by_id(conn, enrollment_id)
+    if enrollment is None or enrollment.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    # Prevent path traversal
+    if ".." in filename or "/" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    image_path = settings.STORAGE_DIR / "enrollment_assets" / enrollment_id / filename
+    if not image_path.exists():
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    return Response(content=image_path.read_bytes(), media_type="image/png")
 
 
 # ── Pydantic models ────────────────────────────────────────────────────────────

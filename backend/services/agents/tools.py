@@ -54,6 +54,37 @@ SEARCH_WEB_TOOL = {
 
 # ── teaching tools ─────────────────────────────────────────────────────────────
 
+GENERATE_VISUAL_AID_TOOL = {
+    "name": "generate_visual_aid",
+    "description": (
+        "Generate a custom AI image to visually illustrate a concept for the student. "
+        "Use this when the student asks for a diagram, illustration, or visual explanation, "
+        "or when you judge that a visual would significantly aid understanding of an abstract "
+        "or complex idea. Describe exactly what should appear in the image — the server will "
+        "generate and display it. The student will see the image automatically. "
+        "Do not use for showing PDF pages (use show_slide for that)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": (
+                    "Description of the image to generate. Be specific and educational: "
+                    "name the objects, labels, and layout. "
+                    "Example: 'A labelled diagram of a neuron showing dendrites, axon, "
+                    "myelin sheath, and synaptic terminals on a white background.'"
+                ),
+            },
+            "caption": {
+                "type": "string",
+                "description": "Short caption shown below the image (1 sentence).",
+            },
+        },
+        "required": ["prompt", "caption"],
+    },
+}
+
 TEACHING_TOOLS = [
     {
         "name": "advance_to_next_section",

@@ -73,8 +73,8 @@ async def test_advisor_start_message_finalize_roundtrip(client, mem_db, monkeypa
         lambda **_kwargs: "What level of assessment rigor do you want?",
     )
     monkeypatch.setattr(
-        "backend.services.documents.course_authoring._objectives_prompt_sync",
-        lambda **_kwargs: "Use explicit objectives for each chapter and map quiz checkpoints.",
+        "backend.services.documents.course_authoring._objectives_and_chapters_sync",
+        lambda **_kwargs: ("Use explicit objectives for each chapter and map quiz checkpoints.", []),
     )
 
     admin, course_id = await _create_admin_textbook_course(mem_db)

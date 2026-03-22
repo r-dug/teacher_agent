@@ -157,3 +157,18 @@ async def get_lesson_page(
         f"/lessons/{lesson_id}/page/{page_number}",
         params={"user_id": user_id},
     )
+
+
+@router.get("/assets/enrollment_assets/{enrollment_id}/{filename}")
+async def get_enrollment_asset(
+    enrollment_id: str,
+    filename: str,
+    x_session_id: str = Header(...),
+):
+    """Proxy generated image asset from backend. Requires a valid session."""
+    entry = _require_session(x_session_id)
+    user_id = await _get_user_id(x_session_id, entry)
+    return await _proxy_get(
+        f"/lessons/assets/enrollment_assets/{enrollment_id}/{filename}",
+        params={"user_id": user_id},
+    )

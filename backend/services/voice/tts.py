@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import time
 from io import BytesIO
 from dataclasses import dataclass
 
-import httpx
 import numpy as np
+import openai
 
 from .config import (
     KOKORO_SAMPLE_RATE,
@@ -98,7 +97,7 @@ class OpenAITTSProvider:
     """
     Adapter for OpenAI TTS (`/v1/audio/speech`).
 
-    Uses PCM output and normalizes to float32 mono samples in [-1, 1].
+    Normalizes to float32 mono samples in [-1, 1].
     """
 
     provider_name = "openai"
@@ -114,14 +113,18 @@ class OpenAITTSProvider:
         max_retries: int = 1,
         cost_per_minute_usd: float = 0.015,
     ) -> None:
-        self._api_key = (api_key or "").strip()
+        if not (api_key or "").strip():
+            raise RuntimeError("OPENAI_API_KEY is not configured for OpenAI TTS.")
+        self._client = openai.OpenAI(
+            api_key=(api_key or "").strip(),
+            timeout=timeout_seconds,
+            max_retries=max_retries,
+        )
         self.model = model
         self.default_voice = (
             default_voice if default_voice in OPENAI_TTS_VOICES else DEFAULT_OPENAI_TTS_VOICE
         )
         self.response_format = (response_format or "wav").strip().lower()
-        self.timeout_seconds = timeout_seconds
-        self.max_retries = max(0, max_retries)
         self.cost_per_minute_usd = max(0.0, cost_per_minute_usd)
 
     def list_voices(self) -> dict[str, str]:
@@ -133,52 +136,29 @@ class OpenAITTSProvider:
         return self.default_voice
 
     def synthesize(self, text: str, voice: str | None = None) -> TTSSynthesisResult:
-        if not self._api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured for OpenAI TTS.")
-
         resolved_voice = self.resolve_voice(voice)
-        payload = {
-            "model": self.model,
-            "voice": resolved_voice,
-            "input": text,
-            "format": self.response_format,
-        }
-        headers = {"Authorization": f"Bearer {self._api_key}"}
-
-        last_err: Exception | None = None
         t0 = time.monotonic()
-        for attempt in range(self.max_retries + 1):
-            try:
-                with httpx.Client(timeout=self.timeout_seconds) as client:
-                    response = client.post(
-                        "https://api.openai.com/v1/audio/speech",
-                        headers=headers,
-                        json=payload,
-                    )
-                if response.status_code >= 400:
-                    raise RuntimeError(_format_openai_error(response))
-                audio, sample_rate = _decode_openai_audio(
-                    response.content,
-                    expected_format=self.response_format,
-                )
-                synthesis_ms = int((time.monotonic() - t0) * 1000)
-                audio_seconds = len(audio) / max(1, sample_rate)
-                estimated_cost = (audio_seconds / 60.0) * self.cost_per_minute_usd
-                return TTSSynthesisResult(
-                    audio=np.clip(audio, -1.0, 1.0),
-                    sample_rate=sample_rate,
-                    voice=resolved_voice,
-                    characters=len(text),
-                    synthesis_ms=synthesis_ms,
-                    estimated_cost_usd=estimated_cost,
-                )
-            except Exception as exc:  # pragma: no cover - retry path is tested via behavior
-                last_err = exc
-                if attempt >= self.max_retries:
-                    break
-                time.sleep(min(0.2 * (2**attempt), 1.0))
 
-        raise RuntimeError(f"OpenAI TTS failed: {last_err}") from last_err
+        response = self._client.audio.speech.create(
+            model=self.model,
+            voice=resolved_voice,
+            input=text,
+            response_format=self.response_format,
+        )
+        audio_bytes = response.read()
+
+        audio, sample_rate = _decode_openai_audio(audio_bytes, self.response_format)
+        synthesis_ms = int((time.monotonic() - t0) * 1000)
+        audio_seconds = len(audio) / max(1, sample_rate)
+        estimated_cost = (audio_seconds / 60.0) * self.cost_per_minute_usd
+        return TTSSynthesisResult(
+            audio=np.clip(audio, -1.0, 1.0),
+            sample_rate=sample_rate,
+            voice=resolved_voice,
+            characters=len(text),
+            synthesis_ms=synthesis_ms,
+            estimated_cost_usd=estimated_cost,
+        )
 
 
 def build_tts_providers(
@@ -218,55 +198,29 @@ def build_tts_providers(
 
 
 def load_kokoro_pipeline(voice: str = DEFAULT_KOKORO_VOICE):
-    """
-    Load and return a KPipeline for the given voice (blocking; call at startup).
-
-    The pipeline is language-code scoped.  When sessions request different voices
-    with the same language code, the same pipeline instance can be reused.
-    For simplicity the backend loads a single pipeline at startup using the
-    default voice's language code; the lang_code is 'a' (American English) for
-    all default voices.
-    """
+    """Load and return a KPipeline for the given voice (blocking; call at startup)."""
     from kokoro import KPipeline
 
     lang_code = KOKORO_VOICES.get(voice, "a")
     return KPipeline(lang_code=lang_code)
 
 
-def _format_openai_error(response: httpx.Response) -> str:
-    """Best-effort error extraction for OpenAI HTTP failures."""
-    try:
-        data = response.json()
-    except json.JSONDecodeError:
-        return f"{response.status_code} {response.text[:300]}"
-    message = data.get("error", {}).get("message")
-    if message:
-        return f"{response.status_code} {message}"
-    return f"{response.status_code} {str(data)[:300]}"
-
-
 def _decode_openai_audio(content: bytes, expected_format: str) -> tuple[np.ndarray, int]:
     """
     Decode OpenAI audio/speech payload.
 
-    Handles both raw 16-bit PCM and WAV container responses to avoid noisy output
-    if the API responds with a container unexpectedly.
+    Handles both raw 16-bit PCM and WAV container responses.
     """
     expected = (expected_format or "").strip().lower()
 
-    # Explicit raw PCM path.
     if expected == "pcm16":
         pcm_i16 = np.frombuffer(content, dtype="<i2")
         audio = (pcm_i16.astype(np.float32) / 32768.0).astype(np.float32)
         return audio, OPENAI_TTS_SAMPLE_RATE
 
-    # Container path (wav/mp3/opus/flac/...)
-    if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WAVE":
-        pass  # Fast path handled by soundfile below.
-
     try:
         import soundfile as sf
-    except Exception as exc:  # pragma: no cover - dependency is present in project
+    except Exception as exc:
         raise RuntimeError("Received container audio but soundfile is unavailable.") from exc
     try:
         audio, sample_rate = sf.read(BytesIO(content), dtype="float32")

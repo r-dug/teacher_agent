@@ -40,6 +40,7 @@ export function Sketchpad({ prompt, invocationId, textBg, imBg, onSubmit, onCanc
   const [color, setColor] = useState('#1a1a1a')
   const [isErasing, setIsErasing] = useState(false)
   const [minimized, setMinimized] = useState(false)
+  const [hasStrokes, setHasStrokes] = useState(false)
 
   useEffect(() => {
     const ctx = canvasRef.current?.getContext('2d')
@@ -67,6 +68,7 @@ export function Sketchpad({ prompt, invocationId, textBg, imBg, onSubmit, onCanc
       if (undoStack.current.length > 50) undoStack.current.shift()
     }
     setIsDrawing(true)
+    setHasStrokes(true)
     lastPos.current = getPos(e)
     canvasRef.current?.setPointerCapture(e.pointerId)
   }
@@ -111,6 +113,7 @@ export function Sketchpad({ prompt, invocationId, textBg, imBg, onSubmit, onCanc
     if (!ctx) return
     undoStack.current.push(ctx.getImageData(0, 0, W, H))
     ctx.clearRect(0, 0, W, H)
+    setHasStrokes(false)
   }
 
   async function handleSubmit() {
@@ -135,7 +138,7 @@ export function Sketchpad({ prompt, invocationId, textBg, imBg, onSubmit, onCanc
         img.onerror = () => resolve()
         img.src = imBg
       })
-    } else if (textBg) {
+    } else if (textBg && textBg.length <= 5) {
       ctx.globalAlpha = 0.15
       ctx.fillStyle = '#000000'
       ctx.textAlign = 'center'
@@ -183,7 +186,12 @@ export function Sketchpad({ prompt, invocationId, textBg, imBg, onSubmit, onCanc
 
         {/* Header: prompt + minimize */}
         <div className="flex items-start justify-between gap-4">
-          <p className="text-sm font-medium flex-1">{prompt}</p>
+          <div className="flex-1 flex flex-col gap-1">
+            <p className="text-sm font-medium">{prompt}</p>
+            {textBg && textBg.length > 5 && (
+              <p className="text-xs text-[hsl(var(--muted-foreground))] italic border-l-2 border-[hsl(var(--border))] pl-2">{textBg}</p>
+            )}
+          </div>
           <button
             onClick={() => setMinimized(true)}
             className="shrink-0 rounded px-2 py-0.5 text-xs text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--accent))] transition-colors"
@@ -295,7 +303,7 @@ export function Sketchpad({ prompt, invocationId, textBg, imBg, onSubmit, onCanc
             />
           )}
 
-          {textBg && !imBg && (() => {
+          {textBg && textBg.length <= 5 && !imBg && (() => {
             const fontSize = H * 0.78
             const maxW = W * 0.9
             const estimatedW = textBg.length * fontSize
@@ -343,7 +351,7 @@ export function Sketchpad({ prompt, invocationId, textBg, imBg, onSubmit, onCanc
         <div className="flex justify-end gap-2">
           <Button variant="outline" size="sm" onClick={handleClear}>Clear</Button>
           <Button variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
-          <Button size="sm" onClick={handleSubmit}>Submit</Button>
+          <Button size="sm" onClick={handleSubmit} disabled={!hasStrokes}>Submit</Button>
         </div>
       </div>
     </div>

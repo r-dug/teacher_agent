@@ -13,6 +13,7 @@ or via the project launcher (to be added in Phase 2).
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -20,8 +21,12 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from .logging_config import configure_logging
 from .app_state import app_state
 from .config import settings
+
+configure_logging(storage_dir=settings.STORAGE_DIR)
+log = logging.getLogger(__name__)
 from .db import connection as db, models
 from .routers import courses, internal, lessons, ws_session, usage
 from .routers.agents import personas
@@ -41,16 +46,16 @@ async def _usage_background_task() -> None:
         try:
             app_state.token_tracker.aggregate_minutes()
         except Exception as exc:
-            print(f"[usage] aggregate_minutes error: {exc}")
+            log.warning("[usage] aggregate_minutes error: %s", exc)
         # Roll previous month on first run each day if it's the 1st
         now = datetime.now(timezone.utc)
         if now.day == 1 and last_roll_month != now.month:
             try:
                 n = app_state.token_tracker.roll_month_to_hours()
                 if n:
-                    print(f"[usage] rolled {n} minute rows to hours.")
+                    log.info("[usage] rolled %d minute rows to hours.", n)
             except Exception as exc:
-                print(f"[usage] roll_month_to_hours error: {exc}")
+                log.warning("[usage] roll_month_to_hours error: %s", exc)
             last_roll_month = now.month
 
 
@@ -75,7 +80,7 @@ async def lifespan(app: FastAPI):
     # Load ML models in thread pool (blocking operations)
     # STT model is loaded lazily on first transcription request (avoids blocking startup)
 
-    print(f"Loading Kokoro TTS ({settings.DEFAULT_VOICE})...")
+    log.info("Loading Kokoro TTS (%s)...", settings.DEFAULT_VOICE)
     from .services.voice.tts import build_tts_providers, load_kokoro_pipeline
 
     app_state.kokoro_pipeline = await asyncio.to_thread(
@@ -96,17 +101,39 @@ async def lifespan(app: FastAPI):
     )
     app_state.active_tts_provider = selected_provider
     if selected_provider == "openai":
-        print("TTS ready. Primary=openai, fallback=kokoro.")
+        log.info("TTS ready. Primary=openai, fallback=kokoro.")
     else:
-        print("TTS ready. Primary=kokoro.")
+        log.info("TTS ready. Primary=kokoro.")
+
+    # Image generation provider (optional — None if disabled or API key missing)
+    from .services.images import build_image_provider
+    app_state.image_provider = build_image_provider(
+        enable=settings.IMAGE_GEN_ENABLE,
+        provider=settings.IMAGE_GEN_PROVIDER,
+        model=settings.IMAGE_GEN_MODEL,
+        size=settings.IMAGE_GEN_SIZE,
+        quality=settings.IMAGE_GEN_QUALITY,
+        timeout_seconds=settings.IMAGE_GEN_TIMEOUT_S,
+        max_retries=settings.IMAGE_GEN_MAX_RETRIES,
+        openai_api_key=settings.OPENAI_API_KEY,
+    )
+    if app_state.image_provider:
+        log.info("Image gen ready: provider=%s, model=%s", settings.IMAGE_GEN_PROVIDER, settings.IMAGE_GEN_MODEL)
+    else:
+        log.info("Image generation disabled.")
 
     teach_provider = (settings.TEACH_LLM_PROVIDER or "anthropic").strip().lower()
     teach_model = settings.TEACH_LLM_MODEL or settings.LLM_MODEL
-    print(f"Teach LLM: provider={teach_provider}, model={teach_model}")
-    print(
-        "Decompose LLM: "
-        f"provider={settings.effective_decompose_llm_provider()}, "
-        f"model={settings.effective_decompose_llm_model()}"
+    log.info("Teach LLM: provider=%s, model=%s", teach_provider, teach_model)
+    log.info(
+        "Decompose LLM: provider=%s, model=%s",
+        settings.effective_decompose_llm_provider(),
+        settings.effective_decompose_llm_model(),
+    )
+    log.info(
+        "Authoring LLM: provider=%s, model=%s",
+        settings.effective_authoring_llm_provider(),
+        settings.effective_authoring_llm_model(),
     )
 
     # Background usage aggregation

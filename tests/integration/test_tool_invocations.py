@@ -128,7 +128,7 @@ def test_open_sketchpad_event_received(ws_test_client):
     open_sketchpad event with a prompt and an invocation_id.
     """
     def _fake_with_sketchpad(self, curriculum, messages, agent_instructions, lesson_goal=None):
-        result_holder: list = []
+        result_holder: list = [None]
         done_event = threading.Event()
         self._callbacks.on_open_sketchpad("Draw a triangle.", result_holder, done_event)
         done_event.wait(timeout=5.0)
@@ -176,7 +176,7 @@ def test_open_sketchpad_drawing_reaches_agent(ws_test_client):
     received_drawings: list = []
 
     def _fake_captures_drawing(self, curriculum, messages, agent_instructions, lesson_goal=None):
-        result_holder: list = []
+        result_holder: list = [None]
         done_event = threading.Event()
         self._callbacks.on_open_sketchpad("Draw anything.", result_holder, done_event)
         done_event.wait(timeout=5.0)

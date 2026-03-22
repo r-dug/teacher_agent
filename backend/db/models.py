@@ -277,6 +277,16 @@ async def get_enrollment(
         return _row(await cur.fetchone())
 
 
+async def get_enrollment_by_id(
+    conn: aiosqlite.Connection,
+    enrollment_id: str,
+) -> Row | None:
+    async with conn.execute(
+        "SELECT * FROM lesson_enrollments WHERE id = ?", (enrollment_id,)
+    ) as cur:
+        return _row(await cur.fetchone())
+
+
 _ENROLLMENT_UPDATE_SQL: dict[str, str] = {
     "current_section_idx": "UPDATE lesson_enrollments SET current_section_idx = ?, updated_at = datetime('now') WHERE id = ?",
     "completed": "UPDATE lesson_enrollments SET completed = ?, updated_at = datetime('now') WHERE id = ?",
@@ -387,6 +397,57 @@ async def get_messages(
     _strip_dangling_tool_use(result)
 
     return result
+
+
+# ── enrollment assets ──────────────────────────────────────────────────────────
+
+async def create_enrollment_asset(
+    conn: aiosqlite.Connection,
+    enrollment_id: str,
+    section_idx: int,
+    image_path: str,
+    prompt: str,
+    tool_use_id: str,
+    revised_prompt: str = "",
+    idx: int = 0,
+    asset_type: str = "ai_image",
+) -> Row:
+    aid = new_id()
+    await conn.execute(
+        """INSERT INTO enrollment_assets
+           (id, enrollment_id, section_idx, asset_type, image_path, prompt,
+            revised_prompt, tool_use_id, idx)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (aid, enrollment_id, section_idx, asset_type, image_path, prompt,
+         revised_prompt, tool_use_id, idx),
+    )
+    await conn.commit()
+    async with conn.execute(
+        "SELECT * FROM enrollment_assets WHERE id = ?", (aid,)
+    ) as cur:
+        return _row(await cur.fetchone())  # type: ignore[return-value]
+
+
+async def get_enrollment_assets(
+    conn: aiosqlite.Connection,
+    enrollment_id: str,
+    section_idx: int | None = None,
+) -> list[Row]:
+    if section_idx is not None:
+        async with conn.execute(
+            """SELECT * FROM enrollment_assets
+               WHERE enrollment_id = ? AND section_idx = ?
+               ORDER BY section_idx, idx""",
+            (enrollment_id, section_idx),
+        ) as cur:
+            return _rows(await cur.fetchall())
+    async with conn.execute(
+        """SELECT * FROM enrollment_assets
+           WHERE enrollment_id = ?
+           ORDER BY section_idx, idx""",
+        (enrollment_id,),
+    ) as cur:
+        return _rows(await cur.fetchall())
 
 
 # ── users / auth ───────────────────────────────────────────────────────────────

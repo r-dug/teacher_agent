@@ -23,6 +23,7 @@ import { StatusBar } from '@/components/StatusBar'
 import { ConversationView, type Turn, type Figure } from '@/components/ConversationView'
 import { CurriculumPanel } from '@/components/CurriculumPanel'
 import { SlideViewer } from '@/components/SlideViewer'
+import { ImageViewer } from '@/components/ImageViewer'
 import { ZoomableImage } from '@/components/ZoomableImage'
 import { Sketchpad } from '@/components/Sketchpad'
 import { CameraCapture } from '@/components/CameraCapture'
@@ -82,6 +83,8 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
   const [currState, setCurrState] = useState<CurriculumState | null>(null)
   const [currComplete, setCurrComplete] = useState(false)
   const [slide, setSlide] = useState<SlideState | null>(null)
+  const [generatedImage, setGeneratedImage] = useState<{ imageUrl: string; caption: string } | null>(null)
+  const [generatingImage, setGeneratingImage] = useState(false)
   const [sketchpad, setSketchpad] = useState<SketchpadState | null>(null)
   const [camera, setCamera] = useState<{ prompt: string; invocationId: string } | null>(null)
   const [videoCapture, setVideoCapture] = useState<{ prompt: string; invocationId: string } | null>(null)
@@ -91,10 +94,13 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
   const [htmlEditor, setHtmlEditor] = useState<{ prompt: string; starterHtml?: string; starterCss?: string; invocationId: string } | null>(null)
   const [drawingView, setDrawingView] = useState<{ dataUrl: string; prompt: string } | null>(null)
   const [timerExercise, setTimerExercise] = useState<{ prompt: string; invocationId: string; durationSeconds: number } | null>(null)
+  const [imageGenAvailable, setImageGenAvailable] = useState(false)
+  const [imageGenEnabled, setImageGenEnabled] = useState(false)
+  const [lessonTitle, setLessonTitle] = useState<string>('')
   const [decomposing, setDecomposing] = useState(false)
   const [agentBusy, setAgentBusy] = useState(false)
   const [inputText, setInputText] = useState('')
-  const [errorBanner, setErrorBanner] = useState<string | null>(null)
+
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const lastTurnIdRef = useRef<string | null>(null)
 
@@ -110,6 +116,14 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
       .then((data: Persona[]) => { setPersonas(data); setPersonasReady(true) })
       .catch(() => setPersonasReady(true))  // start even if fetch fails
   }, [sessionId])
+
+  useEffect(() => {
+    if (!lessonId) return
+    fetch(`/api/lessons/${lessonId}`, { headers: { 'X-Session-Id': sessionId } })
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => { if (data?.title) setLessonTitle(data.title) })
+      .catch(() => {/* non-fatal */})
+  }, [lessonId, sessionId])
 
   // ── voices ───────────────────────────────────────────────────────────────
   const [voices, setVoices] = useState<Voice[]>([])
@@ -377,6 +391,44 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
         setTimerExercise({ prompt: ev.prompt, invocationId: ev.invocation_id, durationSeconds: ev.duration_seconds })
         break
 
+      case 'generating_image':
+        setGeneratingImage(true)
+        setStatusMsg('Generating image…')
+        break
+
+      case 'show_image':
+        setGeneratingImage(false)
+        setStatusMsg('')
+        setGeneratedImage({ imageUrl: ev.image_url, caption: ev.caption ?? '' })
+        setTurns((prev) => {
+          const next = [...prev]
+          let idx = next.length - 1
+          while (idx >= 0 && next[idx]!.role !== 'assistant') idx--
+          if (idx >= 0) {
+            const t = next[idx] as Turn
+            next[idx] = {
+              ...t,
+              figures: [...(t.figures ?? []), {
+                type: 'generated_image' as const,
+                imageUrl: ev.image_url,
+                caption: ev.caption ?? '',
+                prompt: ev.prompt ?? '',
+              }],
+            }
+          }
+          return next
+        })
+        break
+
+      case 'generation_failed':
+        setGeneratingImage(false)
+        setStatusMsg(`Image generation failed: ${ev.reason ?? 'unknown error'}`)
+        break
+
+      case 'capabilities':
+        setImageGenAvailable(ev.image_gen_available)
+        break
+
       case 'code_stdout':
         if (ev.invocation_id === activeCodeInvId.current) {
           setCodeOutput((prev) => ({ ...prev, stdout: prev.stdout + ev.data }))
@@ -432,11 +484,13 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
           role: t.role,
           text: t.text,
           complete: true,
-          figures: t.figures?.map((fig) =>
-            fig.type === 'slide'
-              ? { type: 'slide' as const, page: fig.page, caption: fig.caption, lessonId: lessonId! }
-              : { type: 'drawing' as const, dataUrl: `data:image/png;base64,${fig.data}`, prompt: fig.prompt }
-          ),
+          figures: t.figures?.map((fig) => {
+            if (fig.type === 'slide')
+              return { type: 'slide' as const, page: fig.page, caption: fig.caption, lessonId: lessonId! }
+            if (fig.type === 'generated_image')
+              return { type: 'generated_image' as const, imageUrl: fig.image_url, caption: fig.caption, prompt: fig.prompt }
+            return { type: 'drawing' as const, dataUrl: `data:image/png;base64,${fig.data}`, prompt: fig.prompt }
+          }),
         })))
         break
 
@@ -446,7 +500,7 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
 
       case 'error':
         setStatusMsg(`Error: ${ev.message}`)
-        setErrorBanner(JSON.stringify(ev))
+
         setAgentBusy(false)
         setDecomposing(false)
         break
@@ -528,6 +582,12 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
     if (wsStatus !== 'connected' || !selectedSttModelId) return
     send({ event: 'set_stt_model', model_size: selectedSttModelId })
   }, [selectedSttModelId, wsStatus, send])
+
+  // ── image gen toggle ──────────────────────────────────────────────────────
+  const handleImageGenChange = useCallback((enabled: boolean) => {
+    setImageGenEnabled(enabled)
+    send({ event: 'set_image_gen', enabled })
+  }, [send])
 
   // ── InputBar handlers ────────────────────────────────────────────────────
   const handleSendText = useCallback((text: string) => {
@@ -704,6 +764,8 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
   function handleFigureClick(fig: Figure) {
     if (fig.type === 'slide') {
       setSlide({ pageStart: fig.page, pageEnd: fig.page, caption: fig.caption })
+    } else if (fig.type === 'generated_image') {
+      setGeneratedImage({ imageUrl: fig.imageUrl, caption: fig.caption })
     } else {
       setDrawingView({ dataUrl: fig.dataUrl, prompt: fig.prompt })
     }
@@ -742,6 +804,9 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
       setSlide({ pageStart, pageEnd })
       setMobileSidebarOpen(false)
     },
+    imageGenAvailable,
+    imageGenEnabled,
+    onImageGenChange: handleImageGenChange,
   }
 
   return (
@@ -749,19 +814,6 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
       {/* Top bar */}
       <StatusBar wsStatus={wsStatus} message={statusMsg} />
 
-      {/* Error banner */}
-      {errorBanner && (
-        <div className="flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-4 py-2">
-          <pre className="flex-1 overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs text-red-400">{errorBanner}</pre>
-          <button
-            onClick={() => setErrorBanner(null)}
-            aria-label="Dismiss error"
-            className="shrink-0 text-red-400 hover:text-red-300"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-      )}
 
       {/* Main content */}
       <div className="flex flex-1 overflow-hidden">
@@ -772,7 +824,7 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
             <Button variant="ghost" size="icon" onClick={() => navigate('/')} aria-label="Back">
               <ArrowLeft className="h-4 w-4" />
             </Button>
-            <span className="flex-1 text-sm font-medium truncate">{lessonId}</span>
+            <span className="flex-1 text-sm font-medium truncate">{lessonTitle || lessonId}</span>
             {/* Hamburger — mobile only */}
             <Button
               variant="ghost"
@@ -891,6 +943,18 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
           onAnnotate={handleAnnotate}
         />
       )}
+      {generatedImage && (
+        <ImageViewer
+          imageUrl={generatedImage.imageUrl}
+          caption={generatedImage.caption}
+          sessionId={sessionId}
+          onClose={() => setGeneratedImage(null)}
+          isRecording={recordIsActive}
+          isSpeaking={recordIsSpeaking}
+          recordDisabled={wsStatus !== 'connected' || (!realtimeMode && agentBusy && !recordIsActive)}
+          onRecord={toggleRecord}
+        />
+      )}
       {sketchpad && (
         <Sketchpad
           prompt={sketchpad.prompt}
@@ -898,7 +962,7 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
           textBg={sketchpad.textBg}
           imBg={sketchpad.imBg}
           onSubmit={handleSketchSubmit}
-          onCancel={() => setSketchpad(null)}
+          onCancel={() => { send({ event: 'tool_result', invocation_id: sketchpad.invocationId, result: {} }); setSketchpad(null) }}
         />
       )}
       {camera && (
@@ -906,7 +970,7 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
           prompt={camera.prompt}
           invocationId={camera.invocationId}
           onSubmit={handlePhotoSubmit}
-          onCancel={() => setCamera(null)}
+          onCancel={() => { send({ event: 'tool_result', invocation_id: camera.invocationId, result: {} }); setCamera(null) }}
         />
       )}
       {videoCapture && (
@@ -914,7 +978,7 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
           prompt={videoCapture.prompt}
           invocationId={videoCapture.invocationId}
           onSubmit={handleVideoSubmit}
-          onCancel={() => setVideoCapture(null)}
+          onCancel={() => { send({ event: 'tool_result', invocation_id: videoCapture.invocationId, result: {} }); setVideoCapture(null) }}
         />
       )}
       {codeEditor && (
@@ -926,7 +990,7 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
           output={codeOutput}
           onRun={handleCodeRun}
           onSubmit={handleCodeSubmit}
-          onCancel={() => { setCodeEditor(null); activeCodeInvId.current = null }}
+          onCancel={() => { send({ event: 'tool_result', invocation_id: codeEditor.invocationId, result: { code: '' } }); setCodeEditor(null); activeCodeInvId.current = null }}
         />
       )}
       {htmlEditor && (
@@ -936,7 +1000,7 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
           starterCss={htmlEditor.starterCss}
           invocationId={htmlEditor.invocationId}
           onSubmit={handleHtmlSubmit}
-          onCancel={() => setHtmlEditor(null)}
+          onCancel={() => { send({ event: 'tool_result', invocation_id: htmlEditor.invocationId, result: { html: '', css: '' } }); setHtmlEditor(null) }}
         />
       )}
       {timerExercise && (
@@ -947,6 +1011,14 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
           onSubmit={handleTimerSubmit}
           onCancel={handleTimerCancel}
         />
+      )}
+
+      {/* Image generation spinner — small non-blocking indicator */}
+      {generatingImage && (
+        <div className="fixed bottom-24 left-1/2 z-40 -translate-x-1/2 flex items-center gap-2 rounded-full border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-4 py-2 shadow-lg text-sm">
+          <Loader2 className="h-4 w-4 animate-spin text-[hsl(var(--primary))]" />
+          Generating image…
+        </div>
       )}
 
       {/* Decomposition loading overlay */}

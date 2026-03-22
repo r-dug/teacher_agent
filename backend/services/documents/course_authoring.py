@@ -253,7 +253,7 @@ def _openai_chat_text_sync(
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured.")
 
-    payload = {
+    payload: dict[str, Any] = {
         "model": model,
         "max_tokens": max_tokens,
         "messages": [{"role": "system", "content": system}] + messages,
@@ -268,10 +268,24 @@ def _openai_chat_text_sync(
                     headers=headers,
                     json=payload,
                 )
+            if resp.status_code == 400 and "max_tokens" in (resp.text or "") and "max_completion_tokens" in (resp.text or ""):
+                # Model requires max_completion_tokens — switch and retry immediately.
+                payload = {k: v for k, v in payload.items() if k != "max_tokens"}
+                payload["max_completion_tokens"] = max_tokens
+                continue
             if resp.status_code >= 400:
                 raise RuntimeError(_format_openai_error(resp))
             data = resp.json()
-            message = ((data.get("choices") or [{}])[0] or {}).get("message") or {}
+            choice = ((data.get("choices") or [{}])[0] or {})
+            usage = data.get("usage") or {}
+            details = usage.get("completion_tokens_details") or {}
+            reasoning_tokens = int(details.get("reasoning_tokens") or 0)
+            if choice.get("finish_reason") == "length" and reasoning_tokens > 0 and reasoning_tokens >= usage.get("completion_tokens", 0) - 1:
+                # Reasoning model consumed all tokens for thinking — remove the cap and retry.
+                log.info("Reasoning model exhausted token budget on reasoning; retrying without token cap.")
+                payload = {k: v for k, v in payload.items() if k not in ("max_tokens", "max_completion_tokens")}
+                continue
+            message = choice.get("message") or {}
             content = message.get("content") or ""
             if isinstance(content, list):
                 parts = []
@@ -284,7 +298,7 @@ def _openai_chat_text_sync(
             else:
                 text = str(content).strip()
             if not text:
-                raise RuntimeError("OpenAI returned empty text content.")
+                raise RuntimeError(f"OpenAI returned empty content. finish_reason={choice.get('finish_reason')} reasoning_tokens={reasoning_tokens}")
             return text
         except Exception as exc:
             last_err = exc
@@ -380,8 +394,8 @@ def _advisor_reply_sync(
     chapters: list[dict[str, Any]],
     transcript: list[dict[str, str]],
 ) -> str:
-    provider = (settings.TEACH_LLM_PROVIDER or "anthropic").strip().lower()
-    model = settings.TEACH_LLM_MODEL or settings.LLM_MODEL
+    provider = settings.effective_authoring_llm_provider()
+    model = settings.effective_authoring_llm_model()
     messages = [
         {"role": m["role"], "content": m["content"]}
         for m in transcript
@@ -417,67 +431,46 @@ def _advisor_reply_sync(
     )
 
 
-def _objectives_prompt_sync(
-    *,
+_TOC_LLM_MAX_INPUT_CHARS = 6000
+_TOC_LLM_MIN_INPUT_CHARS = 300
+
+
+def _extract_toc_section(text: str, max_chars: int = _TOC_LLM_MAX_INPUT_CHARS) -> str:
+    """Return up to max_chars of document text most likely to contain the TOC.
+
+    Scans for a line matching common TOC headings; if found, returns text
+    starting from that line.  Falls back to the document head.
+    """
+    import re
+
+    toc_pattern = re.compile(
+        r"(?im)^[\s\-–—]*(?:table\s+of\s+contents?|contents?|outline)\s*$"
+    )
+    m = toc_pattern.search(text)
+    if m:
+        start = m.start()
+        return text[start : start + max_chars]
+    return text[:max_chars]
+
+
+def _build_objectives_prompt(
     course_title: str,
     chapters: list[dict[str, Any]],
     transcript: list[dict[str, str]],
-    extracted_text: str,
 ) -> str:
+    """Deterministic objectives prompt built from transcript and chapter map."""
     chapter_lines = "\n".join(
         f"- {c.get('title', 'Untitled')} (pages {c.get('page_start')}–{c.get('page_end')})"
         for c in chapters
     )
-    convo = "\n".join(f"{m.get('role','user')}: {m.get('content','')}" for m in transcript)
-    preview = extracted_text[:20000]
-
-    provider = (settings.TEACH_LLM_PROVIDER or "anthropic").strip().lower()
-    model = settings.TEACH_LLM_MODEL or settings.LLM_MODEL
-    system = (
-        "You are a senior curriculum architect. Produce a decomposition objective prompt that "
-        "will be fed into a sectioning agent. Focus on measurable learning outcomes, concept "
-        "coverage, prerequisite ordering, and assessment alignment. Return plain text only."
-    )
-    user_msg = (
-        f'COURSE TITLE: "{course_title}"\n'
-        f"CHAPTERS:\n{chapter_lines}\n\n"
-        f"ADVISOR CONVERSATION:\n{convo}\n\n"
-        "DOCUMENT EXTRACT PREVIEW:\n"
-        f"{preview}\n\n"
-        "Write the final objective prompt for decomposition."
-    )
-    try:
-        if provider == "openai":
-            return _openai_chat_text_sync(
-                model=model,
-                system=system,
-                messages=[{"role": "user", "content": user_msg}],
-                max_tokens=1200,
-                timeout_seconds=settings.OPENAI_LLM_TIMEOUT_S,
-                max_retries=settings.OPENAI_LLM_MAX_RETRIES,
-            )
-        import anthropic
-
-        client = anthropic.Anthropic(max_retries=3)
-        resp = client.messages.create(
-            model=model,
-            max_tokens=1200,
-            system=system,
-            messages=[{"role": "user", "content": user_msg}],
-        )
-        for block in getattr(resp, "content", []):
-            if getattr(block, "type", None) == "text" and getattr(block, "text", "").strip():
-                return str(block.text).strip()
-    except Exception as exc:
-        log.warning("objectives prompt fallback: %s", exc)
-
-    # Deterministic fallback if external LLM call fails.
     learner_goals = [
         m.get("content", "").strip()
         for m in transcript
         if m.get("role") == "user" and str(m.get("content", "")).strip()
     ]
-    goals_text = "\n".join(f"- {g}" for g in learner_goals[-6:]) or "- General textbook mastery"
+    goals_text = (
+        "\n".join(f"- {g}" for g in learner_goals[-6:]) or "- General textbook mastery"
+    )
     return (
         f'DECOMPOSITION OBJECTIVES FOR "{course_title}"\n\n'
         "Prioritize these instructor goals:\n"
@@ -490,6 +483,142 @@ def _objectives_prompt_sync(
         "Chapter map:\n"
         f"{chapter_lines}\n"
     )
+
+
+def _objectives_and_chapters_sync(
+    *,
+    course_title: str,
+    chapters: list[dict[str, Any]],
+    transcript: list[dict[str, str]],
+    extracted_text: str,
+    total_pages: int,
+) -> tuple[str, list[dict[str, Any]] | None]:
+    """Return (objectives_prompt, suggested_chapters | None).
+
+    Objectives prompt is always built deterministically from the transcript.
+    A separate LLM call attempts to infer chapter structure from the TOC
+    section of the document — skipped if the extract is too short to be useful.
+    Each suggested chapter has title, page_start, page_end, included.
+    """
+    objectives_prompt = _build_objectives_prompt(course_title, chapters, transcript)
+
+    toc_text = _extract_toc_section(extracted_text)
+    suggested_chapters = extract_toc_chapters_sync(
+        toc_text, total_pages=total_pages, course_title=course_title
+    )
+    return objectives_prompt, suggested_chapters
+
+
+def extract_toc_chapters_sync(
+    extracted_text: str,
+    *,
+    total_pages: int,
+    course_title: str = "",
+) -> list[dict[str, Any]] | None:
+    """LLM-based TOC extraction. Returns a chapter list or None if extraction fails/unclear.
+
+    Safe to call from sync context (e.g. asyncio.to_thread).
+    """
+    toc_text = _extract_toc_section(extracted_text)
+    if len(toc_text) < _TOC_LLM_MIN_INPUT_CHARS:
+        log.info("extract_toc_chapters_sync: TOC extract too short (%d chars), skipping LLM", len(toc_text))
+        return None
+
+    provider = settings.effective_authoring_llm_provider()
+    model = settings.effective_authoring_llm_model()
+    log.info(
+        "extract_toc_chapters_sync: provider=%s model=%s toc_chars=%d total_pages=%d",
+        provider, model, len(toc_text), total_pages,
+    )
+
+    system = (
+        "You are a curriculum architect. Extract chapter structure from the document TOC "
+        "section and return a JSON array of objects. Each object must have exactly these keys:\n"
+        '  "title": string — chapter or part title\n'
+        '  "page_start": integer — first page (1-indexed)\n'
+        f"Page numbers must be between 1 and {total_pages}. "
+        "Return only top-level chapters or parts, not sub-sections. "
+        "Return a JSON array only — no markdown fences, no commentary. "
+        "If the text contains no clear chapter structure, return an empty array []."
+    )
+    user_msg = (
+        f'COURSE TITLE: "{course_title}"\n'
+        f"TOTAL PAGES: {total_pages}\n\n"
+        "DOCUMENT TOC SECTION:\n"
+        f"{toc_text}\n\n"
+        "Return the JSON array now."
+    )
+
+    raw: str | None = None
+    try:
+        if provider == "openai":
+            raw = _openai_chat_text_sync(
+                model=model,
+                system=system,
+                messages=[{"role": "user", "content": user_msg}],
+                max_tokens=1500,
+                timeout_seconds=settings.OPENAI_LLM_TIMEOUT_S,
+                max_retries=settings.OPENAI_LLM_MAX_RETRIES,
+            )
+        else:
+            import anthropic
+
+            client = anthropic.Anthropic(max_retries=3)
+            resp = client.messages.create(
+                model=model,
+                max_tokens=1500,
+                system=system,
+                messages=[{"role": "user", "content": user_msg}],
+            )
+            for block in getattr(resp, "content", []):
+                if getattr(block, "type", None) == "text" and getattr(block, "text", "").strip():
+                    raw = str(block.text).strip()
+                    break
+    except Exception as exc:
+        log.warning("extract_toc_chapters_sync: LLM call failed: %s", exc)
+        return None
+
+    if not raw:
+        return None
+
+    try:
+        stripped = raw.strip()
+        if stripped.startswith("{"):
+            parsed_obj = _extract_json_object(stripped)
+            raw_chapters = parsed_obj.get("chapters") or parsed_obj.get("sections") or []
+        else:
+            raw_chapters = _json_loads(stripped, [])
+        if not isinstance(raw_chapters, list):
+            return None
+
+        # Collect unique page_start values — ignore LLM-supplied page_end to avoid
+        # overlap issues caused by hierarchical TOC structures. Recompute deterministically.
+        candidates: list[tuple[int, str]] = []
+        seen_starts: set[int] = set()
+        for item in raw_chapters:
+            title = _coerce_text(item.get("title", ""))
+            page_start = _coerce_int(item.get("page_start"))
+            if title and page_start is not None and 1 <= page_start <= total_pages:
+                if page_start not in seen_starts:
+                    seen_starts.add(page_start)
+                    candidates.append((page_start, title))
+        candidates.sort(key=lambda x: x[0])
+
+        recomputed: list[dict[str, Any]] = []
+        for i, (start, title) in enumerate(candidates):
+            end = candidates[i + 1][0] - 1 if i + 1 < len(candidates) else total_pages
+            if end >= start:
+                recomputed.append({"title": title, "page_start": start, "page_end": end, "included": True})
+
+        if len(recomputed) >= 2:
+            log.info("extract_toc_chapters_sync: extracted %d chapters", len(recomputed))
+            return recomputed
+
+        log.info("extract_toc_chapters_sync: LLM returned <2 valid chapters, ignoring")
+        return None
+    except Exception as exc:
+        log.warning("extract_toc_chapters_sync: parse failed: %s  raw=%r", exc, raw[:300])
+        return None
 
 
 async def ensure_advisor_session(
@@ -585,6 +714,7 @@ async def finalize_advisor_session(
     chapters = await _load_chapters(conn, course_id)
     source = await _load_source(conn, course_id)
     pdf_full = settings.STORAGE_DIR / str(source["pdf_path"])
+    toc_was_empty = not _json_loads(source.get("toc_json"), [])
 
     def _extract_preview() -> str:
         from .pdf_tools import extract_text_plain
@@ -593,12 +723,13 @@ async def finalize_advisor_session(
 
     extracted_text = await asyncio.to_thread(_extract_preview)
     course_title = await _course_title(conn, course_id)
-    objectives_prompt = await asyncio.to_thread(
-        _objectives_prompt_sync,
+    objectives_prompt, suggested_chapters = await asyncio.to_thread(
+        _objectives_and_chapters_sync,
         course_title=course_title,
         chapters=chapters,
         transcript=transcript,
         extracted_text=extracted_text,
+        total_pages=int(source["page_count"]),
     )
     await conn.execute(
         """UPDATE course_advisor_sessions
@@ -606,12 +737,34 @@ async def finalize_advisor_session(
            WHERE course_id = ?""",
         (objectives_prompt, course_id),
     )
+
+    # When the PDF had no embedded bookmarks AND chapters are still generic
+    # fallback placeholders ("Part N"), replace them with LLM-inferred structure.
+    # If creation-time LLM extraction already ran, the chapter titles will be
+    # meaningful (not "Part N"), and we should not overwrite them again here.
+    import re as _re
+    chapters_are_fallback = chapters and all(
+        _re.match(r"^Part\s+\d+$", c.get("title", ""), _re.IGNORECASE)
+        for c in chapters
+    )
+    updated_chapters: list[dict[str, Any]] | None = None
+    if toc_was_empty and chapters_are_fallback and suggested_chapters:
+        log.info(
+            "Replacing %d fallback chapter drafts with %d LLM-inferred chapters for course %s",
+            len(chapters),
+            len(suggested_chapters),
+            course_id,
+        )
+        await _write_chapter_drafts(conn, course_id=course_id, chapters=suggested_chapters)
+        updated_chapters = await _load_chapters(conn, course_id)
+
     await conn.commit()
     return {
         "course_id": course_id,
         "status": "finalized",
         "transcript": transcript,
         "objectives_prompt": objectives_prompt,
+        "chapters": updated_chapters,
     }
 
 
@@ -622,6 +775,7 @@ async def create_decomposition_job(
     user_id: str,
     notify_session_id: str | None,
     objectives_prompt_override: str | None = None,
+    decompose_mode: str = "pdf",
 ) -> dict[str, Any]:
     async with conn.execute(
         """SELECT id, status FROM course_decomposition_jobs
@@ -667,10 +821,10 @@ async def create_decomposition_job(
     job_id = db.new_id()
     await conn.execute(
         """INSERT INTO course_decomposition_jobs
-           (id, course_id, creator_id, status, objectives_prompt, total_items, completed_items, failed_items,
+           (id, course_id, creator_id, status, decompose_mode, objectives_prompt, total_items, completed_items, failed_items,
             notify_session_id, created_at, updated_at)
-           VALUES (?, ?, ?, 'queued', ?, ?, 0, 0, ?, datetime('now'), datetime('now'))""",
-        (job_id, course_id, user_id, objectives_prompt, len(chapters), notify_session_id),
+           VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, 0, ?, datetime('now'), datetime('now'))""",
+        (job_id, course_id, user_id, decompose_mode, objectives_prompt, len(chapters), notify_session_id),
     )
     for idx, chapter in enumerate(chapters):
         await conn.execute(
@@ -764,9 +918,10 @@ async def _run_decomposition_job(job_id: str) -> None:
         user_id = str(job["creator_id"])
         notify_session_id = str(job.get("notify_session_id") or "").strip() or None
         objectives_prompt = str(job.get("objectives_prompt") or "")
+        decompose_mode = str(job.get("decompose_mode") or "pdf").strip().lower()
         decompose_provider = settings.effective_decompose_llm_provider()
         decompose_model = settings.effective_decompose_llm_model()
-        cache_model_key = f"{decompose_provider}:{decompose_model}"
+        cache_model_key = f"{decompose_provider}:{decompose_model}:{decompose_mode}"
 
         await conn.execute(
             """UPDATE course_decomposition_jobs
@@ -782,6 +937,13 @@ async def _run_decomposition_job(job_id: str) -> None:
         source_pdf_rel = str(source["pdf_path"])
         page_count = int(source["page_count"])
 
+        # For text mode, extract the full PDF text once up front.
+        full_pdf_text: str | None = None
+        if decompose_mode == "text":
+            from .textbook_authoring import extract_full_text_from_pdf
+            full_pdf_path = settings.STORAGE_DIR / Path(source_pdf_rel)
+            full_pdf_text = await asyncio.to_thread(extract_full_text_from_pdf, full_pdf_path)
+
         async with conn.execute(
             """SELECT * FROM course_decomposition_job_items
                WHERE job_id = ?
@@ -792,12 +954,13 @@ async def _run_decomposition_job(job_id: str) -> None:
 
         completed = 0
         failed = 0
-        for item in items:
+        for item_idx, item in enumerate(items):
             item_id = str(item["id"])
             chapter_id = str(item["chapter_id"])
             title = str(item["title"])
             page_start = int(item["page_start"])
             page_end = int(item["page_end"])
+            next_chapter_title = items[item_idx + 1]["title"] if item_idx + 1 < len(items) else None
             await conn.execute(
                 """UPDATE course_decomposition_job_items
                    SET status = 'running', error = NULL, updated_at = datetime('now')
@@ -827,6 +990,10 @@ async def _run_decomposition_job(job_id: str) -> None:
                     decompose_provider=decompose_provider,
                     decompose_model=decompose_model,
                     cache_model_key=cache_model_key,
+                    decompose_mode=decompose_mode,
+                    full_pdf_text=full_pdf_text,
+                    chapter_title=title,
+                    next_chapter_title=next_chapter_title,
                 )
                 lesson_id = await _upsert_chapter_lesson(
                     conn=conn,
@@ -927,6 +1094,10 @@ async def _resolve_sections(
     decompose_provider: str,
     decompose_model: str,
     cache_model_key: str,
+    decompose_mode: str = "pdf",
+    full_pdf_text: str | None = None,
+    chapter_title: str = "",
+    next_chapter_title: str | None = None,
 ) -> tuple[bool, list[dict[str, Any]]]:
     async with conn.execute(
         "SELECT sections_json FROM decomposition_cache WHERE cache_key = ?",
@@ -951,6 +1122,10 @@ async def _resolve_sections(
         objectives_prompt,
         decompose_provider,
         decompose_model,
+        decompose_mode,
+        full_pdf_text,
+        chapter_title,
+        next_chapter_title,
     )
     sections = _normalize_sections_or_raise(raw_sections)
     await conn.execute(
@@ -997,6 +1172,139 @@ def _build_cache_key(
     return _sha256_text(material)
 
 
+def _extract_chapter_text_by_title(
+    full_text: str,
+    chapter_title: str,
+    next_chapter_title: str | None,
+    max_chars: int = 120000,
+) -> str:
+    """Find chapter_title in full_text and return text up to next_chapter_title.
+
+    Searches case-insensitively. Falls back progressively:
+    1. Exact title match
+    2. First 4 words of title
+    3. First 2 words of title
+    Returns empty string if nothing matches.
+    """
+    import re
+
+    def _search(needle: str) -> re.Match | None:
+        return re.search(re.escape(needle), full_text, re.IGNORECASE)
+
+    def _make_short(title: str, words: int) -> str:
+        return " ".join(re.sub(r"\s+", " ", title.strip()).split()[:words])
+
+    def _strip_prefix(title: str) -> str:
+        """Strip leading roman numeral or numeric prefix, e.g. 'VI. BigO' → 'BigO'."""
+        stripped = re.sub(r"^(?:[IVXLCDM]+\.|\d+\.)\s+", "", title.strip(), flags=re.IGNORECASE)
+        return stripped.strip() or title.strip()
+
+    def _best_match(title: str) -> re.Match | None:
+        clean = re.sub(r"\s+", " ", title.strip())
+        return (
+            _search(clean)
+            or _search(_strip_prefix(clean))
+            or _search(_make_short(clean, 4))
+            or _search(_make_short(_strip_prefix(clean), 4))
+            or _search(_make_short(clean, 2))
+            or _search(_make_short(_strip_prefix(clean), 2))
+        )
+
+    match = _best_match(chapter_title)
+    if not match:
+        log.warning("_extract_chapter_text_by_title: title %r not found in full text", chapter_title)
+        return ""
+
+    start = match.start()
+
+    if next_chapter_title:
+        next_match = _best_match(next_chapter_title)
+        if next_match and next_match.start() > start:
+            return full_text[start : next_match.start()][:max_chars]
+
+    return full_text[start : start + max_chars]
+
+
+def _decompose_chapter_text_sync(
+    *,
+    full_pdf_text: str,
+    chapter_title: str,
+    next_chapter_title: str | None,
+    objectives_prompt: str,
+    decompose_provider: str,
+    decompose_model: str,
+) -> list[dict[str, Any]]:
+    """Text-based decomposition: extract chapter text by title search, send as plain text to LLM."""
+    from ..agents.prompts.decompose import DECOMPOSE_PROMPT, DECOMPOSE_SYSTEM
+
+    chapter_text = _extract_chapter_text_by_title(
+        full_pdf_text, chapter_title, next_chapter_title,
+        max_chars=max(1000, int(settings.OPENAI_DECOMPOSE_MAX_INPUT_CHARS)),
+    )
+    if not chapter_text:
+        raise ValueError(f"Could not locate chapter '{chapter_title}' in extracted PDF text.")
+
+    text_system = DECOMPOSE_SYSTEM.replace(
+        "page_start and page_end must be the exact page numbers where each section "
+        "appears in the PDF. Count pages carefully — these numbers are used to display the actual "
+        "PDF pages to the student during teaching.",
+        "page_start and page_end may be set to null — this is text-only mode and page references are not used.",
+    )
+    goal_note = (
+        f"\n\nSTUDENT GOAL: \"{objectives_prompt}\"\n"
+        "Use this to inform your decomposition:\n"
+        "- Break content most relevant to this goal into finer, more precise sections.\n"
+        "- Prioritise key_concepts that directly serve this goal."
+        if objectives_prompt
+        else ""
+    )
+    user_message = (
+        DECOMPOSE_PROMPT
+        + f"\nNote: This is the chapter '{chapter_title}'. page_start and page_end should be null."
+        + goal_note
+        + "\n\nSOURCE TEXT:\n"
+        + chapter_text
+        + "\n\nReturn JSON only."
+    )
+
+    provider = (decompose_provider or "anthropic").strip().lower()
+    if provider == "openai":
+        raw = _openai_chat_text_sync(
+            model=decompose_model,
+            system=text_system,
+            messages=[{"role": "user", "content": user_message}],
+            max_tokens=4000,
+            timeout_seconds=settings.OPENAI_DECOMPOSE_TIMEOUT_S,
+            max_retries=settings.OPENAI_DECOMPOSE_MAX_RETRIES,
+        )
+    else:
+        import anthropic
+        client = anthropic.Anthropic(max_retries=6)
+        resp = client.messages.create(
+            model=decompose_model,
+            max_tokens=4000,
+            system=text_system,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        raw = ""
+        for block in getattr(resp, "content", []):
+            if getattr(block, "type", None) == "text":
+                raw = str(block.text).strip()
+                break
+
+    parsed = _extract_json_object(raw)
+    sections = _extract_sections_payload(parsed)
+    if not isinstance(sections, list):
+        raise ValueError(f"Text decomposition response had no valid sections list. Keys: {sorted(parsed.keys())[:12]}")
+
+    # Null out page numbers — they're meaningless in text mode
+    for sec in sections:
+        sec["page_start"] = None
+        sec["page_end"] = None
+
+    return sections
+
+
 def _decompose_chapter_sync(
     source_pdf_rel: str,
     page_start: int,
@@ -1005,7 +1313,21 @@ def _decompose_chapter_sync(
     objectives_prompt: str,
     decompose_provider: str,
     decompose_model: str,
+    decompose_mode: str = "pdf",
+    full_pdf_text: str | None = None,
+    chapter_title: str = "",
+    next_chapter_title: str | None = None,
 ) -> list[dict[str, Any]]:
+    if decompose_mode == "text":
+        return _decompose_chapter_text_sync(
+            full_pdf_text=full_pdf_text or "",
+            chapter_title=chapter_title,
+            next_chapter_title=next_chapter_title,
+            objectives_prompt=objectives_prompt,
+            decompose_provider=decompose_provider,
+            decompose_model=decompose_model,
+        )
+
     provider = (decompose_provider or "anthropic").strip().lower()
     if provider == "openai":
         sections = _decompose_chapter_openai_sync(
@@ -1252,3 +1574,29 @@ async def _load_chapters(
     async with conn.execute(sql, params) as cur:
         rows = await cur.fetchall()
     return [dict(r) for r in rows]
+
+
+async def _write_chapter_drafts(
+    conn: aiosqlite.Connection,
+    *,
+    course_id: str,
+    chapters: list[dict[str, Any]],
+) -> None:
+    await conn.execute(
+        "DELETE FROM course_chapter_drafts WHERE course_id = ?", (course_id,)
+    )
+    for idx, chapter in enumerate(chapters):
+        await conn.execute(
+            """INSERT INTO course_chapter_drafts
+               (id, course_id, idx, title, page_start, page_end, included, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))""",
+            (
+                db.new_id(),
+                course_id,
+                idx,
+                chapter["title"],
+                int(chapter["page_start"]),
+                int(chapter["page_end"]),
+                1 if chapter.get("included", True) else 0,
+            ),
+        )

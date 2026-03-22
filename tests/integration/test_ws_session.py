@@ -56,6 +56,18 @@ def _setup_session(loop, conn) -> str:
     return loop.run_until_complete(models.create_session(conn))
 
 
+_STARTUP_EVENTS = {"capabilities", "decompose_complete", "history", "status"}
+
+
+def _next_non_startup(ws, max_messages: int = 10) -> dict:
+    """Receive messages, skipping known connect-time events, return first non-startup."""
+    for _ in range(max_messages):
+        msg = ws.receive_json()
+        if msg.get("event") not in _STARTUP_EVENTS:
+            return msg
+    raise AssertionError("No non-startup message received within limit")
+
+
 def _collect_until(ws, terminal_events: set[str], max_messages: int = 30) -> list[dict]:
     """Receive messages until a terminal event or max_messages is reached."""
     events = []
@@ -86,7 +98,7 @@ def test_lesson_not_found_is_rejected(ws_test_client):
     session_id = _setup_session(loop, conn)
 
     with client.websocket_connect(f"/ws/{session_id}?lesson_id=nonexistent") as ws:
-        msg = ws.receive_json()
+        msg = _next_non_startup(ws)
     assert msg["event"] == "error"
     assert "Lesson not found" in msg["message"]
 
@@ -102,7 +114,7 @@ def test_ping_returns_pong(ws_test_client):
 
     with client.websocket_connect(f"/ws/{session_id}?lesson_id={lesson_id}") as ws:
         ws.send_json({"event": "ping"})
-        msg = ws.receive_json()
+        msg = _next_non_startup(ws)
     assert msg["event"] == "pong"
 
 
@@ -116,7 +128,7 @@ def test_set_instructions_accepted(ws_test_client):
         ws.send_json({"event": "set_instructions", "instructions": "Be concise."})
         # Verify connection is still healthy
         ws.send_json({"event": "ping"})
-        msg = ws.receive_json()
+        msg = _next_non_startup(ws)
     assert msg["event"] == "pong"
 
 
@@ -129,7 +141,7 @@ def test_cancel_turn_when_idle_is_harmless(ws_test_client):
     with client.websocket_connect(f"/ws/{session_id}?lesson_id={lesson_id}") as ws:
         ws.send_json({"event": "cancel_turn"})
         ws.send_json({"event": "ping"})
-        msg = ws.receive_json()
+        msg = _next_non_startup(ws)
     assert msg["event"] == "pong"
 
 
@@ -141,11 +153,11 @@ def test_invalid_json_returns_error(ws_test_client):
 
     with client.websocket_connect(f"/ws/{session_id}?lesson_id={lesson_id}") as ws:
         ws.send_text("not valid json {{")
-        msg = ws.receive_json()
+        msg = _next_non_startup(ws)
         assert msg["event"] == "error"
         # Session should survive — still responds to ping
         ws.send_json({"event": "ping"})
-        msg2 = ws.receive_json()
+        msg2 = _next_non_startup(ws)
     assert msg2["event"] == "pong"
 
 
@@ -159,7 +171,7 @@ def test_reconnect_with_no_running_turn(ws_test_client):
 
     with client.websocket_connect(f"/ws/{session_id}?lesson_id={lesson_id}") as ws:
         ws.send_json({"event": "reconnect", "last_turn_id": "old-turn-id"})
-        msg = ws.receive_json()
+        msg = _next_non_startup(ws)
     assert msg["event"] == "reconnect_ack"
     assert msg["turn_status"] == "idle"
 
@@ -364,14 +376,14 @@ def test_two_sessions_receive_independent_events(ws_test_client):
         f"/ws/{session_id_a}?lesson_id={lesson_id_a}"
     ) as ws_a:
         ws_a.send_json({"event": "ping"})
-        events_a.append(ws_a.receive_json())
+        events_a.append(_next_non_startup(ws_a))
 
     # Session B: sends a different ping (separate connection)
     with client.websocket_connect(
         f"/ws/{session_id_b}?lesson_id={lesson_id_b}"
     ) as ws_b:
         ws_b.send_json({"event": "ping"})
-        events_b.append(ws_b.receive_json())
+        events_b.append(_next_non_startup(ws_b))
 
     assert events_a == [{"event": "pong"}]
     assert events_b == [{"event": "pong"}]

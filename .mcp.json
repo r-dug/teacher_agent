@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "type": "stdio",
+      "command": "/home/richard/.nvm/versions/node/v20.20.1/bin/npx",
+      "args": [
+        "-y",
+        "@playwright/mcp",
+        "--browser=chromium",
+        "--ignore-https-errors"
+      ]
+    }
+  }
+}

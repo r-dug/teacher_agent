@@ -174,16 +174,3 @@ def _messages_to_openai(messages: list[dict]) -> list[dict]:
         out.append({"role": "user", "content": json.dumps(content)})
 
     return out
-
-
-def _format_openai_chat_error(response) -> str:
-    """Best-effort extraction of OpenAI chat API error details."""
-    try:
-        data = response.json()
-    except Exception:
-        text = getattr(response, "text", "")
-        return f"{getattr(response, 'status_code', 'error')} {text[:300]}"
-    message = (data.get("error") or {}).get("message")
-    if message:
-        return f"{getattr(response, 'status_code', 'error')} {message}"
-    return f"{getattr(response, 'status_code', 'error')} {str(data)[:300]}"

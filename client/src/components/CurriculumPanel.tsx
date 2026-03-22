@@ -40,6 +40,9 @@ interface CurriculumPanelProps {
   onSttModelChange: (id: string) => void
   isAdmin?: boolean
   onViewPage?: (pageStart: number, pageEnd: number) => void
+  imageGenAvailable?: boolean
+  imageGenEnabled?: boolean
+  onImageGenChange?: (enabled: boolean) => void
 }
 
 function SelectRow({ label, value, onChange, children }: {
@@ -72,6 +75,9 @@ export function CurriculumPanel({
   sttModels, selectedSttModelId, onSttModelChange,
   isAdmin = false,
   onViewPage,
+  imageGenAvailable = false,
+  imageGenEnabled = false,
+  onImageGenChange,
 }: CurriculumPanelProps) {
   const sortedPersonas   = sortByRecency(personas,     (p) => p.id,           (p) => p.name, 'persona')
   const sortedVoices     = sortByRecency(voices,       (v) => v.id,           (v) => v.id,   'voice')
@@ -128,6 +134,27 @@ export function CurriculumPanel({
             <option key={m.id} value={m.id}>{m.id}{m.is_default ? ' (default)' : ''}</option>
           ))}
         </SelectRow>
+      )}
+      {imageGenAvailable && (
+        <div className="flex items-center justify-between gap-2">
+          <label className="text-xs text-[hsl(var(--muted-foreground))]">Generate images</label>
+          <button
+            role="switch"
+            aria-checked={imageGenEnabled}
+            onClick={() => onImageGenChange?.(!imageGenEnabled)}
+            className={cn(
+              'relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-1 focus:ring-[hsl(var(--ring))]',
+              imageGenEnabled ? 'bg-[hsl(var(--primary))]' : 'bg-[hsl(var(--muted))]'
+            )}
+          >
+            <span
+              className={cn(
+                'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-lg transform transition-transform',
+                imageGenEnabled ? 'translate-x-4' : 'translate-x-0'
+              )}
+            />
+          </button>
+        </div>
       )}
     </div>
   )

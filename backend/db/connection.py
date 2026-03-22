@@ -234,6 +234,25 @@ async def _run_migrations(conn: aiosqlite.Connection) -> None:
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_course_decomp_items_job ON course_decomposition_job_items(job_id, idx)"
     )
+    # Per-user generated images produced during teaching (enrollment-level state).
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS enrollment_assets (
+               id            TEXT PRIMARY KEY,
+               enrollment_id TEXT NOT NULL REFERENCES lesson_enrollments(id) ON DELETE CASCADE,
+               section_idx   INTEGER NOT NULL,
+               asset_type    TEXT NOT NULL DEFAULT 'ai_image',
+               image_path    TEXT,
+               prompt        TEXT,
+               revised_prompt TEXT,
+               tool_use_id   TEXT,
+               idx           INTEGER NOT NULL DEFAULT 0,
+               created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+           )"""
+    )
+    await conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_enrollment_assets_enrollment
+           ON enrollment_assets(enrollment_id, section_idx)"""
+    )
     await conn.commit()
 
 

@@ -1,0 +1,5 @@
+[     143ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ https://localhost:5173/api/auth/me:0
+[     148ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ https://localhost:5173/api/auth/me:0
+[    6850ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ https://localhost:5173/api/auth/login:0
+[   38080ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ https://localhost:5173/api/auth/login:0
+[  542224ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ https://localhost:5173/api/courses/bf30da37-cc46-4ee9-8794-a3ce9b531668/decompose/start:0

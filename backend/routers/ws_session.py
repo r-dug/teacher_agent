@@ -17,6 +17,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Annotated
@@ -75,7 +76,6 @@ class SessionState:
         lesson_id: str,
         enrollment_id: str,
         curriculum: Curriculum,
-        messages: list[dict],
         agent_instructions: str | None,
         agent_session: AgentSession,
         pdf_path: str | None = None,
@@ -84,7 +84,6 @@ class SessionState:
         self.lesson_id = lesson_id
         self.enrollment_id = enrollment_id
         self.curriculum = curriculum
-        self.messages = messages
         self.agent_instructions = agent_instructions
         self.agent_session = agent_session
         self.pdf_path = pdf_path
@@ -112,6 +111,10 @@ class SessionState:
         self.deferred_decompose_fn = None
         self.first_teaching_task_fn = None
         self.handle_intro_turn_fn = None
+
+    @property
+    def messages(self) -> list[dict]:
+        return self.agent_session.messages
 
 
 @dataclass(slots=True)
@@ -154,6 +157,12 @@ async def ws_session(
 
     await models.touch_session(conn, session_id)
 
+    # Announce server capabilities so the client can show/lock toggles accordingly.
+    await websocket.send_json({
+        "event": "capabilities",
+        "image_gen_available": app_state.image_provider is not None,
+    })
+
     # Load lesson
     lesson = await models.get_lesson(conn, lesson_id)
     if lesson is None:
@@ -195,7 +204,8 @@ async def ws_session(
 
     # Send prior conversation history so the client can render past turns.
     if messages:
-        history_turns = _build_history_turns(messages)
+        enrollment_assets = await models.get_enrollment_assets(conn, enrollment_id)
+        history_turns = _build_history_turns(messages, enrollment_assets)
         if history_turns:
             await websocket.send_json({"event": "history", "turns": history_turns})
 
@@ -236,6 +246,11 @@ async def ws_session(
         pdf_path=pdf_full_path,
         session_id=session_id,
         user_id=session.get("user_id", ""),
+        image_provider=app_state.image_provider,
+        image_style_prefix=settings.IMAGE_GEN_STYLE_PREFIX,
+        enrollment_id=enrollment_id,
+        storage_dir=settings.STORAGE_DIR,
+        messages=messages,
     )
 
     state = SessionState(
@@ -243,7 +258,6 @@ async def ws_session(
         lesson_id=lesson_id,
         enrollment_id=enrollment_id,
         curriculum=curriculum,
-        messages=messages,
         agent_instructions=None,  # set by client via set_instructions event
         agent_session=agent_session,
         pdf_path=pdf_full_path,
@@ -395,7 +409,6 @@ async def ws_session(
         try:
             await state.agent_session.run_turn(
                 state.curriculum,
-                state.messages,
                 state.agent_instructions,
                 lesson_goal=state.lesson_goal,
             )
@@ -495,7 +508,7 @@ async def _receive_loop(
         elif event == "set_voice":
             voice = msg.get("voice")
             if voice:
-                state.agent_session.agent.set_tts_voice(voice)
+                state.agent_session.set_tts_voice(voice)
 
         elif event == "set_voice_arch":
             requested_arch = _normalize_voice_arch(msg.get("voice_arch"))
@@ -553,11 +566,16 @@ async def _receive_loop(
                     asyncio.create_task(_load_stt_model_bg(websocket, state.stt_model_size))
             await websocket.send_json({"event": "status", "message": f"STT provider set to {provider}"})
 
+        elif event == "set_image_gen":
+            enabled = bool(msg.get("enabled", False))
+            state.agent_session.set_image_gen_enabled(enabled)
+
         elif event == "reconnect":
             await _handle_reconnect(websocket, msg, state)
 
         elif event == "cancel_turn":
             if state.agent_task and not state.agent_task.done():
+                state.agent_session.cancel_pending_tools()
                 state.agent_task.cancel()
                 state.turn_status = "failed"
             if state.realtime_stream_connected:
@@ -1324,6 +1342,7 @@ async def _handle_audio_input_chained(
     await websocket.send_json({"event": "status", "message": "Transcribing..."})
 
     stt_provider = state.stt_provider
+    _stt_t0 = time.monotonic()
     try:
         if stt_provider == "openai":
             model_id = state.stt_model_size or settings.OPENAI_STT_MODEL
@@ -1346,6 +1365,7 @@ async def _handle_audio_input_chained(
     except Exception as exc:
         await websocket.send_json({"event": "error", "message": f"STT error: {exc}"})
         return
+    log.info("[stt] provider=%s elapsed=%.2fs chars=%d", stt_provider, time.monotonic() - _stt_t0, len(text))
 
     # Re-check: another handler may have started a turn while we were transcribing.
     if state.agent_task and not state.agent_task.done():
@@ -1376,27 +1396,29 @@ async def _handle_audio_input_chained(
         return
 
     # ── Teaching phase: normal conversation turn ────────────────────────────
+    while state.messages and state.messages[-1].get("role") == "user":
+        state.messages.pop()
     state.messages.append({"role": "user", "content": text})
     await websocket.send_json({"event": "status", "message": "Thinking..."})
 
     async def _run_turn() -> None:
+        _turn_t0 = time.monotonic()
         log.info("[turn %s] starting agent turn (messages=%d)", turn_id, len(state.messages))
         try:
             await state.agent_session.run_turn(
                 state.curriculum,
-                state.messages,
                 state.agent_instructions,
                 lesson_goal=state.lesson_goal,
             )
-            log.info("[turn %s] agent turn complete", turn_id)
+            log.info("[turn %s] complete elapsed=%.2fs", turn_id, time.monotonic() - _turn_t0)
             state.turn_status = "complete"
             await _save_state(conn, state)
             await websocket.send_json({"event": "turn_complete", "turn_id": turn_id})
         except asyncio.CancelledError:
-            log.info("[turn %s] agent turn cancelled", turn_id)
+            log.info("[turn %s] cancelled elapsed=%.2fs", turn_id, time.monotonic() - _turn_t0)
             state.turn_status = "failed"
         except Exception as exc:
-            log.exception("[turn %s] agent turn raised", turn_id)
+            log.exception("[turn %s] raised after %.2fs", turn_id, time.monotonic() - _turn_t0)
             state.turn_status = "failed"
             await websocket.send_json({"event": "error", "message": str(exc) or type(exc).__name__})
 
@@ -1432,13 +1454,16 @@ async def _handle_text_message(
             )
         return
 
+    # Strip any orphaned trailing user messages left by a previously failed turn.
+    while state.messages and state.messages[-1].get("role") == "user":
+        state.messages.pop()
     state.messages.append({"role": "user", "content": text})
     await websocket.send_json({"event": "status", "message": "Thinking..."})
 
     async def _run_turn() -> None:
         try:
             await state.agent_session.run_turn(
-                state.curriculum, state.messages, state.agent_instructions,
+                state.curriculum, state.agent_instructions,
                 lesson_goal=state.lesson_goal,
             )
             state.turn_status = "complete"
@@ -1552,13 +1577,15 @@ async def _handle_voice_message(
             )
         return
 
+    while state.messages and state.messages[-1].get("role") == "user":
+        state.messages.pop()
     state.messages.append({"role": "user", "content": text})
     await websocket.send_json({"event": "status", "message": "Thinking..."})
 
     async def _run_turn() -> None:
         try:
             await state.agent_session.run_turn(
-                state.curriculum, state.messages, state.agent_instructions,
+                state.curriculum, state.agent_instructions,
                 lesson_goal=state.lesson_goal,
             )
             state.turn_status = "complete"
@@ -1611,7 +1638,6 @@ async def _handle_image_input(
         try:
             await state.agent_session.run_turn(
                 state.curriculum,
-                state.messages,
                 state.agent_instructions,
                 lesson_goal=state.lesson_goal,
             )
@@ -1636,6 +1662,11 @@ async def _handle_reconnect(
     """Inform the reconnecting client of the last known turn status."""
     client_turn_id = msg.get("last_turn_id")
     if client_turn_id == state.last_turn_id and state.turn_status == "running":
+        # Auto-cancel the stuck turn so new messages can be sent immediately.
+        state.agent_session.cancel_pending_tools()
+        if state.agent_task and not state.agent_task.done():
+            state.agent_task.cancel()
+        state.turn_status = "failed"
         await websocket.send_json({"event": "turn_interrupted"})
     else:
         await websocket.send_json({
@@ -1647,6 +1678,11 @@ async def _handle_reconnect(
                 "total": len(state.curriculum.sections),
             },
         })
+
+    # If the agent is mid-turn waiting on an interactive tool, re-open that tool UI.
+    pending = state.agent_session.pending_tool_event
+    if pending is not None:
+        await websocket.send_json(pending)
 
 
 # ── persistence ────────────────────────────────────────────────────────────────
@@ -1665,13 +1701,17 @@ async def _save_state(
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
-def _build_history_turns(messages: list[dict]) -> list[dict]:
+def _build_history_turns(
+    messages: list[dict],
+    enrollment_assets: list[dict] | None = None,
+) -> list[dict]:
     """
     Convert raw LLM messages into display turns for the history event.
 
     Rules:
     - Assistant text blocks become the turn's text; tool_use show_slide blocks
       add a slide figure; sketchpad/take_photo tool_use blocks record the prompt.
+    - generate_visual_aid tool_use blocks add an image figure (URL from enrollment_assets).
     - User tool_result blocks with a base64 image become drawing/photo figures.
     - User tool_result "OK" placeholders (no image) are dropped silently.
     - Plain user text messages (transcriptions) become user turns with text.
@@ -1680,6 +1720,10 @@ def _build_history_turns(messages: list[dict]) -> list[dict]:
     turns: list[dict] = []
     # Map tool_use_id → prompt for sketchpad / take_photo tool calls.
     pending_prompt: dict[str, str] = {}
+    # Map tool_use_id → asset row for generate_visual_aid.
+    assets_by_tool_id: dict[str, dict] = {
+        a["tool_use_id"]: a for a in (enrollment_assets or []) if a.get("tool_use_id")
+    }
 
     for msg in messages:
         role = msg.get("role")
@@ -1706,6 +1750,7 @@ def _build_history_turns(messages: list[dict]) -> list[dict]:
                 elif btype == "tool_use":
                     name = block.get("name", "")
                     inp = block.get("input", {})
+                    tool_id = block.get("id", "")
                     if name == "show_slide":
                         page_s = inp.get("page_start", inp.get("page_number", 1))
                         figures.append({
@@ -1714,7 +1759,16 @@ def _build_history_turns(messages: list[dict]) -> list[dict]:
                             "caption": inp.get("caption", ""),
                         })
                     elif name in ("open_sketchpad", "take_photo"):
-                        pending_prompt[block.get("id", "")] = inp.get("prompt", "")
+                        pending_prompt[tool_id] = inp.get("prompt", "")
+                    elif name == "generate_visual_aid":
+                        asset = assets_by_tool_id.get(tool_id)
+                        if asset and asset.get("image_path"):
+                            figures.append({
+                                "type": "generated_image",
+                                "image_url": f"/api/lessons/assets/{asset['image_path']}",
+                                "caption": inp.get("caption", ""),
+                                "prompt": inp.get("prompt", ""),
+                            })
 
             text = " ".join(text_parts)
             if text or figures:

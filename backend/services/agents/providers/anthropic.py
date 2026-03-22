@@ -6,6 +6,8 @@ import logging
 from collections.abc import Callable
 from types import SimpleNamespace
 
+import anthropic
+
 from ..message_utils import _block_to_api_dict
 from .base import LLMProvider, LLMTurnResult
 
@@ -16,7 +18,6 @@ class AnthropicLLMProvider(LLMProvider):
     """Streams responses from the Anthropic Messages API."""
 
     def __init__(self, max_retries: int = 6) -> None:
-        import anthropic
         self._client = anthropic.Anthropic(max_retries=max_retries)
 
     @property

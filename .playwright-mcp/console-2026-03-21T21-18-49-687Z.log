@@ -1,0 +1,32 @@
+[  281204ms] ReferenceError: errorBanner is not defined
+    at TeachPage (https://localhost:5173/src/pages/TeachPage.tsx?t=1774128210734:651:5)
+    at Object.react_stack_bottom_frame (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:18509:20)
+    at renderWithHooks (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:5654:24)
+    at updateFunctionComponent (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:7475:21)
+    at beginWork (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:8525:20)
+    at runWithFiberInDEV (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:997:72)
+    at performUnitOfWork (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:12561:98)
+    at workLoopSync (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:12424:43)
+    at renderRootSync (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:12408:13)
+    at performWorkOnRoot (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:11827:37)
+[  281204ms] [WARNING] %s
+
+%s
+ An error occurred in the <TeachPage> component. Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries. @ https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:6965
+[  287575ms] ReferenceError: errorBanner is not defined
+    at TeachPage (https://localhost:5173/src/pages/TeachPage.tsx?t=1774128217147:650:5)
+    at Object.react_stack_bottom_frame (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:18509:20)
+    at renderWithHooks (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:5654:24)
+    at updateFunctionComponent (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:7475:21)
+    at beginWork (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:8525:20)
+    at runWithFiberInDEV (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:997:72)
+    at performUnitOfWork (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:12561:98)
+    at workLoopSync (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:12424:43)
+    at renderRootSync (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:12408:13)
+    at performWorkOnRoot (https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:11827:37)
+[  287575ms] [WARNING] %s
+
+%s
+ An error occurred in the <TeachPage> component. Consider adding an error boundary to your tree to customize error handling behavior.
+Visit https://react.dev/link/error-boundaries to learn more about error boundaries. @ https://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=c04c90b0:6965

@@ -31,6 +31,8 @@ class TeachingCallbacks:
     on_open_code_editor: Callable[[str, str, str | None, list, threading.Event], None] | None = None
     on_open_html_editor: Callable[[str, str | None, str | None, list, threading.Event], None] | None = None
     on_start_timer: Callable[[str, int, list, threading.Event], None] | None = None
+    # (prompt, caption, tool_use_id, result_holder, done_event)
+    on_generate_visual_aid: Callable[[str, str, str, list, threading.Event], None] | None = None
     on_token_usage: Callable[[str, str, object], None] | None = None
     on_section_advanced: Callable[[Curriculum], None] | None = None
     on_curriculum_complete: Callable[[], None] | None = None

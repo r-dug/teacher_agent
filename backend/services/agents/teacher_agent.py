@@ -13,10 +13,10 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 from collections.abc import Callable
 
 import numpy as np
-import sounddevice as sd
 
 from ...db.util import _strip_dangling_tool_use
 from ..voice.config import KOKORO_SAMPLE_RATE
@@ -29,7 +29,7 @@ from .prompts.persona import CONDENSE_EPISODE_SYSTEM, GENERATE_INSTRUCTIONS_SYST
 from .prompts.teaching import make_intro_prompt, make_teaching_prompt
 from .prompts.tts_prep import TTS_PREP_USER_PREFIX, make_tts_prep_system
 from .providers.base import LLMProvider
-from .tools import CAPTURE_GOAL_TOOL, TEACHING_TOOLS
+from .tools import CAPTURE_GOAL_TOOL, GENERATE_VISUAL_AID_TOOL, TEACHING_TOOLS
 from .tts_pipeline import TTSPipeline
 
 log = logging.getLogger(__name__)
@@ -62,10 +62,16 @@ class TeacherAgent(Agent):
         self.accent = accent
 
         self._audio_turns: list[list[np.ndarray]] = []
-        self._audio_lock = threading.Lock()
         self.last_audio: np.ndarray | None = None
 
     # ── public API ─────────────────────────────────────────────────────────────
+
+    @property
+    def _effective_tools(self) -> list:
+        """TEACHING_TOOLS extended with generate_visual_aid when the callback is set."""
+        if self._callbacks.on_generate_visual_aid is not None:
+            return TEACHING_TOOLS + [GENERATE_VISUAL_AID_TOOL]
+        return TEACHING_TOOLS
 
     @property
     def audio_turns(self) -> list[list[np.ndarray]]:
@@ -146,7 +152,8 @@ class TeacherAgent(Agent):
 
         while True:
             tool = self._do_single_llm_turn(
-                curriculum, messages, agent_instructions, lesson_goal=lesson_goal
+                curriculum, messages, agent_instructions, lesson_goal=lesson_goal,
+                _tools=self._effective_tools,
             )
 
             if tool is None:
@@ -157,6 +164,7 @@ class TeacherAgent(Agent):
             _INTERACTIVE_TOOLS = frozenset({
                 "open_sketchpad", "take_photo", "record_video",
                 "open_code_editor", "open_html_editor", "start_timer",
+                "generate_visual_aid",
             })
             if tool.name in _INTERACTIVE_TOOLS:
                 pending_assistant_msg = messages.pop()
@@ -204,16 +212,16 @@ class TeacherAgent(Agent):
                     self._callbacks.on_open_sketchpad(prompt, result_holder, done_event, text_bg, bg_page)
                 done_event.wait()
                 messages.append(pending_assistant_msg)
+                if result_holder[0] is None:
+                    tool_content: list | str = "The student dismissed the drawing tool without submitting."
+                else:
+                    tool_content = [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": result_holder[0]}},
+                        {"type": "text", "text": "The student has submitted their drawing. Please evaluate it and give feedback."},
+                    ]
                 messages.append({
                     "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": tool.id,
-                        "content": [
-                            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": result_holder[0]}},
-                            {"type": "text", "text": "The student has submitted their drawing. Please evaluate it and give feedback."},
-                        ],
-                    }],
+                    "content": [{"type": "tool_result", "tool_use_id": tool.id, "content": tool_content}],
                 })
 
             elif tool.name == "take_photo":
@@ -224,16 +232,16 @@ class TeacherAgent(Agent):
                     self._callbacks.on_take_photo(prompt, result_holder_p, done_event_p)
                 done_event_p.wait()
                 messages.append(pending_assistant_msg)
+                if result_holder_p[0] is None:
+                    photo_content: list | str = "The student dismissed the photo tool without taking a photo."
+                else:
+                    photo_content = [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": result_holder_p[0]}},
+                        {"type": "text", "text": "The student has taken a photo. Please observe and respond."},
+                    ]
                 messages.append({
                     "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": tool.id,
-                        "content": [
-                            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": result_holder_p[0]}},
-                            {"type": "text", "text": "The student has taken a photo. Please observe and respond."},
-                        ],
-                    }],
+                    "content": [{"type": "tool_result", "tool_use_id": tool.id, "content": photo_content}],
                 })
 
             elif tool.name == "record_video":
@@ -335,24 +343,35 @@ class TeacherAgent(Agent):
                     "content": [{"type": "tool_result", "tool_use_id": tool.id, "content": content}],
                 })
 
+            elif tool.name == "generate_visual_aid":
+                prompt = tool.input.get("prompt", "")
+                caption = tool.input.get("caption", "")
+                result_holder_img: list[str | None] = [None]
+                done_event_img = threading.Event()
+                if self._callbacks.on_generate_visual_aid:
+                    self._callbacks.on_generate_visual_aid(
+                        prompt, caption, tool.id, result_holder_img, done_event_img
+                    )
+                done_event_img.wait()
+                # result_holder_img[0] is a public image URL on success, None on failure
+                image_url = result_holder_img[0]
+                messages.append(pending_assistant_msg)
+                if image_url:
+                    content = "Image generated successfully and is now displayed to the student."
+                else:
+                    content = (
+                        "Image generation failed. Continue teaching without a visual aid. "
+                        "Let the student know briefly that the image could not be generated."
+                    )
+                messages.append({
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": tool.id, "content": content}],
+                })
+
             elif tool.name == "mark_curriculum_complete":
                 if self._callbacks.on_curriculum_complete:
                     self._callbacks.on_curriculum_complete()
                 return
-
-    def play_audio(self, audio: np.ndarray, stop_first: bool = False) -> None:
-        """Play audio locally.  Synchronous; blocks until playback ends."""
-        if self._callbacks.on_tts_playing:
-            self._callbacks.on_tts_playing(True)
-        try:
-            with self._audio_lock:
-                if stop_first:
-                    sd.stop()
-                sd.play(audio, samplerate=KOKORO_SAMPLE_RATE)
-                sd.wait()
-        finally:
-            if self._callbacks.on_tts_playing:
-                self._callbacks.on_tts_playing(False)
 
     def clear_audio_turns(self) -> None:
         self._audio_turns.clear()
@@ -397,8 +416,6 @@ class TeacherAgent(Agent):
 
     def _condense_episode(self, messages: list[dict], curriculum: Curriculum) -> str:
         """Condense the completed section's conversation into a brief student profile."""
-        import anthropic
-
         completed_section = curriculum.sections[curriculum.idx - 1]
 
         transcript_parts: list[str] = []
@@ -420,10 +437,8 @@ class TeacherAgent(Agent):
         if not transcript_parts:
             return ""
 
-        client = anthropic.Anthropic(max_retries=6)
-        response = client.messages.create(
+        result = self._provider.do_turn(
             model=self._model,
-            max_tokens=400,
             system=CONDENSE_EPISODE_SYSTEM,
             messages=[{
                 "role": "user",
@@ -433,10 +448,11 @@ class TeacherAgent(Agent):
                     "Write the student profile for the incoming teacher."
                 ),
             }],
+            tools=[],
         )
         if self._callbacks.on_token_usage:
-            self._callbacks.on_token_usage("episode_condensation", self._model, response.usage)
-        return response.content[0].text.strip()
+            self._callbacks.on_token_usage("episode_condensation", self._model, result.usage)
+        return result.content_text.strip()
 
     def _do_single_llm_turn(
         self,
@@ -466,7 +482,7 @@ class TeacherAgent(Agent):
             )
             if agent_instructions:
                 system += f"\n\nADDITIONAL STYLE INSTRUCTIONS:\n{agent_instructions}"
-        tools = TEACHING_TOOLS if _tools is None else _tools
+        tools = self._effective_tools if _tools is None else _tools
         call_type = _call_type or ("intro_turn" if _tools == [] else "teach_turn")
 
         # Build TTSPipeline for this turn.
@@ -512,6 +528,7 @@ class TeacherAgent(Agent):
             if self._callbacks.on_turn_start:
                 self._callbacks.on_turn_start()
 
+            _llm_t0 = time.monotonic()
             result = self._provider.do_turn(
                 model=self._model,
                 system=system,
@@ -519,6 +536,7 @@ class TeacherAgent(Agent):
                 tools=tools,
                 on_text_chunk=_on_text_chunk,
             )
+            _llm_elapsed = time.monotonic() - _llm_t0
 
             # Flush any remainder after the stream ends.
             if text_buf[0].strip():
@@ -526,6 +544,17 @@ class TeacherAgent(Agent):
 
             if self._callbacks.on_token_usage:
                 self._callbacks.on_token_usage(call_type, self._model, result.usage)
+
+            _usage = result.usage
+            log.info(
+                "[llm] provider=%s model=%s call=%s tokens_in=%s tokens_out=%s elapsed=%.2fs",
+                self._provider.name,
+                self._model,
+                call_type,
+                getattr(_usage, "input_tokens", "?"),
+                getattr(_usage, "output_tokens", "?"),
+                _llm_elapsed,
+            )
 
             messages.append({"role": "assistant", "content": result.content_blocks})
 
@@ -536,8 +565,11 @@ class TeacherAgent(Agent):
             tts.shutdown()
             return None
 
+        _tts_t0 = time.monotonic()
         audio_chunks = tts.finish()
         self.tts_voice = tts.tts_voice  # pick up any voice updates from synthesis
+
+        log.info("[tts] chunks=%d elapsed=%.2fs", len(audio_chunks), time.monotonic() - _tts_t0)
 
         all_audio = [c for c in audio_chunks if c.size > 0]
         if all_audio:

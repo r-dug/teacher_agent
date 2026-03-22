@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS course_decomposition_jobs (
     course_id         TEXT NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
     creator_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     status            TEXT NOT NULL DEFAULT 'queued', -- queued | running | completed | failed
+    decompose_mode    TEXT NOT NULL DEFAULT 'pdf',    -- 'pdf' | 'text'
     objectives_prompt TEXT NOT NULL DEFAULT '',
     total_items       INTEGER NOT NULL DEFAULT 0,
     completed_items   INTEGER NOT NULL DEFAULT 0,
@@ -226,6 +227,27 @@ CREATE TABLE IF NOT EXISTS section_assets (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (section_id, idx)
 );
+
+-- ── Enrollment Assets ─────────────────────────────────────────────────────────
+-- User-generated visual aids produced during a teaching session.
+-- Keyed by enrollment (not lesson_sections) so they are per-user state,
+-- not shared lesson content.  section_idx mirrors curriculum.idx at generation
+-- time; tool_use_id ties the asset to the specific LLM tool call.
+
+CREATE TABLE IF NOT EXISTS enrollment_assets (
+    id            TEXT PRIMARY KEY,
+    enrollment_id TEXT NOT NULL REFERENCES lesson_enrollments(id) ON DELETE CASCADE,
+    section_idx   INTEGER NOT NULL,
+    asset_type    TEXT NOT NULL DEFAULT 'ai_image',  -- 'ai_image'
+    image_path    TEXT,             -- relative path under STORAGE_DIR
+    prompt        TEXT,             -- original user-visible prompt
+    revised_prompt TEXT,            -- prompt returned by the image API
+    tool_use_id   TEXT,             -- LLM tool_use block id; for history tie-back
+    idx           INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_enrollment_assets_enrollment
+    ON enrollment_assets(enrollment_id, section_idx);
 
 -- ── Conversation Messages ─────────────────────────────────────────────────────
 -- Keyed by enrollment so each user has their own message history.

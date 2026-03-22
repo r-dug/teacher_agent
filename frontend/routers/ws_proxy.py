@@ -26,6 +26,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from ..config import settings
 from ..rate_limiter import limiter
 from ..session_store import store
+from ..ws_logger import log_frame
 
 router = APIRouter(tags=["ws"])
 
@@ -132,11 +133,13 @@ async def _relay(
                 })
                 continue
 
+            log_frame("c→b", session_id, raw)
             await backend_ws.send(raw)
 
     async def backend_to_client() -> None:
         """Forward backend frames to the client unchanged."""
         async for raw in backend_ws:
+            log_frame("b→c", session_id, raw)
             if isinstance(raw, bytes):
                 await client_ws.send_bytes(raw)
             else:
@@ -156,6 +159,15 @@ async def _relay(
             try:
                 await task
             except (asyncio.CancelledError, Exception):
+                pass
+        # Retrieve exceptions from completed tasks to prevent
+        # "Task exception was never retrieved" warnings.
+        for task in done:
+            try:
+                task.result()
+            except (asyncio.CancelledError, websockets.exceptions.ConnectionClosedError):
+                pass  # normal close paths
+            except Exception:
                 pass
     except Exception:
         client_task.cancel()

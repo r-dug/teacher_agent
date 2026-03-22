@@ -55,6 +55,7 @@ export type ClientEvent =
   | { event: 'text_message'; text: string }
   | { event: 'transcribe_only'; data: string; sample_rate: number }
   | { event: 'voice_message'; data: string; mime_type: string }
+  | { event: 'set_image_gen'; enabled: boolean }
   | { event: 'ping' }
 
 // ── Inbound (server → client) ──────────────────────────────────────────────
@@ -75,6 +76,10 @@ export type ServerEvent =
   | { event: 'open_code_editor'; prompt: string; language: string; starter_code?: string; invocation_id: string }
   | { event: 'open_html_editor'; prompt: string; starter_html?: string; starter_css?: string; invocation_id: string }
   | { event: 'start_timer'; prompt: string; duration_seconds: number; invocation_id: string }
+  | { event: 'capabilities'; image_gen_available: boolean }
+  | { event: 'generating_image'; caption: string }
+  | { event: 'show_image'; image_url: string; caption: string; prompt: string }
+  | { event: 'generation_failed'; reason: string }
   | { event: 'code_stdout'; invocation_id: string; data: string }
   | { event: 'code_stderr'; invocation_id: string; data: string }
   | { event: 'code_done'; invocation_id: string; exit_code: number; elapsed_ms: number }
@@ -89,6 +94,7 @@ export type ServerEvent =
       figures?: Array<
         | { type: 'slide'; page: number; caption: string }
         | { type: 'drawing'; data: string; prompt: string }
+        | { type: 'generated_image'; image_url: string; caption: string; prompt: string }
       >
     }> }
   | { event: 'transcription_only'; text: string }

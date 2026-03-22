@@ -27,6 +27,7 @@ interface AdvisorResponse {
   status: string
   transcript: AdvisorTurn[]
   objectives_prompt?: string | null
+  chapters?: ChapterDraft[] | null
 }
 
 interface DecomposeJob {
@@ -83,9 +84,10 @@ export function CourseChaptersEditor({ sessionId, courseId }: CourseChaptersEdit
   const [decomposeError, setDecomposeError] = useState<string | null>(null)
   const [decomposeState, setDecomposeState] = useState<DecomposeStatusResponse>({ job: null, items: [] })
   const [lastNotifiedJobId, setLastNotifiedJobId] = useState<string | null>(null)
+  const [decomposeNotice, setDecomposeNotice] = useState<string | null>(null)
 
   useEffect(() => {
-    async function loadChapters() {
+    async function loadChapters(): Promise<boolean> {
       setLoading(true)
       setError(null)
       try {
@@ -94,11 +96,14 @@ export function CourseChaptersEditor({ sessionId, courseId }: CourseChaptersEdit
         })
         const payload = await parsePayload<ChapterListResponse>(res)
         if (!res.ok) throw new Error(payload.detail || 'Failed to load chapter drafts')
+        const hash = String(payload.pdf_hash || '')
         setPageCount(Number(payload.page_count || 0))
-        setPdfHash(String(payload.pdf_hash || ''))
+        setPdfHash(hash)
         setChapters((payload.chapters || []) as ChapterDraft[])
+        return Boolean(hash)
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load chapter drafts')
+        return false
       } finally {
         setLoading(false)
       }
@@ -145,7 +150,10 @@ export function CourseChaptersEditor({ sessionId, courseId }: CourseChaptersEdit
       }
     }
 
-    void Promise.all([loadChapters(), loadAdvisor(), loadDecomposeStatus()])
+    void loadChapters().then((hasPdf) => {
+      if (hasPdf) void Promise.all([loadAdvisor(), loadDecomposeStatus()])
+      else { setAdvisorLoading(false); setDecomposeLoading(false) }
+    })
   }, [courseId, sessionId])
 
   useEffect(() => {
@@ -180,10 +188,10 @@ export function CourseChaptersEditor({ sessionId, courseId }: CourseChaptersEdit
     if (lastNotifiedJobId === job.id) return
     setLastNotifiedJobId(job.id)
     if (job.status === 'completed') {
-      alert('Chapter decomposition finished. Generated lessons are now available in this course.')
+      setDecomposeNotice('Decomposition finished — generated lessons are now available in this course.')
       return
     }
-    alert(`Chapter decomposition finished with errors. Failed chapters: ${job.failed_items}.`)
+    setDecomposeNotice(`Decomposition finished with errors. Failed chapters: ${job.failed_items}.`)
   }, [decomposeState.job, lastNotifiedJobId])
 
   function updateChapter(index: number, patch: Partial<ChapterDraft>) {
@@ -304,6 +312,9 @@ export function CourseChaptersEditor({ sessionId, courseId }: CourseChaptersEdit
       setAdvisorStatus(String(payload.status || 'draft'))
       setAdvisorTranscript((payload.transcript || []) as AdvisorTurn[])
       setObjectivesPrompt((payload.objectives_prompt || null) as string | null)
+      if (payload.chapters && payload.chapters.length > 0) {
+        setChapters(payload.chapters as ChapterDraft[])
+      }
     } catch (err) {
       setAdvisorError(err instanceof Error ? err.message : 'Failed to finalize advisor objectives')
     } finally {
@@ -311,14 +322,17 @@ export function CourseChaptersEditor({ sessionId, courseId }: CourseChaptersEdit
     }
   }
 
-  async function startDecompose() {
+  async function startDecompose(decompose_mode: 'pdf' | 'text') {
     setDecomposeBusy(true)
     setDecomposeError(null)
     try {
       const res = await fetch(`/api/courses/${courseId}/decompose/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Session-Id': sessionId },
-        body: JSON.stringify({ objectives_prompt: (objectivesPrompt || '').trim() || undefined }),
+        body: JSON.stringify({
+          objectives_prompt: (objectivesPrompt || '').trim() || undefined,
+          decompose_mode,
+        }),
       })
       const payload = await parsePayload<DecomposeStatusResponse>(res)
       if (!res.ok) throw new Error(payload.detail || 'Failed to start decomposition')
@@ -449,7 +463,7 @@ export function CourseChaptersEditor({ sessionId, courseId }: CourseChaptersEdit
                 className="w-full rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[hsl(var(--ring))]"
                 disabled={advisorBusy}
               />
-              <Button size="sm" onClick={sendAdvisorMessage} disabled={advisorBusy || !advisorInput.trim()}>
+              <Button size="sm" onClick={sendAdvisorMessage} disabled={advisorBusy || !advisorInput.trim() || advisorStatus === 'finalized'}>
                 Send
               </Button>
             </div>
@@ -459,7 +473,7 @@ export function CourseChaptersEditor({ sessionId, courseId }: CourseChaptersEdit
                 size="sm"
                 variant="secondary"
                 onClick={finalizeAdvisor}
-                disabled={advisorBusy || advisorTranscript.length < 2}
+                disabled={advisorBusy || advisorTranscript.length < 2 || advisorStatus === 'finalized'}
               >
                 Finalize Objectives
               </Button>
@@ -494,9 +508,6 @@ export function CourseChaptersEditor({ sessionId, courseId }: CourseChaptersEdit
         ) : decomposeState.job ? (
           <div className="space-y-2 text-xs">
             <p>
-              Job: <span className="font-medium">{decomposeState.job.id}</span>
-            </p>
-            <p>
               Status: <span className="font-medium">{decomposeState.job.status}</span> ({decomposeState.job.progress_pct}%)
             </p>
             <p>
@@ -518,14 +529,25 @@ export function CourseChaptersEditor({ sessionId, courseId }: CourseChaptersEdit
         )}
 
         {decomposeError && <p className="text-sm text-[hsl(var(--destructive))]">{decomposeError}</p>}
+        {decomposeNotice && <p className="text-sm text-[hsl(var(--primary))]">{decomposeNotice}</p>}
 
-        <Button
-          size="sm"
-          onClick={startDecompose}
-          disabled={decomposeBusy || advisorStatus !== 'finalized' || Boolean(runningJob)}
-        >
-          {decomposeBusy ? 'Starting…' : 'Start Full Decomposition'}
-        </Button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            size="sm"
+            onClick={() => startDecompose('pdf')}
+            disabled={decomposeBusy || advisorStatus !== 'finalized' || Boolean(runningJob)}
+          >
+            {decomposeBusy ? 'Starting…' : decomposeState.job?.status === 'completed' ? 'Re-run (PDF Pages)' : 'Decompose with PDF Pages'}
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => startDecompose('text')}
+            disabled={decomposeBusy || advisorStatus !== 'finalized' || Boolean(runningJob)}
+          >
+            {decomposeBusy ? 'Starting…' : decomposeState.job?.status === 'completed' ? 'Re-run (Extracted Text)' : 'Decompose with Extracted Text'}
+          </Button>
+        </div>
       </div>
     </div>
   )

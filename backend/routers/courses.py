@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 from pathlib import Path
@@ -21,11 +22,13 @@ from ..services.documents.course_authoring import (
     advisor_user_message,
     create_decomposition_job,
     ensure_advisor_session,
+    extract_toc_chapters_sync,
     finalize_advisor_session,
     get_job_status as get_course_decompose_status,
     launch_decomposition_job,
 )
 from ..services.documents.textbook_authoring import (
+    extract_toc_text_from_pdf,
     infer_chapter_drafts_from_pdf,
     normalize_chapter_drafts,
     sha256_file,
@@ -123,11 +126,13 @@ class AdvisorResponse(BaseModel):
     transcript: list[dict]
     assistant: str | None = None
     objectives_prompt: str | None = None
+    chapters: list[ChapterDraftResponse] | None = None
 
 
 class DecomposeStartRequest(BaseModel):
     notify_session_id: str | None = None
     objectives_prompt: str | None = None
+    decompose_mode: str = "pdf"  # 'pdf' | 'text'
 
 
 class DecomposeJobItemResponse(BaseModel):
@@ -404,6 +409,20 @@ async def create_textbook_draft(
             ),
         )
         await _replace_chapters(conn, course_id=course_id, chapters=chapter_drafts)
+
+        # If no embedded bookmarks were found, attempt LLM-based TOC extraction now
+        # so the chapter drafts modal opens with real titles rather than "Part N" fallbacks.
+        if not toc_entries:
+            toc_text = extract_toc_text_from_pdf(pdf_path)
+            llm_chapters = await asyncio.to_thread(
+                extract_toc_chapters_sync,
+                toc_text,
+                total_pages=page_count,
+                course_title=course_title,
+            )
+            if llm_chapters:
+                await _replace_chapters(conn, course_id=course_id, chapters=llm_chapters)
+
         await conn.commit()
     except HTTPException:
         await models.delete_course(conn, course_id)
@@ -649,12 +668,16 @@ async def start_course_decompose(
     _ = await _source_or_404(conn, course_id)
 
     try:
+        mode = (body.decompose_mode or "pdf").strip().lower()
+        if mode not in {"pdf", "text"}:
+            mode = "pdf"
         status = await create_decomposition_job(
             conn,
             course_id=course_id,
             user_id=user_id,
             notify_session_id=(body.notify_session_id or "").strip() or None,
             objectives_prompt_override=(body.objectives_prompt or "").strip() or None,
+            decompose_mode=mode,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

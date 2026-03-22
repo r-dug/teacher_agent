@@ -21,9 +21,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import threading
 import uuid
 from collections.abc import Callable
+from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 import numpy as np
 
@@ -80,15 +84,31 @@ class AgentSession:
         pdf_path: str | None = None,
         session_id: str | None = None,
         user_id: str = "",
+        image_provider=None,
+        image_style_prefix: str = "",
+        enrollment_id: str = "",
+        storage_dir: Path | None = None,
+        messages: list[dict] | None = None,
     ) -> None:
         self._send = send
         self._loop = loop
         self._pdf_path = pdf_path
         self._session_id = session_id
         self._user_id = user_id
+        self._messages: list[dict] = list(messages) if messages else []
         self._ws_closed = threading.Event()
         # Pending interactive tool invocations: inv_id → (done_event, result_holder)
         self._tool_events: dict[str, tuple[threading.Event, list]] = {}
+        # The last open_* / start_timer event sent to the client, cleared on submit.
+        # Used to re-send the tool UI after a WS reconnect.
+        self._pending_tool_event: dict | None = None
+
+        # Image generation
+        self._image_provider = image_provider
+        self._image_style_prefix = image_style_prefix
+        self._enrollment_id = enrollment_id
+        self._storage_dir = storage_dir or Path("./storage")
+        self._current_section_idx: int = 0  # updated by _on_section_advanced
 
         if tts_provider is None and kokoro_pipeline is not None:
             from .tts import KokoroTTSProvider
@@ -175,6 +195,8 @@ class AgentSession:
             on_open_code_editor=self._on_open_code_editor,
             on_open_html_editor=self._on_open_html_editor,
             on_start_timer=self._on_start_timer,
+            # on_generate_visual_aid starts as None (tool hidden until enabled by client)
+            on_generate_visual_aid=None,
             on_token_usage=self._on_token_usage,
             on_section_advanced=self._on_section_advanced,
             on_curriculum_complete=self._on_curriculum_complete,
@@ -197,6 +219,33 @@ class AgentSession:
 
     # ── public API ─────────────────────────────────────────────────────────────
 
+    @property
+    def messages(self) -> list[dict]:
+        """The live teaching message history owned by this session."""
+        return self._messages
+
+    @property
+    def image_gen_available(self) -> bool:
+        """True when the server has a working image provider configured."""
+        return self._image_provider is not None
+
+    def set_tts_voice(self, voice: str) -> None:
+        """Update the TTS voice used by the teacher agent."""
+        self._teacher.set_tts_voice(voice)
+
+    def set_image_gen_enabled(self, enabled: bool) -> None:
+        """Wire or unwire the image generation callback.
+
+        When enabled=True the generate_visual_aid tool is added to the agent's
+        effective tool list.  When False the tool is removed and the agent won't
+        offer image generation.  Safe to call between turns.
+        """
+        if not self.image_gen_available:
+            return  # no provider — always off
+        self._teacher._callbacks.on_generate_visual_aid = (
+            self._on_generate_visual_aid if enabled else None
+        )
+
     async def run_intro(self, curriculum: Curriculum, messages: list[dict], raw_text: str | None = None) -> str | None:
         """Run the first intro turn in a thread pool. Returns captured goal or None."""
         return await asyncio.to_thread(self._teacher.run_intro_turn, curriculum, messages, raw_text)
@@ -209,14 +258,13 @@ class AgentSession:
     async def run_turn(
         self,
         curriculum: Curriculum,
-        messages: list[dict],
         agent_instructions: str | None,
         lesson_goal: str | None = None,
     ) -> None:
         """Run one full agent turn (may chain tool calls) in a thread pool."""
         async with asyncio.timeout(120):  # 2 minutes per turn
             await asyncio.to_thread(
-                self._teacher.run_turn, curriculum, messages, agent_instructions, lesson_goal
+                self._teacher.run_turn, curriculum, self._messages, agent_instructions, lesson_goal
             )
 
     async def decompose_pdf(
@@ -239,11 +287,25 @@ class AgentSession:
     async def generate_instructions(self, description: str) -> str:
         return await asyncio.to_thread(self._teacher.generate_instructions, description)
 
+    @property
+    def pending_tool_event(self) -> dict | None:
+        """The WS event payload for the currently open interactive tool, or None."""
+        return self._pending_tool_event
+
+    def cancel_pending_tools(self) -> None:
+        """Unblock any agent thread waiting on an interactive tool (e.g. on WS cancel/reconnect)."""
+        for done_event, result_holder in self._tool_events.values():
+            result_holder[0] = None
+            done_event.set()
+        self._tool_events.clear()
+        self._pending_tool_event = None
+
     def handle_tool_result(self, inv_id: str, result: dict) -> None:
         """
         Called from the async WS receive loop when the client sends a tool_result.
         Unblocks the agent thread that is waiting on done_event.
         """
+        self._pending_tool_event = None
         entry = self._tool_events.pop(inv_id, None)
         if entry is None:
             return
@@ -256,7 +318,7 @@ class AgentSession:
             value = result
         else:
             value = result.get("drawing") or result.get("photo") or result.get("video_frames")
-        result_holder.append(value)
+        result_holder[0] = value
         done_event.set()
 
     # ── internal: fire-and-forget WS send from worker thread ──────────────────
@@ -387,6 +449,7 @@ class AgentSession:
             event["text_bg"] = text_bg
         if im_bg:
             event["im_bg"] = im_bg
+        self._pending_tool_event = event
         self._fire(self._send(event))
 
     def _on_take_photo(
@@ -397,11 +460,9 @@ class AgentSession:
     ) -> None:
         inv_id = str(uuid.uuid4())
         self._tool_events[inv_id] = (done_event, result_holder)
-        self._fire(self._send({
-            "event": "take_photo",
-            "prompt": prompt,
-            "invocation_id": inv_id,
-        }))
+        ev = {"event": "take_photo", "prompt": prompt, "invocation_id": inv_id}
+        self._pending_tool_event = ev
+        self._fire(self._send(ev))
 
     def _on_record_video(
         self,
@@ -411,11 +472,9 @@ class AgentSession:
     ) -> None:
         inv_id = str(uuid.uuid4())
         self._tool_events[inv_id] = (done_event, result_holder)
-        self._fire(self._send({
-            "event": "record_video",
-            "prompt": prompt,
-            "invocation_id": inv_id,
-        }))
+        ev = {"event": "record_video", "prompt": prompt, "invocation_id": inv_id}
+        self._pending_tool_event = ev
+        self._fire(self._send(ev))
 
     def _on_open_code_editor(
         self,
@@ -435,6 +494,7 @@ class AgentSession:
         }
         if starter_code is not None:
             event["starter_code"] = starter_code
+        self._pending_tool_event = event
         self._fire(self._send(event))
 
     def _on_open_html_editor(
@@ -456,6 +516,7 @@ class AgentSession:
             event["starter_html"] = starter_html
         if starter_css is not None:
             event["starter_css"] = starter_css
+        self._pending_tool_event = event
         self._fire(self._send(event))
 
     def _on_start_timer(
@@ -467,12 +528,115 @@ class AgentSession:
     ) -> None:
         inv_id = str(uuid.uuid4())
         self._tool_events[inv_id] = (done_event, result_holder)
-        self._fire(self._send({
+        ev = {
             "event": "start_timer",
             "prompt": prompt,
             "duration_seconds": duration_seconds,
             "invocation_id": inv_id,
-        }))
+        }
+        self._pending_tool_event = ev
+        self._fire(self._send(ev))
+
+    def _on_generate_visual_aid(
+        self,
+        prompt: str,
+        caption: str,
+        tool_use_id: str,
+        result_holder: list,
+        done_event: threading.Event,
+    ) -> None:
+        """Called from the agent thread; schedules async image generation on the event loop.
+
+        Returns immediately — the caller (run_turn) blocks on done_event.wait().
+        """
+        asyncio.run_coroutine_threadsafe(
+            self._generate_and_send(prompt, caption, tool_use_id, result_holder, done_event),
+            self._loop,
+        )
+
+    async def _generate_and_send(
+        self,
+        prompt: str,
+        caption: str,
+        tool_use_id: str,
+        result_holder: list,
+        done_event: threading.Event,
+    ) -> None:
+        """Async coroutine: generate an image, persist it, and send WS events."""
+        try:
+            await self._send({"event": "generating_image", "caption": caption})
+
+            provider = self._image_provider
+            if provider is None:
+                await self._send({"event": "generation_failed", "reason": "Image generation is not configured."})
+                return
+
+            styled_prompt = (self._image_style_prefix + prompt).strip()
+
+            try:
+                image = await asyncio.to_thread(provider.generate, styled_prompt)
+            except Exception as exc:
+                log.exception("[AgentSession] image generation failed")
+                reason = str(exc) or type(exc).__name__
+                await self._send({"event": "generation_failed", "reason": reason})
+                return
+
+            # Persist the image under storage/enrollment_assets/<enrollment_id>/<asset_id>.png
+            try:
+                import aiosqlite
+                from ...db import models
+                from ...config import settings
+
+                asset_dir = self._storage_dir / "enrollment_assets" / self._enrollment_id
+                asset_dir.mkdir(parents=True, exist_ok=True)
+
+                asset_id = str(uuid.uuid4())
+                image_path = asset_dir / f"{asset_id}.png"
+                image_path.write_bytes(image.image_bytes)
+
+                rel_path = str(image_path.relative_to(self._storage_dir))
+
+                async with aiosqlite.connect(str(settings.DB_PATH)) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    async with conn.execute(
+                        "SELECT COUNT(*) FROM enrollment_assets WHERE enrollment_id = ?",
+                        (self._enrollment_id,),
+                    ) as cur:
+                        row = await cur.fetchone()
+                        idx = row[0] if row else 0
+
+                    await models.create_enrollment_asset(
+                        conn,
+                        enrollment_id=self._enrollment_id,
+                        section_idx=self._current_section_idx,
+                        image_path=rel_path,
+                        prompt=prompt,
+                        tool_use_id=tool_use_id,
+                        revised_prompt=image.revised_prompt,
+                        idx=idx,
+                    )
+
+                image_url = f"/api/lessons/assets/{rel_path}"
+                log.info("[AgentSession] image saved: %s", rel_path)
+
+                await self._send({
+                    "event": "show_image",
+                    "image_url": image_url,
+                    "caption": caption,
+                    "prompt": prompt,
+                })
+                result_holder[0] = image_url
+
+            except Exception as exc:
+                log.exception("[AgentSession] failed to persist generated image")
+                await self._send({"event": "generation_failed", "reason": "Failed to save image."})
+
+        except Exception as exc:
+            # Catch-all: ensures done_event is always set even if _send itself throws.
+            log.exception("[AgentSession] unexpected error in _generate_and_send")
+
+        finally:
+            done_event.set()
 
     def _on_token_usage(self, call_type: str, model: str, usage) -> None:
         app_state.token_tracker.record_api(
@@ -498,6 +662,7 @@ class AgentSession:
         )
 
     def _on_section_advanced(self, curriculum: Curriculum) -> None:
+        self._current_section_idx = curriculum.idx
         self._fire(self._send({
             "event": "section_advanced",
             "curriculum": {

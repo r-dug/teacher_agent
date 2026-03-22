@@ -29,6 +29,8 @@ class Settings:
     TEACH_LLM_MODEL: str | None = os.getenv("TEACH_LLM_MODEL")
     DECOMPOSE_LLM_PROVIDER: str | None = os.getenv("DECOMPOSE_LLM_PROVIDER")
     DECOMPOSE_LLM_MODEL: str | None = os.getenv("DECOMPOSE_LLM_MODEL")
+    AUTHORING_LLM_PROVIDER: str | None = os.getenv("AUTHORING_LLM_PROVIDER")
+    AUTHORING_LLM_MODEL: str | None = os.getenv("AUTHORING_LLM_MODEL")
     OPENAI_LLM_TIMEOUT_S: float = float(os.getenv("OPENAI_LLM_TIMEOUT_S", "30"))
     OPENAI_LLM_MAX_RETRIES: int = int(os.getenv("OPENAI_LLM_MAX_RETRIES", "1"))
     OPENAI_DECOMPOSE_TIMEOUT_S: float = float(os.getenv("OPENAI_DECOMPOSE_TIMEOUT_S", "45"))
@@ -63,6 +65,22 @@ class Settings:
     OPENAI_REALTIME_VAD_SILENCE_MS: int = int(os.getenv("OPENAI_REALTIME_VAD_SILENCE_MS", "900"))
     OPENAI_REALTIME_INTERRUPT_RESPONSE: bool = (
         os.getenv("OPENAI_REALTIME_INTERRUPT_RESPONSE", "false").strip().lower() in {"1", "true", "yes", "on"}
+    )
+
+    # Image generation
+    IMAGE_GEN_ENABLE: bool = (
+        os.getenv("IMAGE_GEN_ENABLE", "false").strip().lower() in {"1", "true", "yes", "on"}
+    )
+    IMAGE_GEN_PROVIDER: str = os.getenv("IMAGE_GEN_PROVIDER", "openai")
+    IMAGE_GEN_MODEL: str = os.getenv("IMAGE_GEN_MODEL", "dall-e-3")
+    IMAGE_GEN_SIZE: str = os.getenv("IMAGE_GEN_SIZE", "1024x1024")
+    IMAGE_GEN_QUALITY: str = os.getenv("IMAGE_GEN_QUALITY", "standard")
+    IMAGE_GEN_TIMEOUT_S: float = float(os.getenv("IMAGE_GEN_TIMEOUT_S", "120"))
+    IMAGE_GEN_MAX_RETRIES: int = int(os.getenv("IMAGE_GEN_MAX_RETRIES", "1"))
+    # Style prefix prepended to the raw prompt before sending to the image API.
+    IMAGE_GEN_STYLE_PREFIX: str = os.getenv(
+        "IMAGE_GEN_STYLE_PREFIX",
+        "Clear educational diagram, labelled, white background: ",
     )
 
     # Auth (prototype: all requests trusted from the frontend server)
@@ -103,6 +121,26 @@ class Settings:
         if explicit:
             return explicit
         if self.effective_decompose_llm_provider() == "openai":
+            return "gpt-4o-mini"
+        return self.LLM_MODEL
+
+    def effective_authoring_llm_provider(self) -> str:
+        """Provider for advisor chat + TOC extraction. Falls back to decompose → teach → anthropic."""
+        provider = (
+            self.AUTHORING_LLM_PROVIDER
+            or self.DECOMPOSE_LLM_PROVIDER
+            or self.TEACH_LLM_PROVIDER
+            or "anthropic"
+        ).strip().lower()
+        if provider in {"anthropic", "openai"}:
+            return provider
+        return "anthropic"
+
+    def effective_authoring_llm_model(self) -> str:
+        explicit = (self.AUTHORING_LLM_MODEL or "").strip()
+        if explicit:
+            return explicit
+        if self.effective_authoring_llm_provider() == "openai":
             return "gpt-4o-mini"
         return self.LLM_MODEL
 

@@ -23,8 +23,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from .logging_config import configure_logging
 from .config import settings
 from . import http_client
+
+configure_logging(storage_dir=Path("./storage"))
 from .routers import auth, sessions, courses, lessons, personas, voices, ws_proxy, usage
 
 _STATIC_DIR = Path(__file__).parent / "static"

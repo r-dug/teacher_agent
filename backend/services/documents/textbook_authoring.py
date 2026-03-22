@@ -21,6 +21,37 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def extract_full_text_from_pdf(pdf_path: Path) -> str:
+    """Return concatenated plain text from all pages of the PDF."""
+    import fitz
+
+    doc = fitz.open(str(pdf_path))
+    try:
+        parts = []
+        for i, page in enumerate(doc):
+            text = page.get_text().strip()
+            if text:
+                parts.append(f"[Page {i + 1}]\n{text}")
+        return "\n\n".join(parts)
+    finally:
+        doc.close()
+
+
+def extract_toc_text_from_pdf(pdf_path: Path, *, max_pages: int = 12) -> str:
+    """Return concatenated text from the first `max_pages` pages of the PDF.
+
+    This is where the visible table of contents almost always lives.
+    """
+    import fitz
+
+    doc = fitz.open(str(pdf_path))
+    try:
+        pages_to_read = min(max_pages, len(doc))
+        return "\n".join(doc[i].get_text() for i in range(pages_to_read))
+    finally:
+        doc.close()
+
+
 def infer_chapter_drafts_from_pdf(
     pdf_path: Path, *, fallback_pages: int = DEFAULT_FALLBACK_CHAPTER_PAGES
 ) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]]]:

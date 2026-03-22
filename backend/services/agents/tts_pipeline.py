@@ -8,7 +8,6 @@ import threading
 from collections.abc import Callable
 
 import numpy as np
-import sounddevice as sd
 
 from ..voice.config import KOKORO_SAMPLE_RATE
 from .callbacks import TeachingCallbacks
@@ -175,9 +174,6 @@ class TTSPipeline:
                     self._callbacks.on_tts_playing(True)
                 if self._callbacks.on_audio_chunk:
                     self._callbacks.on_audio_chunk(audio_data, self._turn_idx, chunk_idx)
-                elif audio_data.size > 0:
-                    sd.play(audio_data, samplerate=KOKORO_SAMPLE_RATE)
-                    sd.wait()
             except Exception as e:
                 if self._callbacks.on_error:
                     self._callbacks.on_error(str(e))

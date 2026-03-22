@@ -96,30 +96,23 @@ async def test_transcribe_openai_requires_api_key():
 async def test_transcribe_openai_posts_audio(monkeypatch):
     captured: dict = {}
 
-    class _Resp:
-        status_code = 200
+    class _Transcriptions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            from types import SimpleNamespace
+            return SimpleNamespace(text="hello from openai")
 
-        def json(self):
-            return {"text": "hello from openai"}
+    class _AudioAPI:
+        transcriptions = _Transcriptions()
 
     class _Client:
-        def __init__(self, timeout: float):
-            captured["timeout"] = timeout
+        def __init__(self, **kwargs):
+            captured["api_key"] = kwargs.get("api_key")
+            captured["timeout"] = kwargs.get("timeout")
 
-        async def __aenter__(self):
-            return self
+        audio = _AudioAPI()
 
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def post(self, url: str, headers: dict, data: dict, files: dict):
-            captured["url"] = url
-            captured["headers"] = headers
-            captured["data"] = data
-            captured["files"] = files
-            return _Resp()
-
-    monkeypatch.setattr("backend.services.voice.stt.httpx.AsyncClient", _Client)
+    monkeypatch.setattr("backend.services.voice.stt.openai.AsyncOpenAI", _Client)
 
     text = await transcribe_openai(
         _make_audio_b64(),
@@ -132,11 +125,11 @@ async def test_transcribe_openai_posts_audio(monkeypatch):
     )
 
     assert text == "hello from openai"
-    assert captured["url"] == "https://api.openai.com/v1/audio/transcriptions"
-    assert captured["headers"]["Authorization"] == "Bearer test-key"
-    assert captured["data"]["model"] == "gpt-4o-mini-transcribe"
-    assert captured["data"]["language"] == "en"
-    filename, payload, mime = captured["files"]["file"]
+    assert captured["api_key"] == "test-key"
+    assert captured["timeout"] == 7.5
+    assert captured["model"] == "gpt-4o-mini-transcribe"
+    assert captured["language"] == "en"
+    filename, payload, mime = captured["file"]
     assert filename.endswith(".wav")
     assert isinstance(payload, (bytes, bytearray))
     assert mime == "audio/wav"
@@ -146,30 +139,22 @@ async def test_transcribe_openai_posts_audio(monkeypatch):
 async def test_transcribe_file_openai_posts_file(monkeypatch):
     captured: dict = {}
 
-    class _Resp:
-        status_code = 200
+    class _Transcriptions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            from types import SimpleNamespace
+            return SimpleNamespace(text="ok file")
 
-        def json(self):
-            return {"text": "ok file"}
+    class _AudioAPI:
+        transcriptions = _Transcriptions()
 
     class _Client:
-        def __init__(self, timeout: float):
-            captured["timeout"] = timeout
+        def __init__(self, **kwargs):
+            pass
 
-        async def __aenter__(self):
-            return self
+        audio = _AudioAPI()
 
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def post(self, url: str, headers: dict, data: dict, files: dict):
-            captured["url"] = url
-            captured["headers"] = headers
-            captured["data"] = data
-            captured["files"] = files
-            return _Resp()
-
-    monkeypatch.setattr("backend.services.voice.stt.httpx.AsyncClient", _Client)
+    monkeypatch.setattr("backend.services.voice.stt.openai.AsyncOpenAI", _Client)
     fake_file_b64 = base64.b64encode(b"webm-data").decode()
 
     text = await transcribe_file_openai(
@@ -182,8 +167,8 @@ async def test_transcribe_file_openai_posts_file(monkeypatch):
     )
 
     assert text == "ok file"
-    assert captured["data"]["model"] == "gpt-4o-mini-transcribe"
-    filename, payload, mime = captured["files"]["file"]
+    assert captured["model"] == "gpt-4o-mini-transcribe"
+    filename, payload, mime = captured["file"]
     assert filename.endswith(".webm")
     assert payload == b"webm-data"
     assert mime == "audio/webm"
@@ -193,8 +178,19 @@ async def test_transcribe_file_openai_posts_file(monkeypatch):
 async def test_transcribe_openai_records_estimated_cost(monkeypatch):
     captured: dict = {}
 
-    async def _fake_openai_transcribe_bytes(**kwargs):
-        return "ok"
+    class _Transcriptions:
+        async def create(self, **kwargs):
+            from types import SimpleNamespace
+            return SimpleNamespace(text="ok")
+
+    class _AudioAPI:
+        transcriptions = _Transcriptions()
+
+    class _Client:
+        def __init__(self, **kwargs):
+            pass
+
+        audio = _AudioAPI()
 
     class _Tracker:
         def record_stt(self, **kwargs):
@@ -202,7 +198,7 @@ async def test_transcribe_openai_records_estimated_cost(monkeypatch):
 
     from backend.app_state import app_state
 
-    monkeypatch.setattr("backend.services.voice.stt._openai_transcribe_bytes", _fake_openai_transcribe_bytes)
+    monkeypatch.setattr("backend.services.voice.stt.openai.AsyncOpenAI", _Client)
     monkeypatch.setattr(app_state, "token_tracker", _Tracker())
 
     text = await transcribe_openai(

@@ -17,6 +17,7 @@ class AppState:
     tts_provider: Optional[object] = None      # primary provider adapter
     tts_fallback_provider: Optional[object] = None  # fallback for same-turn resilience
     active_tts_provider: str = "kokoro"
+    image_provider: Optional[object] = None   # ImageProvider or None if disabled
     token_tracker: TokenUsageTracker = None   # type: ignore[assignment]
 
 
