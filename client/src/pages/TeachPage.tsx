@@ -35,6 +35,7 @@ import { InputBar } from '@/components/InputBar'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { TokenUsageDisplay } from '@/components/TokenUsageDisplay'
+import { SettingsDrawer } from '@/components/SettingsDrawer'
 
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { useRecorder } from '@/hooks/useRecorder'
@@ -57,6 +58,8 @@ import type {
 interface TeachPageProps {
   sessionId: string
   isAdmin?: boolean
+  onLogout?: () => void
+  userEmail?: string
 }
 
 interface SketchpadState {
@@ -72,7 +75,7 @@ interface SlideState {
   caption?: string
 }
 
-export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
+export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = '' }: TeachPageProps) {
   const { lessonId = '' } = useParams<{ lessonId: string }>()
   const navigate = useNavigate()
 
@@ -102,6 +105,7 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
   const [inputText, setInputText] = useState('')
 
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const lastTurnIdRef = useRef<string | null>(null)
 
   // ── personas ─────────────────────────────────────────────────────────────
@@ -843,6 +847,14 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
               <ArrowLeft className="h-4 w-4" />
             </Button>
             <span className="flex-1 text-sm font-medium truncate">{lessonTitle || lessonId}</span>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setSettingsOpen(true)}
+              aria-label="Settings"
+            >
+              <span className="text-base leading-none">⚙</span>
+            </Button>
             {/* Hamburger — mobile only */}
             <Button
               variant="ghost"
@@ -854,6 +866,14 @@ export function TeachPage({ sessionId, isAdmin = false }: TeachPageProps) {
               <Menu className="h-5 w-5" />
             </Button>
           </div>
+
+          <SettingsDrawer
+            open={settingsOpen}
+            onClose={() => setSettingsOpen(false)}
+            sessionId={sessionId}
+            userEmail={userEmail}
+            onLogout={onLogout ?? (() => {})}
+          />
 
           {/* Floating mini progress — mobile only, hidden when sidebar is open */}
           {curriculum && !mobileSidebarOpen && (

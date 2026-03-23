@@ -11,14 +11,17 @@ import { Badge } from '@/components/ui/badge'
 import { Drawer } from '@/components/Drawer'
 import { LessonDrawer } from '@/components/LessonDrawer'
 import { CourseChaptersEditor } from '@/components/CourseChaptersEditor'
+import { SettingsDrawer } from '@/components/SettingsDrawer'
 import type { Course, Lesson } from '@/lib/types'
 
 interface CoursePageProps {
   sessionId: string
   isAdmin?: boolean
+  onLogout?: () => void
+  userEmail?: string
 }
 
-export function CoursePage({ sessionId, isAdmin = false }: CoursePageProps) {
+export function CoursePage({ sessionId, isAdmin = false, onLogout, userEmail = '' }: CoursePageProps) {
   const { courseId } = useParams<{ courseId: string }>()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -31,6 +34,7 @@ export function CoursePage({ sessionId, isAdmin = false }: CoursePageProps) {
   const [lessonDrawer, setLessonDrawer] = useState<{ mode: 'create' | 'edit'; lesson?: Lesson } | null>(null)
   const [chaptersDrawerOpen, setChaptersDrawerOpen] = useState(false)
   const [publishing, setPublishing] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   useEffect(() => {
     if (!courseId) return
@@ -168,7 +172,23 @@ export function CoursePage({ sessionId, isAdmin = false }: CoursePageProps) {
             {publishing ? 'Publishing…' : 'Publish To All Users'}
           </Button>
         )}
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setSettingsOpen(true)}
+          aria-label="Settings"
+        >
+          ⚙
+        </Button>
       </div>
+
+      <SettingsDrawer
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        sessionId={sessionId}
+        userEmail={userEmail}
+        onLogout={onLogout ?? (() => {})}
+      />
 
       {error && <p className="text-sm text-[hsl(var(--destructive))]">{error}</p>}
 

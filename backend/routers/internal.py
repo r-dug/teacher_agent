@@ -183,6 +183,33 @@ async def auth_reset_password(body: PasswordResetRequest, conn: Conn):
     )
 
 
+class DeleteUserRequest(BaseModel):
+    user_id: str
+
+
+@router.post("/auth/delete-user", status_code=204)
+async def auth_delete_user(body: DeleteUserRequest, conn: Conn):
+    """Permanently delete a user and all their data (cascades via FK constraints)."""
+    user = await models.get_user_by_id(conn, body.user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    await models.delete_user(conn, body.user_id)
+
+
+class UpdatePasswordRequest(BaseModel):
+    user_id: str
+    password_hash: str
+
+
+@router.post("/auth/update-password", status_code=204)
+async def auth_update_password(body: UpdatePasswordRequest, conn: Conn):
+    """Update a user's password hash directly (current-password check happens in BFF)."""
+    user = await models.get_user_by_id(conn, body.user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    await models.update_password_hash(conn, body.user_id, body.password_hash)
+
+
 @router.post("/auth/verify", response_model=AuthUserResponse)
 async def auth_verify_email(body: VerifyTokenRequest, conn: Conn):
     user_id = await models.consume_verification_token(conn, body.token)

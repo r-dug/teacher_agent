@@ -483,6 +483,11 @@ async def get_user_by_id(
         return _row(await cur.fetchone())
 
 
+async def delete_user(conn: aiosqlite.Connection, user_id: str) -> None:
+    await conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    await conn.commit()
+
+
 async def mark_email_verified(
     conn: aiosqlite.Connection, user_id: str
 ) -> None:

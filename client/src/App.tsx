@@ -42,6 +42,7 @@ export default function App() {
   const [authState, setAuthState] = useState<'loading' | 'authenticated' | 'unauthenticated'>('loading')
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [isAdmin, setIsAdmin] = useState(false)
+  const [userEmail, setUserEmail] = useState('')
   const [authPage, setAuthPage] = useState<AuthPage>('login')
   const [pendingEmail, setPendingEmail] = useState('')
 
@@ -60,6 +61,7 @@ export default function App() {
       .then((data) => {
         setSessionId(stored)
         setIsAdmin(Boolean(data.is_admin))
+        setUserEmail(data.email || '')
         setAuthState('authenticated')
       })
       .catch(() => {
@@ -75,7 +77,7 @@ export default function App() {
     // Re-fetch /me to get is_admin
     fetch('/api/auth/me', { headers: { 'X-Session-Id': sid } })
       .then(r => r.ok ? r.json() : null)
-      .then(data => { if (data) setIsAdmin(Boolean(data.is_admin)) })
+      .then(data => { if (data) { setIsAdmin(Boolean(data.is_admin)); setUserEmail(data.email || '') } })
       .catch(() => {})
     setAuthState('authenticated')
   }
@@ -85,6 +87,7 @@ export default function App() {
     localStorage.removeItem(SESSION_KEY)
     setSessionId(null)
     setIsAdmin(false)
+    setUserEmail('')
     setAuthState('unauthenticated')
     setAuthPage('login')
     if (sid) {
@@ -107,9 +110,9 @@ export default function App() {
       ) : authState === 'authenticated' && sessionId ? (
         <BrowserRouter>
           <Routes>
-            <Route path="/" element={<HomePage sessionId={sessionId} onLogout={onLogout} isAdmin={isAdmin} />} />
-            <Route path="/courses/:courseId" element={<CoursePage sessionId={sessionId} isAdmin={isAdmin} />} />
-            <Route path="/teach/:lessonId" element={<TeachPage sessionId={sessionId} isAdmin={isAdmin} />} />
+            <Route path="/" element={<HomePage sessionId={sessionId} onLogout={onLogout} isAdmin={isAdmin} userEmail={userEmail} />} />
+            <Route path="/courses/:courseId" element={<CoursePage sessionId={sessionId} isAdmin={isAdmin} onLogout={onLogout} userEmail={userEmail} />} />
+            <Route path="/teach/:lessonId" element={<TeachPage sessionId={sessionId} isAdmin={isAdmin} onLogout={onLogout} userEmail={userEmail} />} />
             <Route path="/admin/usage" element={
               <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
                 <UsageDashboardPage sessionId={sessionId} isAdmin={isAdmin} />

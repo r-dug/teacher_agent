@@ -12,13 +12,14 @@ import { Badge } from '@/components/ui/badge'
 import { Drawer } from '@/components/Drawer'
 import { LessonDrawer } from '@/components/LessonDrawer'
 import { CourseDrawer } from '@/components/CourseDrawer'
-import { ThemePicker } from '@/components/ThemePicker'
+import { SettingsDrawer } from '@/components/SettingsDrawer'
 import type { Course, Lesson } from '@/lib/types'
 
 interface HomePageProps {
   sessionId: string
   onLogout: () => void
   isAdmin?: boolean
+  userEmail?: string
 }
 
 // ── Collapsible section header ────────────────────────────────────────────────
@@ -52,7 +53,7 @@ function SectionHeader({
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-export function HomePage({ sessionId, onLogout, isAdmin }: HomePageProps) {
+export function HomePage({ sessionId, onLogout, isAdmin, userEmail = '' }: HomePageProps) {
   const navigate = useNavigate()
 
   const [courses, setCourses] = useState<Course[]>([])
@@ -67,6 +68,7 @@ export function HomePage({ sessionId, onLogout, isAdmin }: HomePageProps) {
   // drawer state
   const [courseDrawer, setCourseDrawer] = useState<{ mode: 'create' | 'edit'; course?: Course } | null>(null)
   const [lessonDrawer, setLessonDrawer] = useState<{ mode: 'create' | 'edit'; lesson?: Lesson } | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   useEffect(() => {
     async function load() {
@@ -129,17 +131,29 @@ export function HomePage({ sessionId, onLogout, isAdmin }: HomePageProps) {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">My Learning</h1>
         <div className="flex items-center gap-2">
-          <ThemePicker />
           {isAdmin && (
             <Button variant="ghost" size="sm" onClick={() => navigate('/admin/usage')} data-page-transition>
               Usage
             </Button>
           )}
-          <Button variant="ghost" size="sm" onClick={onLogout} data-page-transition>
-            Log out
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setSettingsOpen(true)}
+            aria-label="Settings"
+          >
+            ⚙
           </Button>
         </div>
       </div>
+
+      <SettingsDrawer
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        sessionId={sessionId}
+        userEmail={userEmail}
+        onLogout={onLogout}
+      />
 
       {error && <p className="text-sm text-[hsl(var(--destructive))]">{error}</p>}
 

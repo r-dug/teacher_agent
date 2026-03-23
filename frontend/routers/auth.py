@@ -42,7 +42,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from ..config import settings
-from ..email import send_verification_email, send_password_reset_email
+from ..email import send_verification_email, send_password_reset_email, send_welcome_email
 from ..http_client import get as get_http
 from ..rate_limiter import RateLimiter
 from ..session_store import store
@@ -124,6 +124,11 @@ class ResetPasswordRequest(BaseModel):
     password: str
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class SessionResponse(BaseModel):
     session_id: str
 
@@ -188,6 +193,8 @@ async def verify_email(body: VerifyRequest):
     session_id = await _create_backend_session(user["user_id"])
     store.add(session_id, user_id=user["user_id"], email=user["email"],
               is_admin=bool(user.get("is_admin", 0)))
+    # Fire welcome email in the background — don't block the verify response.
+    asyncio.create_task(send_welcome_email(user["email"]))
     return SessionResponse(session_id=session_id)
 
 
@@ -292,6 +299,46 @@ async def reset_password(body: ResetPasswordRequest):
     if not resp.is_success:
         raise HTTPException(status_code=502, detail="Password reset failed")
     return {"message": "Password updated. You can now sign in."}
+
+
+@router.post("/delete-account", status_code=204)
+async def delete_account(x_session_id: str = Header(...)):
+    entry = store.get(x_session_id)
+    if entry is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    http = get_http()
+    resp = await http.post("/internal/auth/delete-user", json={"user_id": entry.user_id})
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not resp.is_success:
+        raise HTTPException(status_code=502, detail="Account deletion failed")
+    store.remove(x_session_id)
+
+
+@router.post("/change-password", status_code=204)
+async def change_password(body: ChangePasswordRequest, x_session_id: str = Header(...)):
+    entry = store.get(x_session_id)
+    if entry is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    _validate_password(body.new_password)
+    http = get_http()
+    resp = await http.get("/internal/auth/user", params={"email": entry.email})
+    if not resp.is_success:
+        raise HTTPException(status_code=502, detail="Could not verify current password")
+    user = resp.json()
+    stored_hash: str = user.get("password_hash") or ""
+    match = await asyncio.to_thread(
+        bcrypt.checkpw, body.current_password.encode(), stored_hash.encode()
+    )
+    if not match:
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    pw_hash = await asyncio.to_thread(
+        bcrypt.hashpw, body.new_password.encode(), bcrypt.gensalt()
+    )
+    await http.post(
+        "/internal/auth/update-password",
+        json={"user_id": user["user_id"], "password_hash": pw_hash.decode()},
+    )
 
 
 @router.post("/resend", status_code=200)

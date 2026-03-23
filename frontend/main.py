@@ -131,6 +131,8 @@ async def health():
 
 if _STATIC_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=_STATIC_DIR / "assets"), name="assets")
+    if (_STATIC_DIR / "images").is_dir():
+        app.mount("/images", StaticFiles(directory=_STATIC_DIR / "images"), name="images")
     if (_STATIC_DIR / "vad").is_dir():
         app.mount("/vad", StaticFiles(directory=_STATIC_DIR / "vad"), name="vad")
 
