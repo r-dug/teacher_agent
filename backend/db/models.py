@@ -453,12 +453,14 @@ async def get_enrollment_assets(
 # ── users / auth ───────────────────────────────────────────────────────────────
 
 async def create_user(
-    conn: aiosqlite.Connection, email: str, password_hash: str
+    conn: aiosqlite.Connection, email: str, password_hash: str, username: str = ""
 ) -> Row:
     uid = new_id()
+    clean_email = email.lower().strip()
+    uname = username.strip() if username.strip() else clean_email.split("@")[0][:30]
     await conn.execute(
-        "INSERT INTO users (id, email, password_hash, email_verified) VALUES (?, ?, ?, 0)",
-        (uid, email.lower().strip(), password_hash),
+        "INSERT INTO users (id, email, password_hash, email_verified, username) VALUES (?, ?, ?, 0, ?)",
+        (uid, clean_email, password_hash, uname),
     )
     await conn.commit()
     async with conn.execute("SELECT * FROM users WHERE id = ?", (uid,)) as cur:
@@ -618,14 +620,20 @@ BUILT_IN_PERSONAS = [
 ]
 
 
-ADMIN_EMAILS: frozenset[str] = frozenset({"rcdoug03@louisville.edu"})
-
-
-async def seed_admin_users(conn: aiosqlite.Connection) -> None:
-    """Ensure known admin emails have is_admin=1 if their account exists."""
-    for email in ADMIN_EMAILS:
+async def seed_admin_users(
+    conn: aiosqlite.Connection,
+    admin_emails: tuple[str, ...] | list[str] | set[str] = (),
+) -> None:
+    """Grant admin to listed emails that already exist (grant-only)."""
+    normalized = {
+        str(email).strip().lower()
+        for email in admin_emails
+        if str(email).strip()
+    }
+    for email in normalized:
         await conn.execute(
-            "UPDATE users SET is_admin = 1 WHERE email = ?", (email,)
+            "UPDATE users SET is_admin = 1 WHERE email = ?",
+            (email,),
         )
     await conn.commit()
 
@@ -636,6 +644,36 @@ async def get_user_is_admin(conn: aiosqlite.Connection, user_id: str) -> bool:
     ) as cur:
         row = await cur.fetchone()
     return bool(row and row[0])
+
+
+async def list_users_for_admin_iam(conn: aiosqlite.Connection) -> list[Row]:
+    async with conn.execute(
+        """SELECT id, email, display_name, username, email_verified, is_admin, created_at
+           FROM users
+           ORDER BY created_at"""
+    ) as cur:
+        return _rows(await cur.fetchall())
+
+
+async def count_admin_users(conn: aiosqlite.Connection) -> int:
+    async with conn.execute(
+        "SELECT COUNT(*) FROM users WHERE is_admin = 1"
+    ) as cur:
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+async def set_user_admin(
+    conn: aiosqlite.Connection,
+    user_id: str,
+    *,
+    is_admin: bool,
+) -> None:
+    await conn.execute(
+        "UPDATE users SET is_admin = ? WHERE id = ?",
+        (1 if is_admin else 0, user_id),
+    )
+    await conn.commit()
 
 
 async def seed_personas(conn: aiosqlite.Connection) -> None:
@@ -693,4 +731,134 @@ async def delete_persona(
         deleted = cur.rowcount > 0
     if deleted:
         await conn.commit()
+    return deleted
+
+
+# ── points / gamification ───────────────────────────────────────────────────────
+
+async def get_enrollment_section_idx(
+    conn: aiosqlite.Connection, enrollment_id: str
+) -> int:
+    """Return the persisted current_section_idx for an enrollment (0 if not found)."""
+    async with conn.execute(
+        "SELECT current_section_idx FROM lesson_enrollments WHERE id = ?", (enrollment_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+async def upsert_user_points(
+    conn: aiosqlite.Connection,
+    user_id: str,
+    *,
+    delta_points: int = 0,
+    delta_lessons: int = 0,
+    delta_sections: int = 0,
+    streak: int | None = None,
+    longest_streak: int | None = None,
+    last_lesson_date: str | None = None,
+) -> None:
+    """Create or update the user_points row atomically."""
+    await conn.execute(
+        """INSERT INTO user_points (user_id, total_points, lessons_completed, sections_advanced,
+               current_streak, longest_streak, last_lesson_date, updated_at)
+           VALUES (?, ?, ?, ?, COALESCE(?, 0), COALESCE(?, 0), ?, datetime('now'))
+           ON CONFLICT(user_id) DO UPDATE SET
+               total_points      = total_points + excluded.total_points,
+               lessons_completed = lessons_completed + excluded.lessons_completed,
+               sections_advanced = sections_advanced + excluded.sections_advanced,
+               current_streak    = CASE WHEN excluded.current_streak != 0 OR ? IS NOT NULL
+                                        THEN excluded.current_streak
+                                        ELSE current_streak END,
+               longest_streak    = CASE WHEN excluded.longest_streak != 0 OR ? IS NOT NULL
+                                        THEN MAX(longest_streak, excluded.longest_streak)
+                                        ELSE longest_streak END,
+               last_lesson_date  = CASE WHEN excluded.last_lesson_date IS NOT NULL
+                                        THEN excluded.last_lesson_date
+                                        ELSE last_lesson_date END,
+               updated_at        = datetime('now')""",
+        (
+            user_id,
+            delta_points,
+            delta_lessons,
+            delta_sections,
+            streak,
+            longest_streak,
+            last_lesson_date,
+            streak,   # for streak CASE
+            longest_streak,  # for longest_streak CASE
+        ),
+    )
+    await conn.commit()
+
+
+async def get_user_points(
+    conn: aiosqlite.Connection, user_id: str
+) -> Row | None:
+    async with conn.execute(
+        "SELECT * FROM user_points WHERE user_id = ?", (user_id,)
+    ) as cur:
+        return _row(await cur.fetchone())
+
+
+async def insert_point_event(
+    conn: aiosqlite.Connection,
+    event_id: str,
+    user_id: str,
+    event_type: str,
+    points: int,
+    enrollment_id: str | None = None,
+) -> bool:
+    """Insert a point event. Returns False if a unique-constrained duplicate was ignored."""
+    async with conn.execute(
+        """INSERT OR IGNORE INTO point_events (id, user_id, enrollment_id, event_type, points)
+           VALUES (?, ?, ?, ?, ?)""",
+        (event_id, user_id, enrollment_id, event_type, points),
+    ) as cur:
+        inserted = cur.rowcount > 0
+    if inserted:
+        await conn.commit()
+    return inserted
+
+
+async def get_leaderboard(
+    conn: aiosqlite.Connection, limit: int = 50
+) -> list[Row]:
+    """Return top users by total_points, excluding the anonymous user."""
+    from .connection import ANON_USER_ID
+    async with conn.execute(
+        """SELECT u.username, u.display_name,
+                  up.total_points, up.lessons_completed, up.sections_advanced,
+                  up.current_streak, up.longest_streak,
+                  ROW_NUMBER() OVER (ORDER BY up.total_points DESC) AS rank
+           FROM user_points up
+           JOIN users u ON u.id = up.user_id
+           WHERE up.total_points > 0 AND up.user_id != ?
+           ORDER BY up.total_points DESC
+           LIMIT ?""",
+        (ANON_USER_ID, limit),
+    ) as cur:
+        return _rows(await cur.fetchall())
+
+
+async def get_user_rank(
+    conn: aiosqlite.Connection, user_id: str
+) -> int | None:
+    """Return the rank of a specific user (1-based), or None if they have no points."""
+    from .connection import ANON_USER_ID
+    async with conn.execute(
+        """SELECT COUNT(*) + 1
+           FROM user_points
+           WHERE total_points > (
+               SELECT COALESCE(total_points, 0) FROM user_points WHERE user_id = ?
+           )
+           AND user_id != ?""",
+        (user_id, ANON_USER_ID),
+    ) as cur:
+        row = await cur.fetchone()
+    # Confirm user actually has a points row
+    pts = await get_user_points(conn, user_id)
+    if pts is None:
+        return None
+    return int(row[0]) if row else None
     return deleted

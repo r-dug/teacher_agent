@@ -73,6 +73,7 @@ class SessionState:
     def __init__(
         self,
         session_id: str,
+        user_id: str,
         lesson_id: str,
         enrollment_id: str,
         curriculum: Curriculum,
@@ -81,6 +82,7 @@ class SessionState:
         pdf_path: str | None = None,
     ) -> None:
         self.session_id = session_id
+        self.user_id = user_id
         self.lesson_id = lesson_id
         self.enrollment_id = enrollment_id
         self.curriculum = curriculum
@@ -255,6 +257,7 @@ async def ws_session(
 
     state = SessionState(
         session_id=session_id,
+        user_id=user_id,
         lesson_id=lesson_id,
         enrollment_id=enrollment_id,
         curriculum=curriculum,
@@ -1729,13 +1732,31 @@ async def _handle_reconnect(
 async def _save_state(
     conn: aiosqlite.Connection, state: SessionState
 ) -> None:
+    from ..db.connection import ANON_USER_ID
+    from ..services.points import (
+        award_daily_points_if_needed,
+        award_lesson_complete,
+        award_section_advance,
+    )
+
+    old_idx = await models.get_enrollment_section_idx(conn, state.enrollment_id)
+    new_idx = state.curriculum.idx
+    is_complete = state.curriculum.is_last and state.turn_status == "complete"
+
     await models.update_enrollment(
         conn,
         state.enrollment_id,
-        current_section_idx=state.curriculum.idx,
-        completed=int(state.curriculum.is_last and state.turn_status == "complete"),
+        current_section_idx=new_idx,
+        completed=int(is_complete),
     )
     await models.upsert_messages(conn, state.enrollment_id, state.messages)
+
+    if state.user_id and state.user_id != ANON_USER_ID:
+        if new_idx > old_idx:
+            await award_section_advance(conn, state.user_id, state.enrollment_id, old_idx, new_idx)
+        if is_complete:
+            await award_lesson_complete(conn, state.user_id, state.enrollment_id)
+        await award_daily_points_if_needed(conn, state.user_id)
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────

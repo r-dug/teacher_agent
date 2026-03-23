@@ -13,6 +13,13 @@ import pytest
 from backend.db import connection as db, models
 
 
+async def _create_admin(mem_db, email: str = "lessons-admin@example.com") -> dict:
+    admin = await models.create_user(mem_db, email, "pw")
+    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (admin["id"],))
+    await mem_db.commit()
+    return admin
+
+
 # ── list lessons ──────────────────────────────────────────────────────────────
 
 async def test_list_lessons_empty(client, mem_db):
@@ -99,11 +106,12 @@ async def test_get_lesson_not_found(client, mem_db):
 # ── patch lesson ──────────────────────────────────────────────────────────────
 
 async def test_patch_lesson_title(client, mem_db):
-    lesson_id = await models.create_lesson(mem_db, db.ANON_USER_ID, "Old Title")
+    admin = await _create_admin(mem_db, "patch-title-admin@example.com")
+    lesson_id = await models.create_lesson(mem_db, admin["id"], "Old Title")
 
     resp = await client.patch(
         f"/lessons/{lesson_id}",
-        params={"user_id": db.ANON_USER_ID},
+        params={"user_id": admin["id"]},
         json={"title": "New Title"},
     )
     assert resp.status_code == 200
@@ -111,11 +119,12 @@ async def test_patch_lesson_title(client, mem_db):
 
 
 async def test_patch_lesson_visibility(client, mem_db):
-    lesson_id = await models.create_lesson(mem_db, db.ANON_USER_ID, "Draft Lesson")
+    admin = await _create_admin(mem_db, "patch-visibility-admin@example.com")
+    lesson_id = await models.create_lesson(mem_db, admin["id"], "Draft Lesson")
 
     resp = await client.patch(
         f"/lessons/{lesson_id}",
-        params={"user_id": db.ANON_USER_ID},
+        params={"user_id": admin["id"]},
         json={"visibility": "published"},
     )
     assert resp.status_code == 200
@@ -123,9 +132,10 @@ async def test_patch_lesson_visibility(client, mem_db):
 
 
 async def test_patch_lesson_not_found(client, mem_db):
+    admin = await _create_admin(mem_db, "patch-not-found-admin@example.com")
     resp = await client.patch(
         "/lessons/nonexistent",
-        params={"user_id": db.ANON_USER_ID},
+        params={"user_id": admin["id"]},
         json={"title": "x"},
     )
     assert resp.status_code == 404
@@ -134,9 +144,10 @@ async def test_patch_lesson_not_found(client, mem_db):
 # ── delete lesson ─────────────────────────────────────────────────────────────
 
 async def test_delete_lesson(client, mem_db):
-    lesson_id = await models.create_lesson(mem_db, db.ANON_USER_ID, "To Delete")
+    admin = await _create_admin(mem_db, "delete-admin@example.com")
+    lesson_id = await models.create_lesson(mem_db, admin["id"], "To Delete")
 
-    resp = await client.delete(f"/lessons/{lesson_id}", params={"user_id": db.ANON_USER_ID})
+    resp = await client.delete(f"/lessons/{lesson_id}", params={"user_id": admin["id"]})
     assert resp.status_code == 204
 
     # Confirm it's gone
@@ -144,15 +155,17 @@ async def test_delete_lesson(client, mem_db):
 
 
 async def test_delete_lesson_not_found(client, mem_db):
-    resp = await client.delete("/lessons/nonexistent", params={"user_id": db.ANON_USER_ID})
+    admin = await _create_admin(mem_db, "delete-not-found-admin@example.com")
+    resp = await client.delete("/lessons/nonexistent", params={"user_id": admin["id"]})
     assert resp.status_code == 404
 
 
 async def test_delete_lesson_not_in_list_afterwards(client, mem_db):
-    lesson_id = await models.create_lesson(mem_db, db.ANON_USER_ID, "Ephemeral")
-    await client.delete(f"/lessons/{lesson_id}", params={"user_id": db.ANON_USER_ID})
+    admin = await _create_admin(mem_db, "delete-list-admin@example.com")
+    lesson_id = await models.create_lesson(mem_db, admin["id"], "Ephemeral")
+    await client.delete(f"/lessons/{lesson_id}", params={"user_id": admin["id"]})
 
-    resp = await client.get("/lessons", params={"user_id": db.ANON_USER_ID})
+    resp = await client.get("/lessons", params={"user_id": admin["id"]})
     ids = [item["id"] for item in resp.json()]
     assert lesson_id not in ids
 

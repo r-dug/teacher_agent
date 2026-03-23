@@ -13,6 +13,7 @@ interface RegisterPageProps {
 
 export function RegisterPage({ onPending, onGoLogin }: RegisterPageProps) {
   const [email, setEmail] = useState('')
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -25,12 +26,16 @@ export function RegisterPage({ onPending, onGoLogin }: RegisterPageProps) {
       setError('Passwords do not match')
       return
     }
+    if (username && !/^[a-zA-Z][a-zA-Z0-9_]{2,29}$/.test(username)) {
+      setError('Username must be 3–30 characters, start with a letter, and contain only letters, numbers, or underscores')
+      return
+    }
     setLoading(true)
     try {
       const res = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, username }),
       })
       const data = await res.json()
       if (!res.ok) {
@@ -68,6 +73,18 @@ export function RegisterPage({ onPending, onGoLogin }: RegisterPageProps) {
                 onChange={(e) => setEmail(e.target.value)}
                 className="w-full rounded border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-[hsl(var(--ring))]"
               />
+            </div>
+            <div className="space-y-1">
+              <label className="text-sm font-medium">Username</label>
+              <input
+                type="text"
+                autoComplete="username"
+                placeholder="e.g. alex_learns"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                className="w-full rounded border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-[hsl(var(--ring))]"
+              />
+              <p className="text-xs text-[hsl(var(--muted-foreground))]">Shown on the leaderboard. Optional — auto-set from email if blank.</p>
             </div>
             <div className="space-y-1">
               <label className="text-sm font-medium">Password</label>

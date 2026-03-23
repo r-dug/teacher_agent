@@ -21,6 +21,7 @@ class SessionEntry:
     session_id: str
     user_id: str
     email: str = ""
+    username: str = ""
     is_admin: bool = False
     created_at: float = field(default_factory=time.monotonic)
     last_turn_id: Optional[str] = None
@@ -34,10 +35,10 @@ class SessionStore:
     # ── lifecycle ──────────────────────────────────────────────────────────────
 
     def add(
-        self, session_id: str, user_id: str, email: str = "", is_admin: bool = False
+        self, session_id: str, user_id: str, email: str = "", username: str = "", is_admin: bool = False
     ) -> SessionEntry:
         entry = SessionEntry(
-            session_id=session_id, user_id=user_id, email=email, is_admin=is_admin
+            session_id=session_id, user_id=user_id, email=email, username=username, is_admin=is_admin
         )
         self._sessions[session_id] = entry
         return entry

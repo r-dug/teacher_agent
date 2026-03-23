@@ -20,6 +20,7 @@ interface HomePageProps {
   onLogout: () => void
   isAdmin?: boolean
   userEmail?: string
+  username?: string
 }
 
 // ── Collapsible section header ────────────────────────────────────────────────
@@ -53,7 +54,7 @@ function SectionHeader({
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-export function HomePage({ sessionId, onLogout, isAdmin, userEmail = '' }: HomePageProps) {
+export function HomePage({ sessionId, onLogout, isAdmin, userEmail = '', username: _username = '' }: HomePageProps) {
   const navigate = useNavigate()
 
   const [courses, setCourses] = useState<Course[]>([])
@@ -131,6 +132,14 @@ export function HomePage({ sessionId, onLogout, isAdmin, userEmail = '' }: HomeP
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">My Learning</h1>
         <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={() => navigate('/leaderboard')} data-page-transition>
+            🏆
+          </Button>
+          {isAdmin && (
+            <Button variant="ghost" size="sm" onClick={() => navigate('/admin/iam')} data-page-transition>
+              IAM
+            </Button>
+          )}
           {isAdmin && (
             <Button variant="ghost" size="sm" onClick={() => navigate('/admin/usage')} data-page-transition>
               Usage

@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS users (
     id             TEXT PRIMARY KEY,
     email          TEXT UNIQUE,
     display_name   TEXT,
+    username       TEXT UNIQUE,
     password_hash  TEXT,
     email_verified INTEGER NOT NULL DEFAULT 0,
     is_admin       INTEGER NOT NULL DEFAULT 0,
@@ -379,3 +380,30 @@ CREATE TABLE IF NOT EXISTS usage_hours (
                  stt_model, stt_language, tts_voice)
 );
 CREATE INDEX IF NOT EXISTS usage_hours_ts ON usage_hours(hour_ts);
+
+-- ── Gamification ──────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS user_points (
+    user_id             TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    total_points        INTEGER NOT NULL DEFAULT 0,
+    lessons_completed   INTEGER NOT NULL DEFAULT 0,
+    sections_advanced   INTEGER NOT NULL DEFAULT 0,
+    current_streak      INTEGER NOT NULL DEFAULT 0,
+    longest_streak      INTEGER NOT NULL DEFAULT 0,
+    last_lesson_date    TEXT,
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS point_events (
+    id            TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    enrollment_id TEXT REFERENCES lesson_enrollments(id) ON DELETE SET NULL,
+    event_type    TEXT NOT NULL,
+    points        INTEGER NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_point_events_user ON point_events(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_point_events_enrollment ON point_events(enrollment_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_point_events_lesson_complete
+    ON point_events(enrollment_id, event_type)
+    WHERE event_type = 'lesson_complete';

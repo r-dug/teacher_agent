@@ -28,7 +28,7 @@ from .config import settings
 configure_logging(storage_dir=settings.STORAGE_DIR)
 log = logging.getLogger(__name__)
 from .db import connection as db, models
-from .routers import courses, internal, lessons, ws_session, usage
+from .routers import courses, iam, internal, leaderboard, lessons, ws_session, usage
 from .routers.agents import personas
 from .routers.voice import voices
 
@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
     await db.init(settings.DB_PATH)
     conn = await db.get().__anext__()
     await models.seed_personas(conn)
-    await models.seed_admin_users(conn)
+    await models.seed_admin_users(conn, settings.ADMIN_EMAILS)
 
     # Initialise usage tracker with its own sync SQLite connection
     app_state.token_tracker.init(settings.DB_PATH)
@@ -193,6 +193,8 @@ app.add_middleware(
 app.include_router(internal.router)
 app.include_router(courses.router)
 app.include_router(lessons.router)
+app.include_router(iam.router)
+app.include_router(leaderboard.router)
 app.include_router(personas.router)
 app.include_router(voices.router)
 app.include_router(ws_session.router)

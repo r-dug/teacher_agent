@@ -7,6 +7,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 from ..http_client import get as get_http
 from ..rate_limiter import limiter
 from ..session_store import store
+from .admin_guard import require_admin_session
 
 router = APIRouter(prefix="/lessons", tags=["lessons"])
 
@@ -68,9 +69,7 @@ async def decompose_pdf(
     x_session_id: str = Header(...),
 ):
     """Forward multipart PDF upload to backend. Auth via X-Upload-Token."""
-    entry = _require_session(x_session_id)
-    if not entry.is_admin:
-        return Response(content='{"detail":"Admin access required"}', status_code=403, media_type="application/json")
+    await require_admin_session(x_session_id)
     http = get_http()
     body = await request.body()
     resp = await http.post(

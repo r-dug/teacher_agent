@@ -10,6 +10,8 @@ from backend.db import models
 @pytest.mark.asyncio
 async def test_delete_course_without_cascade_keeps_lessons_as_standalone(client, mem_db):
     user = await models.create_user(mem_db, "delete-course-user@example.com", "pw")
+    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (user["id"],))
+    await mem_db.commit()
     course = await models.create_course(mem_db, user["id"], "Course A", "desc")
     lesson_id = await models.create_lesson(
         mem_db,
@@ -32,6 +34,8 @@ async def test_delete_course_without_cascade_keeps_lessons_as_standalone(client,
 @pytest.mark.asyncio
 async def test_delete_course_with_cascade_deletes_lessons(client, mem_db):
     user = await models.create_user(mem_db, "delete-course-cascade@example.com", "pw")
+    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (user["id"],))
+    await mem_db.commit()
     course = await models.create_course(mem_db, user["id"], "Course B", "desc")
     lesson_id = await models.create_lesson(
         mem_db,

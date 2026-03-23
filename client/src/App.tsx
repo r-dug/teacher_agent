@@ -11,6 +11,7 @@
  *  /courses/:courseId → CoursePage
  *  /teach/:id         → TeachPage
  *  /admin/usage       → UsageDashboardPage (admin only)
+ *  /admin/iam         → IamPage (admin only)
  *
  * Routing (unauthenticated):
  *  /auth/verify → EmailVerifyPage  (handles email verification links)
@@ -27,6 +28,12 @@ import { TeachPage } from './pages/TeachPage'
 const UsageDashboardPage = lazy(() =>
   import('./pages/UsageDashboardPage').then(m => ({ default: m.UsageDashboardPage }))
 )
+const IamPage = lazy(() =>
+  import('./pages/IamPage').then(m => ({ default: m.IamPage }))
+)
+const LeaderboardPage = lazy(() =>
+  import('./pages/LeaderboardPage').then(m => ({ default: m.LeaderboardPage }))
+)
 import { LoginPage } from './pages/LoginPage'
 import { RegisterPage } from './pages/RegisterPage'
 import { EmailPendingPage } from './pages/EmailPendingPage'
@@ -41,8 +48,10 @@ const SESSION_KEY = 'session_id'
 export default function App() {
   const [authState, setAuthState] = useState<'loading' | 'authenticated' | 'unauthenticated'>('loading')
   const [sessionId, setSessionId] = useState<string | null>(null)
+  const [userId, setUserId] = useState('')
   const [isAdmin, setIsAdmin] = useState(false)
   const [userEmail, setUserEmail] = useState('')
+  const [username, setUsername] = useState('')
   const [authPage, setAuthPage] = useState<AuthPage>('login')
   const [pendingEmail, setPendingEmail] = useState('')
 
@@ -60,8 +69,10 @@ export default function App() {
       })
       .then((data) => {
         setSessionId(stored)
+        setUserId(data.user_id || '')
         setIsAdmin(Boolean(data.is_admin))
         setUserEmail(data.email || '')
+        setUsername(data.username || '')
         setAuthState('authenticated')
       })
       .catch(() => {
@@ -77,7 +88,14 @@ export default function App() {
     // Re-fetch /me to get is_admin
     fetch('/api/auth/me', { headers: { 'X-Session-Id': sid } })
       .then(r => r.ok ? r.json() : null)
-      .then(data => { if (data) { setIsAdmin(Boolean(data.is_admin)); setUserEmail(data.email || '') } })
+      .then(data => {
+        if (data) {
+          setUserId(data.user_id || '')
+          setIsAdmin(Boolean(data.is_admin))
+          setUserEmail(data.email || '')
+          setUsername(data.username || '')
+        }
+      })
       .catch(() => {})
     setAuthState('authenticated')
   }
@@ -86,8 +104,10 @@ export default function App() {
     const sid = sessionId
     localStorage.removeItem(SESSION_KEY)
     setSessionId(null)
+    setUserId('')
     setIsAdmin(false)
     setUserEmail('')
+    setUsername('')
     setAuthState('unauthenticated')
     setAuthPage('login')
     if (sid) {
@@ -110,12 +130,22 @@ export default function App() {
       ) : authState === 'authenticated' && sessionId ? (
         <BrowserRouter>
           <Routes>
-            <Route path="/" element={<HomePage sessionId={sessionId} onLogout={onLogout} isAdmin={isAdmin} userEmail={userEmail} />} />
+            <Route path="/" element={<HomePage sessionId={sessionId} onLogout={onLogout} isAdmin={isAdmin} userEmail={userEmail} username={username} />} />
+            <Route path="/leaderboard" element={
+              <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
+                <LeaderboardPage sessionId={sessionId} username={username} />
+              </Suspense>
+            } />
             <Route path="/courses/:courseId" element={<CoursePage sessionId={sessionId} isAdmin={isAdmin} onLogout={onLogout} userEmail={userEmail} />} />
             <Route path="/teach/:lessonId" element={<TeachPage sessionId={sessionId} isAdmin={isAdmin} onLogout={onLogout} userEmail={userEmail} />} />
             <Route path="/admin/usage" element={
               <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
                 <UsageDashboardPage sessionId={sessionId} isAdmin={isAdmin} />
+              </Suspense>
+            } />
+            <Route path="/admin/iam" element={
+              <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
+                <IamPage sessionId={sessionId} isAdmin={isAdmin} currentUserId={userId} />
               </Suspense>
             } />
             <Route path="*" element={<Navigate to="/" replace />} />

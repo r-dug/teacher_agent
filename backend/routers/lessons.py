@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Uploa
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from ..authz import require_admin
 from ..config import settings
 from ..db import connection as db, models
 
@@ -224,6 +225,7 @@ async def get_lesson(lesson_id: str, user_id: str, conn: Conn):
 @router.patch("/{lesson_id}", response_model=LessonResponse)
 async def update_lesson(lesson_id: str, user_id: str, body: LessonUpdate, conn: Conn):
     lesson = _lesson_or_404(await models.get_lesson(conn, lesson_id))
+    await require_admin(conn, user_id)
     _check_creator(lesson, user_id)
     updates: dict = {}
     if body.title is not None:
@@ -250,6 +252,7 @@ async def update_lesson(lesson_id: str, user_id: str, body: LessonUpdate, conn: 
 @router.delete("/{lesson_id}", status_code=204)
 async def delete_lesson(lesson_id: str, user_id: str, conn: Conn):
     lesson = _lesson_or_404(await models.get_lesson(conn, lesson_id))
+    await require_admin(conn, user_id)
     _check_creator(lesson, user_id)
     # Remove PDF file if present
     if lesson.get("pdf_path"):
@@ -314,8 +317,7 @@ async def decompose_pdf(
         raise HTTPException(status_code=401, detail="Invalid or expired upload token")
 
     user_id: str = session["user_id"]
-    if not await models.get_user_is_admin(conn, user_id):
-        raise HTTPException(status_code=403, detail="Admin access required")
+    await require_admin(conn, user_id)
 
     # Derive title: prefer user-supplied name, fall back to filename stem
     title = (lesson_name.strip() if lesson_name and lesson_name.strip()

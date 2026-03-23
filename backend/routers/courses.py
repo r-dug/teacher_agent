@@ -12,6 +12,7 @@ import aiosqlite
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from ..authz import require_admin
 from ..config import settings
 from ..db import connection as db, models
 from ..services.documents.course_publish import (
@@ -190,11 +191,6 @@ def _check_read_access(course: dict, user_id: str) -> None:
         raise HTTPException(status_code=403, detail="Access denied")
 
 
-async def _require_admin(conn: aiosqlite.Connection, user_id: str) -> None:
-    if not await models.get_user_is_admin(conn, user_id):
-        raise HTTPException(status_code=403, detail="Admin access required")
-
-
 async def _source_or_404(conn: aiosqlite.Connection, course_id: str) -> dict:
     async with conn.execute(
         """SELECT course_id, creator_id, pdf_hash, pdf_path, page_count, toc_json
@@ -265,7 +261,7 @@ async def list_courses(user_id: str, conn: Conn):
 
 @router.post("", response_model=CourseResponse, status_code=201)
 async def create_course(user_id: str, body: CourseCreate, conn: Conn):
-    await _require_admin(conn, user_id)
+    await require_admin(conn, user_id)
     title = body.title.strip()
     if not title:
         raise HTTPException(status_code=422, detail="Title is required")
@@ -283,6 +279,7 @@ async def get_course(course_id: str, user_id: str, conn: Conn):
 @router.patch("/{course_id}", response_model=CourseResponse)
 async def update_course(course_id: str, user_id: str, body: CourseUpdate, conn: Conn):
     course = _course_or_404(await models.get_course(conn, course_id))
+    await require_admin(conn, user_id)
     _check_ownership(course, user_id)
     updates: dict = {}
     if body.title is not None:
@@ -303,6 +300,7 @@ async def delete_course(
     cascade_lessons: bool = False,
 ):
     course = _course_or_404(await models.get_course(conn, course_id))
+    await require_admin(conn, user_id)
     _check_ownership(course, user_id)
     if cascade_lessons:
         await conn.execute(
@@ -315,7 +313,7 @@ async def delete_course(
 
 @router.post("/{course_id}/publish", response_model=CoursePublishResponse)
 async def publish_course(course_id: str, user_id: str, conn: Conn):
-    await _require_admin(conn, user_id)
+    await require_admin(conn, user_id)
 
     course = _course_or_404(await models.get_course(conn, course_id))
     _check_ownership(course, user_id)
@@ -341,7 +339,7 @@ async def create_textbook_draft(
     description: str | None = Form(None),
     conn: Conn = None,
 ):
-    await _require_admin(conn, user_id)
+    await require_admin(conn, user_id)
 
     course_title = (title or "").strip() or Path(file.filename or "Untitled Textbook").stem
     if not course_title:
@@ -460,7 +458,7 @@ async def create_textbook_draft(
 
 @router.get("/{course_id}/chapters", response_model=ChapterDraftListResponse)
 async def get_course_chapters(course_id: str, user_id: str, conn: Conn):
-    await _require_admin(conn, user_id)
+    await require_admin(conn, user_id)
     course = _course_or_404(await models.get_course(conn, course_id))
     _check_ownership(course, user_id)
     source = await _source_or_404(conn, course_id)
@@ -490,7 +488,7 @@ async def update_course_chapters(
     body: ChapterEditRequest,
     conn: Conn,
 ):
-    await _require_admin(conn, user_id)
+    await require_admin(conn, user_id)
     course = _course_or_404(await models.get_course(conn, course_id))
     _check_ownership(course, user_id)
     source = await _source_or_404(conn, course_id)
@@ -552,7 +550,7 @@ async def move_chapter(
     conn: Conn,
 ):
     """Move a chapter up or down within the course's chapter list."""
-    await _require_admin(conn, user_id)
+    await require_admin(conn, user_id)
     course = _course_or_404(await models.get_course(conn, course_id))
     _check_ownership(course, user_id)
     source = await _source_or_404(conn, course_id)
@@ -619,7 +617,7 @@ async def advisor_start(
     body: AdvisorStartRequest,
     conn: Conn,
 ):
-    await _require_admin(conn, user_id)
+    await require_admin(conn, user_id)
     course = _course_or_404(await models.get_course(conn, course_id))
     _check_ownership(course, user_id)
     _ = await _source_or_404(conn, course_id)
@@ -634,7 +632,7 @@ async def advisor_message(
     body: AdvisorMessageRequest,
     conn: Conn,
 ):
-    await _require_admin(conn, user_id)
+    await require_admin(conn, user_id)
     course = _course_or_404(await models.get_course(conn, course_id))
     _check_ownership(course, user_id)
     _ = await _source_or_404(conn, course_id)
@@ -647,7 +645,7 @@ async def advisor_message(
 
 @router.post("/{course_id}/advisor/finalize", response_model=AdvisorResponse)
 async def advisor_finalize(course_id: str, user_id: str, conn: Conn):
-    await _require_admin(conn, user_id)
+    await require_admin(conn, user_id)
     course = _course_or_404(await models.get_course(conn, course_id))
     _check_ownership(course, user_id)
     _ = await _source_or_404(conn, course_id)
@@ -662,7 +660,7 @@ async def start_course_decompose(
     body: DecomposeStartRequest,
     conn: Conn,
 ):
-    await _require_admin(conn, user_id)
+    await require_admin(conn, user_id)
     course = _course_or_404(await models.get_course(conn, course_id))
     _check_ownership(course, user_id)
     _ = await _source_or_404(conn, course_id)
@@ -696,7 +694,7 @@ async def course_decompose_status(
     conn: Conn,
     job_id: str | None = None,
 ):
-    await _require_admin(conn, user_id)
+    await require_admin(conn, user_id)
     course = _course_or_404(await models.get_course(conn, course_id))
     _check_ownership(course, user_id)
     status = await get_course_decompose_status(conn, course_id=course_id, job_id=job_id)

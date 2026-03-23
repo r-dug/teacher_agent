@@ -79,6 +79,21 @@ def _validate_password(password: str) -> None:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
 
 
+_USERNAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{2,29}$")
+
+
+def _validate_username(username: str) -> str:
+    u = username.strip()
+    if not u:
+        return u  # empty = auto-generate from email on backend
+    if not _USERNAME_RE.match(u):
+        raise HTTPException(
+            status_code=422,
+            detail="Username must be 3–30 characters, start with a letter, and contain only letters, numbers, or underscores",
+        )
+    return u
+
+
 async def _create_backend_session(user_id: str) -> str:
     http = get_http()
     resp = await http.post("/internal/sessions", json={"user_id": user_id})
@@ -100,6 +115,7 @@ async def _send_verification(user_id: str, email: str) -> None:
 class RegisterRequest(BaseModel):
     email: str
     password: str
+    username: str = ""
 
 
 class LoginRequest(BaseModel):
@@ -136,6 +152,7 @@ class SessionResponse(BaseModel):
 class MeResponse(BaseModel):
     user_id: str
     email: str
+    username: str = ""
     is_admin: bool = False
 
 
@@ -148,6 +165,7 @@ async def register(request: Request, body: RegisterRequest):
         raise HTTPException(status_code=429, detail="Too many registration attempts. Please try again later.")
     email = _validate_email(body.email)
     _validate_password(body.password)
+    username = _validate_username(body.username)
 
     pw_hash = await asyncio.to_thread(
         bcrypt.hashpw, body.password.encode(), bcrypt.gensalt()
@@ -156,7 +174,7 @@ async def register(request: Request, body: RegisterRequest):
     http = get_http()
     resp = await http.post(
         "/internal/auth/register",
-        json={"email": email, "password_hash": pw_hash.decode()},
+        json={"email": email, "password_hash": pw_hash.decode(), "username": username},
     )
 
     if resp.status_code == 409:
@@ -226,7 +244,7 @@ async def login(body: LoginRequest):
 
     session_id = await _create_backend_session(user["user_id"])
     store.add(session_id, user_id=user["user_id"], email=email,
-              is_admin=bool(user.get("is_admin", 0)))
+              username=user.get("username", ""), is_admin=bool(user.get("is_admin", 0)))
     return SessionResponse(session_id=session_id)
 
 
@@ -257,9 +275,10 @@ async def me(x_session_id: str = Header(...)):
             x_session_id,
             user_id=user["user_id"],
             email=user["email"],
+            username=user.get("username", ""),
             is_admin=bool(user.get("is_admin", False)),
         )
-    return MeResponse(user_id=entry.user_id, email=entry.email, is_admin=entry.is_admin)
+    return MeResponse(user_id=entry.user_id, email=entry.email, username=entry.username, is_admin=entry.is_admin)
 
 
 @router.post("/forgot-password", status_code=200)

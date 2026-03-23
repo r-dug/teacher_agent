@@ -6,6 +6,17 @@ import os
 from pathlib import Path
 
 
+def _parse_admin_emails(raw: str | None) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    emails: list[str] = []
+    for part in raw.split(","):
+        email = part.strip().lower()
+        if email and email not in emails:
+            emails.append(email)
+    return tuple(emails)
+
+
 class Settings:
     # Server
     HOST: str = os.getenv("BACKEND_HOST", "127.0.0.1")
@@ -88,6 +99,9 @@ class Settings:
     # Shared secret for BFF→backend calls.  When set, all inbound requests must
     # carry X-Internal-Token: <secret>.  Unset in dev (no check performed).
     BACKEND_SHARED_SECRET: str | None = os.getenv("BACKEND_SHARED_SECRET")
+    # Optional comma-separated bootstrap list. Startup grants is_admin=1
+    # for matching users that already exist in the DB (grant-only).
+    ADMIN_EMAILS: tuple[str, ...] = _parse_admin_emails(os.getenv("ADMIN_EMAILS"))
 
     def effective_tts_provider(self) -> str:
         from .services.voice.tts import select_tts_provider

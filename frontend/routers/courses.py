@@ -7,7 +7,7 @@ import json
 from fastapi import APIRouter, Header, Request, Response
 
 from ..http_client import get as get_http
-from ..session_store import store
+from .admin_guard import require_admin_session
 from .lessons import _require_session, _get_user_id
 
 router = APIRouter(prefix="/courses", tags=["courses"])
@@ -64,10 +64,8 @@ async def list_courses(x_session_id: str = Header(...)):
 
 @router.post("")
 async def create_course(request: Request, x_session_id: str = Header(...)):
-    entry = _require_session(x_session_id)
-    if not entry.is_admin:
-        return Response(content='{"detail":"Admin access required"}', status_code=403, media_type="application/json")
-    user_id = await _get_user_id(x_session_id, entry)
+    entry = await require_admin_session(x_session_id)
+    user_id = entry.user_id
     body = await request.body()
     return await _proxy_post(
         "/courses",
@@ -113,10 +111,8 @@ async def delete_course(
 
 @router.post("/{course_id}/publish")
 async def publish_course(course_id: str, request: Request, x_session_id: str = Header(...)):
-    entry = _require_session(x_session_id)
-    if not entry.is_admin:
-        return Response(content='{"detail":"Admin access required"}', status_code=403, media_type="application/json")
-    user_id = await _get_user_id(x_session_id, entry)
+    entry = await require_admin_session(x_session_id)
+    user_id = entry.user_id
     body = await request.body()
     return await _proxy_post(
         f"/courses/{course_id}/publish",
@@ -128,10 +124,8 @@ async def publish_course(course_id: str, request: Request, x_session_id: str = H
 
 @router.post("/textbook/draft")
 async def create_textbook_draft(request: Request, x_session_id: str = Header(...)):
-    entry = _require_session(x_session_id)
-    if not entry.is_admin:
-        return Response(content='{"detail":"Admin access required"}', status_code=403, media_type="application/json")
-    user_id = await _get_user_id(x_session_id, entry)
+    entry = await require_admin_session(x_session_id)
+    user_id = entry.user_id
     body = await request.body()
     return await _proxy_post(
         "/courses/textbook/draft",
@@ -150,10 +144,8 @@ async def get_course_chapters(course_id: str, x_session_id: str = Header(...)):
 
 @router.patch("/{course_id}/chapters")
 async def update_course_chapters(course_id: str, request: Request, x_session_id: str = Header(...)):
-    entry = _require_session(x_session_id)
-    if not entry.is_admin:
-        return Response(content='{"detail":"Admin access required"}', status_code=403, media_type="application/json")
-    user_id = await _get_user_id(x_session_id, entry)
+    entry = await require_admin_session(x_session_id)
+    user_id = entry.user_id
     body = await request.body()
     return await _proxy_patch(
         f"/courses/{course_id}/chapters",
@@ -165,10 +157,8 @@ async def update_course_chapters(course_id: str, request: Request, x_session_id:
 
 @router.post("/{course_id}/advisor/start")
 async def advisor_start(course_id: str, request: Request, x_session_id: str = Header(...)):
-    entry = _require_session(x_session_id)
-    if not entry.is_admin:
-        return Response(content='{"detail":"Admin access required"}', status_code=403, media_type="application/json")
-    user_id = await _get_user_id(x_session_id, entry)
+    entry = await require_admin_session(x_session_id)
+    user_id = entry.user_id
     body = await request.body()
     return await _proxy_post(
         f"/courses/{course_id}/advisor/start",
@@ -180,10 +170,8 @@ async def advisor_start(course_id: str, request: Request, x_session_id: str = He
 
 @router.post("/{course_id}/advisor/message")
 async def advisor_message(course_id: str, request: Request, x_session_id: str = Header(...)):
-    entry = _require_session(x_session_id)
-    if not entry.is_admin:
-        return Response(content='{"detail":"Admin access required"}', status_code=403, media_type="application/json")
-    user_id = await _get_user_id(x_session_id, entry)
+    entry = await require_admin_session(x_session_id)
+    user_id = entry.user_id
     body = await request.body()
     return await _proxy_post(
         f"/courses/{course_id}/advisor/message",
@@ -195,10 +183,8 @@ async def advisor_message(course_id: str, request: Request, x_session_id: str = 
 
 @router.post("/{course_id}/advisor/finalize")
 async def advisor_finalize(course_id: str, request: Request, x_session_id: str = Header(...)):
-    entry = _require_session(x_session_id)
-    if not entry.is_admin:
-        return Response(content='{"detail":"Admin access required"}', status_code=403, media_type="application/json")
-    user_id = await _get_user_id(x_session_id, entry)
+    entry = await require_admin_session(x_session_id)
+    user_id = entry.user_id
     body = await request.body()
     return await _proxy_post(
         f"/courses/{course_id}/advisor/finalize",
@@ -210,10 +196,8 @@ async def advisor_finalize(course_id: str, request: Request, x_session_id: str =
 
 @router.post("/{course_id}/decompose/start")
 async def start_decompose(course_id: str, request: Request, x_session_id: str = Header(...)):
-    entry = _require_session(x_session_id)
-    if not entry.is_admin:
-        return Response(content='{"detail":"Admin access required"}', status_code=403, media_type="application/json")
-    user_id = await _get_user_id(x_session_id, entry)
+    entry = await require_admin_session(x_session_id)
+    user_id = entry.user_id
     raw = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     body = dict(raw or {})
     body["notify_session_id"] = x_session_id

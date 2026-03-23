@@ -128,6 +128,16 @@ export interface Lesson {
   updated_at: string
 }
 
+export interface IamUser {
+  id: string
+  email: string | null
+  display_name: string | null
+  email_verified: boolean
+  is_admin: boolean
+  bootstrap_managed: boolean
+  created_at: string
+}
+
 export interface Persona {
   id: string
   name: string
@@ -139,6 +149,33 @@ export interface Voice {
   id: string
   lang_code: string
   is_default: boolean
+}
+
+export interface LeaderboardEntry {
+  rank: number
+  username: string
+  total_points: number
+  lessons_completed: number
+  sections_advanced: number
+  current_streak: number
+  longest_streak: number
+  is_self: boolean
+}
+
+export interface LeaderboardResponse {
+  entries: LeaderboardEntry[]
+  self_rank: number | null
+  self_points: number | null
+}
+
+export interface UserStats {
+  username: string
+  total_points: number
+  lessons_completed: number
+  sections_advanced: number
+  current_streak: number
+  longest_streak: number
+  rank: number | null
 }
 
 export interface SttLanguage {

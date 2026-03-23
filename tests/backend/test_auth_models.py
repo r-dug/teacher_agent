@@ -119,3 +119,21 @@ async def test_create_verification_token_replaces_old(mem_db):
     # New token should work
     new = await models.consume_verification_token(mem_db, "new-token")
     assert new == user["id"]
+
+
+@pytest.mark.asyncio
+async def test_seed_admin_users_grant_only_and_normalized(mem_db):
+    target = await models.create_user(mem_db, "TargetAdmin@example.com", "pw")
+    existing = await models.create_user(mem_db, "existing-admin@example.com", "pw")
+    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (existing["id"],))
+    await mem_db.commit()
+
+    await models.seed_admin_users(mem_db, admin_emails={"  targetadmin@EXAMPLE.com  "})
+
+    target_user = await models.get_user_by_id(mem_db, target["id"])
+    existing_user = await models.get_user_by_id(mem_db, existing["id"])
+    assert target_user is not None
+    assert existing_user is not None
+    assert target_user["is_admin"] == 1
+    # Grant-only semantics: do not revoke admins not in ADMIN_EMAILS.
+    assert existing_user["is_admin"] == 1

@@ -253,6 +253,46 @@ async def _run_migrations(conn: aiosqlite.Connection) -> None:
         """CREATE INDEX IF NOT EXISTS idx_enrollment_assets_enrollment
            ON enrollment_assets(enrollment_id, section_idx)"""
     )
+
+    # ── gamification (v4) ──────────────────────────────────────────────────────
+    async with conn.execute("PRAGMA table_info(users)") as cur:
+        user_cols = {row[1] async for row in cur}
+    if "username" not in user_cols:
+        await conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
+
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_points (
+               user_id             TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+               total_points        INTEGER NOT NULL DEFAULT 0,
+               lessons_completed   INTEGER NOT NULL DEFAULT 0,
+               sections_advanced   INTEGER NOT NULL DEFAULT 0,
+               current_streak      INTEGER NOT NULL DEFAULT 0,
+               longest_streak      INTEGER NOT NULL DEFAULT 0,
+               last_lesson_date    TEXT,
+               updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+           )"""
+    )
+    await conn.execute(
+        """CREATE TABLE IF NOT EXISTS point_events (
+               id            TEXT PRIMARY KEY,
+               user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+               enrollment_id TEXT REFERENCES lesson_enrollments(id) ON DELETE SET NULL,
+               event_type    TEXT NOT NULL,
+               points        INTEGER NOT NULL,
+               created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+           )"""
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_point_events_user ON point_events(user_id, created_at)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_point_events_enrollment ON point_events(enrollment_id)"
+    )
+    await conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_point_events_lesson_complete
+           ON point_events(enrollment_id, event_type)
+           WHERE event_type = 'lesson_complete'"""
+    )
     await conn.commit()
 
 

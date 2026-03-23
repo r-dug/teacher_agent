@@ -6,6 +6,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 
 from ..http_client import get as get_http
 from ..session_store import store
+from .admin_guard import require_admin_session
 
 router = APIRouter(tags=["usage"])
 
@@ -14,14 +15,6 @@ def _require_session(x_session_id: str) -> None:
     entry = store.get(x_session_id)
     if entry is None:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
-
-
-def _require_admin(x_session_id: str) -> None:
-    entry = store.get(x_session_id)
-    if entry is None:
-        raise HTTPException(status_code=401, detail="Invalid or expired session")
-    if not entry.is_admin:
-        raise HTTPException(status_code=403, detail="Admin access required")
 
 
 # ── Session-scoped ─────────────────────────────────────────────────────────────
@@ -48,35 +41,39 @@ async def reset_usage(x_session_id: str = Header(...)):
 
 @router.get("/admin/usage/live")
 async def usage_live(x_session_id: str = Header(...)):
-    _require_admin(x_session_id)
+    entry = await require_admin_session(x_session_id)
     http = get_http()
-    resp = await http.get("/admin/usage/live")
+    resp = await http.get("/admin/usage/live", params={"actor_user_id": entry.user_id})
     return Response(content=resp.content, status_code=resp.status_code,
                     media_type="application/json")
 
 
 @router.get("/admin/usage/series")
 async def usage_series(request: Request, x_session_id: str = Header(...)):
-    _require_admin(x_session_id)
+    entry = await require_admin_session(x_session_id)
     http = get_http()
-    resp = await http.get("/admin/usage/series", params=dict(request.query_params))
+    params = dict(request.query_params)
+    params["actor_user_id"] = entry.user_id
+    resp = await http.get("/admin/usage/series", params=params)
     return Response(content=resp.content, status_code=resp.status_code,
                     media_type="application/json")
 
 
 @router.get("/admin/usage/totals")
 async def usage_totals(request: Request, x_session_id: str = Header(...)):
-    _require_admin(x_session_id)
+    entry = await require_admin_session(x_session_id)
     http = get_http()
-    resp = await http.get("/admin/usage/totals", params=dict(request.query_params))
+    params = dict(request.query_params)
+    params["actor_user_id"] = entry.user_id
+    resp = await http.get("/admin/usage/totals", params=params)
     return Response(content=resp.content, status_code=resp.status_code,
                     media_type="application/json")
 
 
 @router.get("/admin/usage/users")
 async def usage_users(x_session_id: str = Header(...)):
-    _require_admin(x_session_id)
+    entry = await require_admin_session(x_session_id)
     http = get_http()
-    resp = await http.get("/admin/usage/users")
+    resp = await http.get("/admin/usage/users", params={"actor_user_id": entry.user_id})
     return Response(content=resp.content, status_code=resp.status_code,
                     media_type="application/json")
