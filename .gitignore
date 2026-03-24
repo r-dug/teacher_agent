@@ -42,4 +42,4 @@ storage_backup/*.sqlite3-*
 storage_backup/**
 
 scripts/
-scripts/*
+scripts/**

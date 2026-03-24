@@ -111,7 +111,7 @@ async def auth_register(body: AuthRegisterRequest, conn: Conn):
         raise HTTPException(status_code=409, detail=status)
     user = await models.create_user(conn, body.email, body.password_hash, body.username)
     return AuthUserResponse(
-        user_id=user["id"], email=user["email"], username=user.get("username", ""), email_verified=False
+        user_id=user["id"], email=user["email"], username=user.get("username") or "", email_verified=False
     )
 
 
@@ -127,7 +127,7 @@ async def auth_get_user_by_session(session_id: str, conn: Conn):
     return AuthUserResponse(
         user_id=user["id"],
         email=user["email"],
-        username=user.get("username", ""),
+        username=user.get("username") or "",
         email_verified=bool(user["email_verified"]),
         is_admin=bool(user["is_admin"]),
     )
@@ -142,7 +142,7 @@ async def auth_get_user(email: str, conn: Conn):
     return AuthUserResponse(
         user_id=user["id"],
         email=user["email"],
-        username=user.get("username", ""),
+        username=user.get("username") or "",
         email_verified=bool(user["email_verified"]),
         is_admin=bool(user["is_admin"]),
         password_hash=user["password_hash"],
@@ -182,7 +182,7 @@ async def auth_reset_password(body: PasswordResetRequest, conn: Conn):
         raise HTTPException(status_code=404, detail="User not found")
     return AuthUserResponse(
         user_id=user["id"], email=user["email"],
-        username=user.get("username", ""),
+        username=user.get("username") or "",
         email_verified=bool(user["email_verified"]),
         is_admin=bool(user["is_admin"]),
     )
@@ -226,7 +226,7 @@ async def auth_verify_email(body: VerifyTokenRequest, conn: Conn):
         raise HTTPException(status_code=404, detail="User not found")
     return AuthUserResponse(
         user_id=user["id"], email=user["email"],
-        username=user.get("username", ""),
+        username=user.get("username") or "",
         email_verified=True,
         is_admin=bool(user["is_admin"]),
     )
