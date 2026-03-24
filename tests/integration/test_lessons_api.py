@@ -15,8 +15,7 @@ from backend.db import connection as db, models
 
 async def _create_admin(mem_db, email: str = "lessons-admin@example.com") -> dict:
     admin = await models.create_user(mem_db, email, "pw")
-    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (admin["id"],))
-    await mem_db.commit()
+    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = $1", admin["id"])
     return admin
 
 

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated
 
-import aiosqlite
+import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -14,7 +15,7 @@ from ..db import connection as db, models
 
 router = APIRouter(prefix="/admin/iam", tags=["iam"])
 
-Conn = Annotated[aiosqlite.Connection, Depends(db.get)]
+Conn = Annotated[asyncpg.Connection, Depends(db.get)]
 
 ERR_CANNOT_DEMOTE_SELF = "cannot_demote_self"
 ERR_CANNOT_DEMOTE_LAST_ADMIN = "cannot_demote_last_admin"
@@ -30,7 +31,7 @@ class IamUserResponse(BaseModel):
     email_verified: bool
     is_admin: bool
     bootstrap_managed: bool
-    created_at: str
+    created_at: datetime
 
 
 class IamUsersListResponse(BaseModel):

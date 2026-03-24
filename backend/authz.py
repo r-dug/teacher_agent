@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import aiosqlite
+import asyncpg
 from fastapi import HTTPException
 
 from .db import models
 
 
-async def require_admin(conn: aiosqlite.Connection, user_id: str) -> None:
+async def require_admin(conn: asyncpg.Connection, user_id: str) -> None:
     if not await models.get_user_is_admin(conn, user_id):
         raise HTTPException(status_code=403, detail="Admin access required")
 
@@ -19,7 +19,7 @@ def require_owner(owner_id: str, user_id: str) -> None:
 
 
 async def require_admin_owner(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     owner_id: str,
     user_id: str,
 ) -> None:

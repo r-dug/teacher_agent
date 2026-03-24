@@ -33,10 +33,9 @@ def _silent_audio_b64(n_samples: int = 16000) -> str:
 def _setup_user(loop, conn, user_id: str) -> None:
     async def _go():
         await conn.execute(
-            "INSERT OR IGNORE INTO users (id, display_name) VALUES (?, ?)",
-            (user_id, f"User {user_id[:4]}"),
+            "INSERT INTO users (id, display_name) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            user_id, f"User {user_id[:4]}",
         )
-        await conn.commit()
     loop.run_until_complete(_go())
 
 

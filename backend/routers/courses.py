@@ -8,7 +8,9 @@ import shutil
 from pathlib import Path
 from typing import Annotated
 
-import aiosqlite
+from datetime import datetime
+
+import asyncpg
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
@@ -37,7 +39,7 @@ from ..services.documents.textbook_authoring import (
 
 router = APIRouter(prefix="/courses", tags=["courses"])
 
-Conn = Annotated[aiosqlite.Connection, Depends(db.get)]
+Conn = Annotated[asyncpg.Connection, Depends(db.get)]
 
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
@@ -48,8 +50,8 @@ class CourseResponse(BaseModel):
     title: str
     description: str | None
     visibility: str
-    created_at: str
-    updated_at: str
+    created_at: datetime
+    updated_at: datetime
 
 
 class CourseCreate(BaseModel):
@@ -161,10 +163,10 @@ class DecomposeJobResponse(BaseModel):
     progress_pct: int = 0
     notify_session_id: str | None = None
     error: str | None = None
-    created_at: str
-    started_at: str | None = None
-    finished_at: str | None = None
-    updated_at: str
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    updated_at: datetime
 
 
 class DecomposeStatusResponse(BaseModel):
@@ -191,58 +193,54 @@ def _check_read_access(course: dict, user_id: str) -> None:
         raise HTTPException(status_code=403, detail="Access denied")
 
 
-async def _source_or_404(conn: aiosqlite.Connection, course_id: str) -> dict:
-    async with conn.execute(
+async def _source_or_404(conn: asyncpg.Connection, course_id: str) -> dict:
+    row = await conn.fetchrow(
         """SELECT course_id, creator_id, pdf_hash, pdf_path, page_count, toc_json
            FROM course_source_files
-           WHERE course_id = ?""",
-        (course_id,),
-    ) as cur:
-        row = await cur.fetchone()
+           WHERE course_id = $1""",
+        course_id,
+    )
     if row is None:
         raise HTTPException(status_code=404, detail="No textbook source found for this course")
     return dict(row)
 
 
 async def _load_chapter_rows(
-    conn: aiosqlite.Connection, course_id: str
+    conn: asyncpg.Connection, course_id: str
 ) -> list[dict]:
-    async with conn.execute(
+    rows = await conn.fetch(
         """SELECT id, idx, title, page_start, page_end, included
            FROM course_chapter_drafts
-           WHERE course_id = ?
+           WHERE course_id = $1
            ORDER BY idx""",
-        (course_id,),
-    ) as cur:
-        rows = await cur.fetchall()
+        course_id,
+    )
     return [dict(r) for r in rows]
 
 
 async def _replace_chapters(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     *,
     course_id: str,
     chapters: list[dict],
 ) -> None:
     await conn.execute(
-        "DELETE FROM course_chapter_drafts WHERE course_id = ?",
-        (course_id,),
+        "DELETE FROM course_chapter_drafts WHERE course_id = $1",
+        course_id,
     )
     for idx, chapter in enumerate(chapters):
         cid = chapter.get("id") or db.new_id()
         await conn.execute(
             """INSERT INTO course_chapter_drafts
                (id, course_id, idx, title, page_start, page_end, included, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))""",
-            (
-                cid,
-                course_id,
-                idx,
-                str(chapter["title"]),
-                int(chapter["page_start"]),
-                int(chapter["page_end"]),
-                int(bool(chapter.get("included", True))),
-            ),
+               VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())""",
+            cid,
+            course_id,
+            idx,
+            str(chapter["title"]),
+            int(chapter["page_start"]),
+            int(chapter["page_end"]),
+            int(bool(chapter.get("included", True))),
         )
 
 
@@ -304,10 +302,9 @@ async def delete_course(
     _check_ownership(course, user_id)
     if cascade_lessons:
         await conn.execute(
-            "DELETE FROM lessons WHERE course_id = ? AND creator_id = ?",
-            (course_id, user_id),
+            "DELETE FROM lessons WHERE course_id = $1 AND creator_id = $2",
+            course_id, user_id,
         )
-        await conn.commit()
     await models.delete_course(conn, course_id)
 
 
@@ -355,29 +352,26 @@ async def create_textbook_draft(
 
         pdf_hash = sha256_file(pdf_path)
         cache_hit = False
-        async with conn.execute(
-            "SELECT page_count, toc_json, chapters_json FROM textbook_toc_cache WHERE pdf_hash = ?",
-            (pdf_hash,),
-        ) as cur:
-            cache_row = await cur.fetchone()
+        cache_row = await conn.fetchrow(
+            "SELECT page_count, toc_json, chapters_json FROM textbook_toc_cache WHERE pdf_hash = $1",
+            pdf_hash,
+        )
 
         if cache_row is None:
             page_count, toc_entries, chapter_drafts = infer_chapter_drafts_from_pdf(pdf_path)
             await conn.execute(
                 """INSERT INTO textbook_toc_cache
                    (pdf_hash, page_count, toc_json, chapters_json, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
+                   VALUES ($1, $2, $3, $4, now(), now())
                    ON CONFLICT(pdf_hash) DO UPDATE SET
                      page_count = excluded.page_count,
                      toc_json = excluded.toc_json,
                      chapters_json = excluded.chapters_json,
-                     updated_at = datetime('now')""",
-                (
-                    pdf_hash,
-                    page_count,
-                    json.dumps(toc_entries),
-                    json.dumps(chapter_drafts),
-                ),
+                     updated_at = now()""",
+                pdf_hash,
+                page_count,
+                json.dumps(toc_entries),
+                json.dumps(chapter_drafts),
             )
         else:
             cache_hit = True
@@ -389,22 +383,20 @@ async def create_textbook_draft(
         await conn.execute(
             """INSERT INTO course_source_files
                (course_id, creator_id, pdf_hash, pdf_path, page_count, toc_json, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+               VALUES ($1, $2, $3, $4, $5, $6, now(), now())
                ON CONFLICT(course_id) DO UPDATE SET
                  creator_id = excluded.creator_id,
                  pdf_hash = excluded.pdf_hash,
                  pdf_path = excluded.pdf_path,
                  page_count = excluded.page_count,
                  toc_json = excluded.toc_json,
-                 updated_at = datetime('now')""",
-            (
-                course_id,
-                user_id,
-                pdf_hash,
-                rel_path,
-                page_count,
-                json.dumps(toc_entries),
-            ),
+                 updated_at = now()""",
+            course_id,
+            user_id,
+            pdf_hash,
+            rel_path,
+            page_count,
+            json.dumps(toc_entries),
         )
         await _replace_chapters(conn, course_id=course_id, chapters=chapter_drafts)
 
@@ -420,8 +412,6 @@ async def create_textbook_draft(
             )
             if llm_chapters:
                 await _replace_chapters(conn, course_id=course_id, chapters=llm_chapters)
-
-        await conn.commit()
     except HTTPException:
         await models.delete_course(conn, course_id)
         if pdf_path.exists():
@@ -516,7 +506,6 @@ async def update_course_chapters(
             }
         )
     await _replace_chapters(conn, course_id=course_id, chapters=drafted)
-    await conn.commit()
 
     rows = await _load_chapter_rows(conn, course_id)
     return ChapterDraftListResponse(
@@ -585,14 +574,13 @@ async def move_chapter(
     a_id, b_id = ids[pos], ids[swap_pos]
     a_idx, b_idx = rows[pos]["idx"], rows[swap_pos]["idx"]
     await conn.execute(
-        "UPDATE course_chapter_drafts SET idx = ?, updated_at = datetime('now') WHERE id = ?",
-        (b_idx, a_id),
+        "UPDATE course_chapter_drafts SET idx = $1, updated_at = now() WHERE id = $2",
+        b_idx, a_id,
     )
     await conn.execute(
-        "UPDATE course_chapter_drafts SET idx = ?, updated_at = datetime('now') WHERE id = ?",
-        (a_idx, b_id),
+        "UPDATE course_chapter_drafts SET idx = $1, updated_at = now() WHERE id = $2",
+        a_idx, b_id,
     )
-    await conn.commit()
 
     rows = await _load_chapter_rows(conn, course_id)
     return ChapterDraftListResponse(

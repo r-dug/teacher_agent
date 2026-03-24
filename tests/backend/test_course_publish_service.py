@@ -14,9 +14,8 @@ from backend.services.documents.course_publish import (
 @pytest.mark.asyncio
 async def test_publish_sets_visibility_on_decomposed_lessons_only(mem_db):
     admin = await models.create_user(mem_db, "admin@example.com", "pw")
-    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (admin["id"],))
+    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = $1", admin["id"])
     student = await models.create_user(mem_db, "student@example.com", "pw")
-    await mem_db.commit()
 
     course = await models.create_course(mem_db, admin["id"], "Starter JP", "desc")
     decomposed_id = await models.create_lesson(mem_db, admin["id"], "L1", course_id=course["id"])
@@ -59,9 +58,8 @@ async def test_publish_sets_visibility_on_decomposed_lessons_only(mem_db):
 @pytest.mark.asyncio
 async def test_publish_is_idempotent(mem_db):
     admin = await models.create_user(mem_db, "admin2@example.com", "pw")
-    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (admin["id"],))
+    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = $1", admin["id"])
     student = await models.create_user(mem_db, "student2@example.com", "pw")
-    await mem_db.commit()
 
     course = await models.create_course(mem_db, admin["id"], "Course A", "desc A")
     lesson_id = await models.create_lesson(mem_db, admin["id"], "Lesson A", course_id=course["id"])
@@ -93,8 +91,7 @@ async def test_publish_is_idempotent(mem_db):
 @pytest.mark.asyncio
 async def test_publish_requires_at_least_one_decomposed_lesson(mem_db):
     admin = await models.create_user(mem_db, "admin3@example.com", "pw")
-    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (admin["id"],))
-    await mem_db.commit()
+    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = $1", admin["id"])
 
     course = await models.create_course(mem_db, admin["id"], "Course Empty", "desc")
     _ = await models.create_lesson(mem_db, admin["id"], "Not ready", course_id=course["id"])

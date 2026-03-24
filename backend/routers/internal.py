@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-import aiosqlite
+import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -17,7 +17,7 @@ from ..db import connection as db, models
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 
-Conn = Annotated[aiosqlite.Connection, Depends(db.get)]
+Conn = Annotated[asyncpg.Connection, Depends(db.get)]
 
 
 class UploadTokenRequest(BaseModel):
@@ -38,7 +38,8 @@ async def create_upload_token(body: UploadTokenRequest, conn: Conn):
     session = await models.get_session(conn, body.session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    token = await models.create_upload_token(conn, body.session_id, body.ttl_seconds)
+    ttl = min(body.ttl_seconds, 600)
+    token = await models.create_upload_token(conn, body.session_id, ttl)
     return UploadTokenResponse(token=token)
 
 

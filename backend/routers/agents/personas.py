@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated
 
-import aiosqlite
+import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -12,7 +13,7 @@ from ...db import connection as db, models
 
 router = APIRouter(prefix="/personas", tags=["personas"])
 
-Conn = Annotated[aiosqlite.Connection, Depends(db.get)]
+Conn = Annotated[asyncpg.Connection, Depends(db.get)]
 
 
 _MAX_PERSONA_INSTRUCTIONS = 1_000
@@ -29,7 +30,7 @@ class PersonaResponse(BaseModel):
     name: str
     instructions: str
     user_id: str | None
-    created_at: str
+    created_at: datetime
 
 
 @router.get("", response_model=list[PersonaResponse])

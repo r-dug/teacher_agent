@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-import aiosqlite
+import asyncpg
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
@@ -17,7 +17,7 @@ from ..db import connection as db, models
 
 router = APIRouter(prefix="/leaderboard", tags=["leaderboard"])
 
-Conn = Annotated[aiosqlite.Connection, Depends(db.get)]
+Conn = Annotated[asyncpg.Connection, Depends(db.get)]
 
 
 class LeaderboardEntry(BaseModel):

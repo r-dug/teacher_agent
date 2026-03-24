@@ -33,7 +33,7 @@ def _build_textbook_pdf_bytes() -> bytes:
 
 async def _create_admin_textbook_course(mem_db) -> tuple[dict, str]:
     admin = await models.create_user(mem_db, "admin-phase2@example.com", "pw")
-    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (admin["id"],))
+    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = $1", admin["id"])
     course = await models.create_course(mem_db, admin["id"], "Phase 2 Course", "desc")
     course_id = str(course["id"])
 
@@ -46,23 +46,22 @@ async def _create_admin_textbook_course(mem_db) -> tuple[dict, str]:
 
     await mem_db.execute(
         """INSERT INTO course_source_files
-           (course_id, creator_id, pdf_hash, pdf_path, page_count, toc_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))""",
-        (course_id, admin["id"], pdf_hash, rel_pdf_path, 8, json.dumps([])),
+           (course_id, creator_id, pdf_hash, pdf_path, page_count, toc_json)
+           VALUES ($1, $2, $3, $4, $5, $6)""",
+        course_id, admin["id"], pdf_hash, rel_pdf_path, 8, json.dumps([]),
     )
     await mem_db.execute(
         """INSERT INTO course_chapter_drafts
-           (id, course_id, idx, title, page_start, page_end, included, created_at, updated_at)
-           VALUES (?, ?, 0, 'Unit 1', 1, 4, 1, datetime('now'), datetime('now'))""",
-        (db.new_id(), course_id),
+           (id, course_id, idx, title, page_start, page_end, included)
+           VALUES ($1, $2, 0, 'Unit 1', 1, 4, 1)""",
+        db.new_id(), course_id,
     )
     await mem_db.execute(
         """INSERT INTO course_chapter_drafts
-           (id, course_id, idx, title, page_start, page_end, included, created_at, updated_at)
-           VALUES (?, ?, 1, 'Unit 2', 5, 8, 1, datetime('now'), datetime('now'))""",
-        (db.new_id(), course_id),
+           (id, course_id, idx, title, page_start, page_end, included)
+           VALUES ($1, $2, 1, 'Unit 2', 5, 8, 1)""",
+        db.new_id(), course_id,
     )
-    await mem_db.commit()
     return admin, course_id
 
 

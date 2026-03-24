@@ -2,23 +2,23 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-import sqlite3
+import os
 
 from backend.usage_tracker import UsageTracker
 
+TEST_DATABASE_URL = os.getenv(
+    "TEST_DATABASE_URL", "postgresql://localhost/pdf_to_audio_test"
+)
 
-def test_record_tts_persists_cost_usd(tmp_path):
-    db_path = Path(tmp_path) / "usage.db"
 
-    schema_path = Path(__file__).resolve().parents[2] / "backend" / "db" / "schema.sql"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(schema_path.read_text())
-    conn.commit()
-    conn.close()
-
+def _make_tracker() -> UsageTracker:
     tracker = UsageTracker()
-    tracker.init(db_path)
+    tracker.init(TEST_DATABASE_URL)
+    return tracker
+
+
+def test_record_tts_persists_cost_usd():
+    tracker = _make_tracker()
     tracker.record_tts(
         tts_voice="alloy",
         tts_characters=42,
@@ -32,21 +32,13 @@ def test_record_tts_persists_cost_usd(tmp_path):
     tracker.close()
 
     assert rows, "Expected one usage_raw row."
-    assert rows[0]["event_type"] == "tts"
-    assert abs(rows[0]["cost_usd"] - 0.0123) < 1e-9
+    tts_rows = [r for r in rows if r["event_type"] == "tts"]
+    assert tts_rows, "Expected a tts row"
+    assert abs(tts_rows[-1]["cost_usd"] - 0.0123) < 1e-9
 
 
-def test_record_stt_persists_cost_usd(tmp_path):
-    db_path = Path(tmp_path) / "usage.db"
-
-    schema_path = Path(__file__).resolve().parents[2] / "backend" / "db" / "schema.sql"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(schema_path.read_text())
-    conn.commit()
-    conn.close()
-
-    tracker = UsageTracker()
-    tracker.init(db_path)
+def test_record_stt_persists_cost_usd():
+    tracker = _make_tracker()
     tracker.record_stt(
         stt_model="gpt-4o-mini-transcribe",
         stt_language="en",
@@ -60,21 +52,13 @@ def test_record_stt_persists_cost_usd(tmp_path):
     tracker.close()
 
     assert rows, "Expected one usage_raw row."
-    assert rows[0]["event_type"] == "stt"
-    assert abs(rows[0]["cost_usd"] - 0.001) < 1e-9
+    stt_rows = [r for r in rows if r["event_type"] == "stt"]
+    assert stt_rows, "Expected an stt row"
+    assert abs(stt_rows[-1]["cost_usd"] - 0.001) < 1e-9
 
 
-def test_record_api_openai_model_uses_openai_pricing(tmp_path):
-    db_path = Path(tmp_path) / "usage.db"
-
-    schema_path = Path(__file__).resolve().parents[2] / "backend" / "db" / "schema.sql"
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(schema_path.read_text())
-    conn.commit()
-    conn.close()
-
-    tracker = UsageTracker()
-    tracker.init(db_path)
+def test_record_api_openai_model_uses_openai_pricing():
+    tracker = _make_tracker()
     usage = type(
         "Usage",
         (),
@@ -96,6 +80,7 @@ def test_record_api_openai_model_uses_openai_pricing(tmp_path):
     tracker.close()
 
     assert rows, "Expected one usage_raw row."
-    assert rows[0]["event_type"] == "api"
+    api_rows = [r for r in rows if r["event_type"] == "api"]
+    assert api_rows, "Expected an api row"
     # $0.15 input + $0.60 output for 1M each on gpt-4o-mini.
-    assert abs(rows[0]["cost_usd"] - 0.75) < 1e-9
+    assert abs(api_rows[-1]["cost_usd"] - 0.75) < 1e-9

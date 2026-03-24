@@ -16,7 +16,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-import aiosqlite
+import asyncpg
 
 from ..db import models
 from ..db.connection import ANON_USER_ID
@@ -27,7 +27,7 @@ def _today_utc() -> str:
 
 
 async def award_section_advance(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     user_id: str,
     enrollment_id: str,
     old_idx: int,
@@ -51,7 +51,7 @@ async def award_section_advance(
 
 
 async def award_lesson_complete(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     user_id: str,
     enrollment_id: str,
 ) -> int:
@@ -69,7 +69,7 @@ async def award_lesson_complete(
 
 
 async def award_daily_points_if_needed(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     user_id: str,
 ) -> int:
     """

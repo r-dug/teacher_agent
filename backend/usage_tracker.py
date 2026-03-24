@@ -4,8 +4,8 @@ Usage tracking for API calls, local STT, and local TTS.
 Architecture
 ------------
 * Worker threads (STT/TTS/LLM) call record_api / record_stt / record_tts —
-  these are *synchronous* and write directly to SQLite via a thread-safe
-  sqlite3 connection (WAL mode).  No async required in hot path.
+  these are *synchronous* and write directly to PostgreSQL via a thread-safe
+  psycopg2 connection.  No async required in hot path.
 
 * A background asyncio task (run from main.py lifespan) calls
   aggregate_minutes() every 60 s.  It reads unaggregated raw rows, rolls
@@ -26,12 +26,13 @@ Approximate USD per token; update as Anthropic changes pricing.
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from pathlib import Path
+
+import psycopg2
+import psycopg2.extras
 
 # ── Pricing ───────────────────────────────────────────────────────────────────
 
@@ -40,7 +41,6 @@ _PRICING: dict[str, dict[str, float]] = {
     "claude-opus-4-6":    {"input": 15e-6,   "output": 75e-6,   "cache_read": 1.50e-6,  "cache_write": 18.75e-6},
     "claude-haiku-4-5":   {"input": 0.25e-6, "output": 1.25e-6, "cache_read": 0.03e-6,  "cache_write": 0.30e-6},
     "claude-haiku-4-5-20251001": {"input": 0.25e-6, "output": 1.25e-6, "cache_read": 0.03e-6, "cache_write": 0.30e-6},
-    # OpenAI text models (USD/token; model names may include date suffixes).
     "gpt-4o-mini": {"input": 0.15e-6, "output": 0.60e-6, "cache_read": 0.075e-6, "cache_write": 0.0},
     "gpt-4o": {"input": 2.50e-6, "output": 10.0e-6, "cache_read": 1.25e-6, "cache_write": 0.0},
     "gpt-5-mini": {"input": 0.25e-6, "output": 2.0e-6, "cache_read": 0.025e-6, "cache_write": 0.0},
@@ -53,7 +53,6 @@ _DEFAULT_PRICING = {"input": 3e-6, "output": 15e-6, "cache_read": 0.30e-6, "cach
 def _api_cost(model: str, inp: int, out: int, cr: int, cw: int) -> float:
     p = _PRICING.get(model)
     if p is None:
-        # Support dated or suffixed model IDs (e.g. gpt-4o-mini-2025-xx).
         for prefix, pricing in sorted(_PRICING.items(), key=lambda kv: len(kv[0]), reverse=True):
             if model.startswith(prefix):
                 p = pricing
@@ -102,24 +101,22 @@ def _agg(records: list[_ApiRecord]) -> dict:
 
 class UsageTracker:
     """
-    Thread-safe usage tracker with SQLite persistence.
+    Thread-safe usage tracker with PostgreSQL persistence (psycopg2).
 
-    Call init(db_path) once at startup before any records.
+    Call init(database_url) once at startup before any records.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._db: sqlite3.Connection | None = None
-        # In-memory for sidebar widget
+        self._db: psycopg2.extensions.connection | None = None
         self._api_records: list[_ApiRecord] = []
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
-    def init(self, db_path: Path | str) -> None:
-        """Open a dedicated sync SQLite connection for usage writes."""
-        self._db = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA synchronous=NORMAL")
+    def init(self, database_url: str) -> None:
+        """Open a dedicated sync psycopg2 connection for usage writes."""
+        self._db = psycopg2.connect(database_url)
+        self._db.autocommit = False
 
     def close(self) -> None:
         if self._db:
@@ -132,11 +129,10 @@ class UsageTracker:
         self,
         call_type: str,
         model: str,
-        usage,  # anthropic Usage object
+        usage,
         user_id: str = "",
         session_id: str | None = None,
     ) -> None:
-        """Record an Anthropic API call.  Safe to call from any thread."""
         inp = getattr(usage, "input_tokens", 0) or 0
         out = getattr(usage, "output_tokens", 0) or 0
         cr  = getattr(usage, "cache_read_input_tokens", 0) or 0
@@ -144,7 +140,6 @@ class UsageTracker:
         cost = _api_cost(model, inp, out, cr, cw)
         ts = time.time()
 
-        # In-memory (sidebar widget)
         with self._lock:
             self._api_records.append(_ApiRecord(
                 call_type=call_type, model=model, session_id=session_id,
@@ -152,7 +147,6 @@ class UsageTracker:
                 cache_read_tokens=cr, cache_write_tokens=cw,
             ))
 
-        # DB (persistent)
         self._insert_raw(
             ts=ts, user_id=user_id, event_type="api",
             call_type=call_type, model=model,
@@ -169,7 +163,6 @@ class UsageTracker:
         cost_usd: float = 0.0,
         user_id: str = "",
     ) -> None:
-        """Record a local STT transcription.  Safe to call from any thread."""
         self._insert_raw(
             ts=time.time(), user_id=user_id, event_type="stt",
             stt_model=stt_model, stt_language=stt_language,
@@ -186,7 +179,6 @@ class UsageTracker:
         cost_usd: float = 0.0,
         user_id: str = "",
     ) -> None:
-        """Record a local TTS synthesis.  Safe to call from any thread."""
         self._insert_raw(
             ts=time.time(), user_id=user_id, event_type="tts",
             tts_voice=tts_voice, tts_characters=tts_characters,
@@ -194,7 +186,7 @@ class UsageTracker:
             cost_usd=cost_usd,
         )
 
-    # ── In-memory summary (backward-compat for TokenUsageDisplay) ─────────────
+    # ── In-memory summary ─────────────────────────────────────────────────────
 
     def summary(self) -> dict:
         with self._lock:
@@ -217,35 +209,23 @@ class UsageTracker:
     # ── Background aggregation ────────────────────────────────────────────────
 
     def aggregate_minutes(self) -> int:
-        """
-        Roll unaggregated raw rows into usage_minutes.  Returns rows processed.
-        Call from an asyncio background task every 60 s.
-        Only aggregates rows older than 60 s (ensures the current minute is complete).
-        """
         if self._db is None:
             return 0
         cutoff = time.time() - 60
         with self._lock:
-            rows = self._db.execute(
-                "SELECT * FROM usage_raw WHERE aggregated = 0 AND ts < ?",
+            cur = self._db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(
+                "SELECT * FROM usage_raw WHERE aggregated = 0 AND ts < %s",
                 (cutoff,),
-            ).fetchall()
+            )
+            rows = cur.fetchall()
             if not rows:
+                cur.close()
                 return 0
 
-            # Group by (minute_ts, user_id, event_type, call_type, model,
-            #            stt_model, stt_language, tts_voice)
+            ids = [r["id"] for r in rows]
+
             buckets: dict[tuple, dict] = {}
-            ids = [r[0] for r in rows]
-
-            # Re-fetch with row_factory so columns are accessible by name
-            self._db.row_factory = sqlite3.Row
-            rows = self._db.execute(
-                f"SELECT * FROM usage_raw WHERE id IN ({','.join('?' * len(ids))})",
-                ids,
-            ).fetchall()
-            self._db.row_factory = None
-
             for r in rows:
                 minute_ts = int(r["ts"] // 60) * 60
                 key = (
@@ -275,11 +255,10 @@ class UsageTracker:
                 b["tts_audio_seconds"] += r["tts_audio_seconds"]
                 b["tts_synthesis_ms"] += r["tts_synthesis_ms"]
 
-            # Upsert into usage_minutes
             for key, b in buckets.items():
                 (minute_ts, user_id, event_type, call_type, model,
                  stt_model, stt_language, tts_voice) = key
-                self._db.execute(
+                cur.execute(
                     """INSERT INTO usage_minutes
                        (minute_ts, user_id, event_type, call_type, model,
                         stt_model, stt_language, tts_voice,
@@ -287,21 +266,21 @@ class UsageTracker:
                         cache_read_tokens, cache_write_tokens, cost_usd,
                         audio_seconds, transcription_ms,
                         tts_characters, tts_audio_seconds, tts_synthesis_ms)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                        ON CONFLICT(minute_ts, user_id, event_type, call_type, model,
                                    stt_model, stt_language, tts_voice)
                        DO UPDATE SET
-                         calls              = calls + excluded.calls,
-                         input_tokens       = input_tokens + excluded.input_tokens,
-                         output_tokens      = output_tokens + excluded.output_tokens,
-                         cache_read_tokens  = cache_read_tokens + excluded.cache_read_tokens,
-                         cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
-                         cost_usd           = cost_usd + excluded.cost_usd,
-                         audio_seconds      = audio_seconds + excluded.audio_seconds,
-                         transcription_ms   = transcription_ms + excluded.transcription_ms,
-                         tts_characters     = tts_characters + excluded.tts_characters,
-                         tts_audio_seconds  = tts_audio_seconds + excluded.tts_audio_seconds,
-                         tts_synthesis_ms   = tts_synthesis_ms + excluded.tts_synthesis_ms""",
+                         calls              = usage_minutes.calls + excluded.calls,
+                         input_tokens       = usage_minutes.input_tokens + excluded.input_tokens,
+                         output_tokens      = usage_minutes.output_tokens + excluded.output_tokens,
+                         cache_read_tokens  = usage_minutes.cache_read_tokens + excluded.cache_read_tokens,
+                         cache_write_tokens = usage_minutes.cache_write_tokens + excluded.cache_write_tokens,
+                         cost_usd           = usage_minutes.cost_usd + excluded.cost_usd,
+                         audio_seconds      = usage_minutes.audio_seconds + excluded.audio_seconds,
+                         transcription_ms   = usage_minutes.transcription_ms + excluded.transcription_ms,
+                         tts_characters     = usage_minutes.tts_characters + excluded.tts_characters,
+                         tts_audio_seconds  = usage_minutes.tts_audio_seconds + excluded.tts_audio_seconds,
+                         tts_synthesis_ms   = usage_minutes.tts_synthesis_ms + excluded.tts_synthesis_ms""",
                     (minute_ts, user_id, event_type, call_type, model,
                      stt_model, stt_language, tts_voice,
                      b["calls"], b["input_tokens"], b["output_tokens"],
@@ -310,33 +289,25 @@ class UsageTracker:
                      b["tts_characters"], b["tts_audio_seconds"], b["tts_synthesis_ms"]),
                 )
 
-            # Mark raw rows as aggregated; prune rows older than 48 h
-            self._db.execute(
-                f"UPDATE usage_raw SET aggregated = 1 WHERE id IN ({','.join('?' * len(ids))})",
-                ids,
+            cur.execute(
+                "UPDATE usage_raw SET aggregated = 1 WHERE id = ANY(%s)",
+                (ids,),
             )
             cutoff_48h = time.time() - 48 * 3600
-            self._db.execute(
-                "DELETE FROM usage_raw WHERE aggregated = 1 AND ts < ?",
+            cur.execute(
+                "DELETE FROM usage_raw WHERE aggregated = 1 AND ts < %s",
                 (cutoff_48h,),
             )
             self._db.commit()
+            cur.close()
 
         return len(ids)
 
     def roll_month_to_hours(self) -> int:
-        """
-        Aggregate previous calendar month's usage_minutes → usage_hours, then
-        delete those minute rows.  Returns number of minute rows rolled up.
-        Call at startup and once per day.
-        """
         if self._db is None:
             return 0
-        import calendar
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
-        # Only roll if we are in a new month (i.e. previous month exists in usage_minutes)
-        # Determine start/end of last month in Unix timestamps
         first_of_this_month = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
         if now.month == 1:
             first_of_last_month = datetime(now.year - 1, 12, 1, tzinfo=timezone.utc)
@@ -346,13 +317,14 @@ class UsageTracker:
         ts_end   = int(first_of_this_month.timestamp())
 
         with self._lock:
-            self._db.row_factory = sqlite3.Row
-            rows = self._db.execute(
-                "SELECT * FROM usage_minutes WHERE minute_ts >= ? AND minute_ts < ?",
+            cur = self._db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute(
+                "SELECT * FROM usage_minutes WHERE minute_ts >= %s AND minute_ts < %s",
                 (ts_start, ts_end),
-            ).fetchall()
-            self._db.row_factory = None
+            )
+            rows = cur.fetchall()
             if not rows:
+                cur.close()
                 return 0
 
             buckets: dict[tuple, dict] = {}
@@ -382,7 +354,7 @@ class UsageTracker:
             for key, b in buckets.items():
                 (hour_ts, user_id, event_type, call_type, model,
                  stt_model, stt_language, tts_voice) = key
-                self._db.execute(
+                cur.execute(
                     """INSERT INTO usage_hours
                        (hour_ts, user_id, event_type, call_type, model,
                         stt_model, stt_language, tts_voice,
@@ -390,21 +362,21 @@ class UsageTracker:
                         cache_read_tokens, cache_write_tokens, cost_usd,
                         audio_seconds, transcription_ms,
                         tts_characters, tts_audio_seconds, tts_synthesis_ms)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                        ON CONFLICT(hour_ts, user_id, event_type, call_type, model,
                                    stt_model, stt_language, tts_voice)
                        DO UPDATE SET
-                         calls              = calls + excluded.calls,
-                         input_tokens       = input_tokens + excluded.input_tokens,
-                         output_tokens      = output_tokens + excluded.output_tokens,
-                         cache_read_tokens  = cache_read_tokens + excluded.cache_read_tokens,
-                         cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
-                         cost_usd           = cost_usd + excluded.cost_usd,
-                         audio_seconds      = audio_seconds + excluded.audio_seconds,
-                         transcription_ms   = transcription_ms + excluded.transcription_ms,
-                         tts_characters     = tts_characters + excluded.tts_characters,
-                         tts_audio_seconds  = tts_audio_seconds + excluded.tts_audio_seconds,
-                         tts_synthesis_ms   = tts_synthesis_ms + excluded.tts_synthesis_ms""",
+                         calls              = usage_hours.calls + excluded.calls,
+                         input_tokens       = usage_hours.input_tokens + excluded.input_tokens,
+                         output_tokens      = usage_hours.output_tokens + excluded.output_tokens,
+                         cache_read_tokens  = usage_hours.cache_read_tokens + excluded.cache_read_tokens,
+                         cache_write_tokens = usage_hours.cache_write_tokens + excluded.cache_write_tokens,
+                         cost_usd           = usage_hours.cost_usd + excluded.cost_usd,
+                         audio_seconds      = usage_hours.audio_seconds + excluded.audio_seconds,
+                         transcription_ms   = usage_hours.transcription_ms + excluded.transcription_ms,
+                         tts_characters     = usage_hours.tts_characters + excluded.tts_characters,
+                         tts_audio_seconds  = usage_hours.tts_audio_seconds + excluded.tts_audio_seconds,
+                         tts_synthesis_ms   = usage_hours.tts_synthesis_ms + excluded.tts_synthesis_ms""",
                     (hour_ts, user_id, event_type, call_type, model,
                      stt_model, stt_language, tts_voice,
                      b["calls"], b["input_tokens"], b["output_tokens"],
@@ -414,27 +386,24 @@ class UsageTracker:
                 )
 
             n = len(rows)
-            self._db.execute(
-                "DELETE FROM usage_minutes WHERE minute_ts >= ? AND minute_ts < ?",
+            cur.execute(
+                "DELETE FROM usage_minutes WHERE minute_ts >= %s AND minute_ts < %s",
                 (ts_start, ts_end),
             )
             self._db.commit()
+            cur.close()
 
         return n
 
-    # ── Query helpers (called from async routes via asyncio.to_thread) ─────────
+    # ── Query helpers ─────────────────────────────────────────────────────────
 
     def query_series(
         self,
         from_ts: float,
         to_ts: float,
-        granularity: str = "minute",   # 'minute' | 'hour'
+        granularity: str = "minute",
         user_id: str | None = None,
     ) -> list[dict]:
-        """
-        Return time-series rows covering [from_ts, to_ts).
-        Reads from usage_minutes (within last month) or usage_hours (older).
-        """
         if self._db is None:
             return []
         table = "usage_minutes" if granularity == "minute" else "usage_hours"
@@ -442,57 +411,55 @@ class UsageTracker:
         params: list = [from_ts, to_ts]
         user_clause = ""
         if user_id is not None:
-            user_clause = " AND user_id = ?"
+            user_clause = " AND user_id = %s"
             params.append(user_id)
-        self._db.row_factory = sqlite3.Row
-        rows = self._db.execute(
-            f"SELECT * FROM {table} WHERE {ts_col} >= ? AND {ts_col} < ?{user_clause} ORDER BY {ts_col}",
+        cur = self._db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            f"SELECT * FROM {table} WHERE {ts_col} >= %s AND {ts_col} < %s{user_clause} ORDER BY {ts_col}",
             params,
-        ).fetchall()
-        self._db.row_factory = None
-        return [dict(r) for r in rows]
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.close()
+        return rows
 
     def query_live(self) -> list[dict]:
-        """Return raw events from the last 90 seconds (for the live feed)."""
         if self._db is None:
             return []
         cutoff = time.time() - 90
-        self._db.row_factory = sqlite3.Row
-        rows = self._db.execute(
-            "SELECT * FROM usage_raw WHERE ts > ? ORDER BY ts DESC LIMIT 100",
+        cur = self._db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            "SELECT * FROM usage_raw WHERE ts > %s ORDER BY ts DESC LIMIT 100",
             (cutoff,),
-        ).fetchall()
-        self._db.row_factory = None
-        return [dict(r) for r in rows]
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        cur.close()
+        return rows
 
     def query_totals(
         self,
         window_seconds: float | None = None,
         user_id: str | None = None,
     ) -> dict:
-        """
-        Aggregate totals over a time window.  Queries usage_minutes + any
-        unaggregated raw rows to include the current minute.
-        """
         if self._db is None:
             return {}
         now = time.time()
         from_ts = (now - window_seconds) if window_seconds else 0.0
-        user_clause = "" if user_id is None else " AND user_id = ?"
+        user_clause = "" if user_id is None else " AND user_id = %s"
         params_u: list = [from_ts] + ([user_id] if user_id else [])
 
-        self._db.row_factory = sqlite3.Row
-        minute_rows = self._db.execute(
-            f"SELECT * FROM usage_minutes WHERE minute_ts >= ?{user_clause}",
+        cur = self._db.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            f"SELECT * FROM usage_minutes WHERE minute_ts >= %s{user_clause}",
             params_u,
-        ).fetchall()
-        raw_rows = self._db.execute(
-            f"SELECT * FROM usage_raw WHERE ts >= ? AND aggregated = 0{user_clause}",
+        )
+        minute_rows = [dict(r) for r in cur.fetchall()]
+        cur.execute(
+            f"SELECT * FROM usage_raw WHERE ts >= %s AND aggregated = 0{user_clause}",
             params_u,
-        ).fetchall()
-        self._db.row_factory = None
-
-        return _sum_rows([dict(r) for r in minute_rows] + [dict(r) for r in raw_rows])
+        )
+        raw_rows = [dict(r) for r in cur.fetchall()]
+        cur.close()
+        return _sum_rows(minute_rows + raw_rows)
 
     # ── Private ────────────────────────────────────────────────────────────────
 
@@ -520,20 +487,22 @@ class UsageTracker:
         if self._db is None:
             return
         with self._lock:
-            self._db.execute(
+            cur = self._db.cursor()
+            cur.execute(
                 """INSERT INTO usage_raw
                    (ts, user_id, event_type,
                     call_type, model,
                     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd,
                     stt_model, stt_language, audio_seconds, transcription_ms,
                     tts_voice, tts_characters, tts_audio_seconds, tts_synthesis_ms)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (ts, user_id, event_type,
                  call_type, model,
                  input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd,
                  stt_model, stt_language, audio_seconds, transcription_ms,
                  tts_voice, tts_characters, tts_audio_seconds, tts_synthesis_ms),
             )
+            cur.close()
             self._db.commit()
 
 
@@ -551,7 +520,5 @@ def _sum_rows(rows: list[dict]) -> dict:
             totals[k] = totals[k] + (r.get(k) or 0)  # type: ignore[operator]
     return totals
 
-
-# ── Backward-compat alias so existing imports of TokenUsageTracker still work ─
 
 TokenUsageTracker = UsageTracker

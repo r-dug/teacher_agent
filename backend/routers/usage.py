@@ -6,7 +6,7 @@ import asyncio
 import time
 from typing import Annotated
 
-import aiosqlite
+import asyncpg
 from fastapi import APIRouter, Depends, Query
 
 from ..authz import require_admin
@@ -15,7 +15,7 @@ from ..db import connection as db
 
 router = APIRouter(tags=["usage"])
 
-Conn = Annotated[aiosqlite.Connection, Depends(db.get)]
+Conn = Annotated[asyncpg.Connection, Depends(db.get)]
 
 
 # ── Session-scoped (in-memory, powers the sidebar widget) ────────────────────
@@ -94,8 +94,7 @@ async def usage_totals(
 async def usage_users(actor_user_id: str, conn: Conn):
     """List all users with basic info (for the per-user breakdown filter)."""
     await require_admin(conn, actor_user_id)
-    async with conn.execute(
+    records = await conn.fetch(
         "SELECT id, email, display_name, is_admin, created_at FROM users ORDER BY created_at"
-    ) as cur:
-        rows = [dict(r) for r in await cur.fetchall()]
-    return {"users": rows}
+    )
+    return {"users": [dict(r) for r in records]}

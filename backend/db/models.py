@@ -1,17 +1,20 @@
 """
 Typed async query helpers.
 
-Every function accepts an aiosqlite.Connection and returns plain dicts or
-lists of dicts.  No ORM — raw SQL so queries are transparent and Postgres
-migration is straightforward (swap driver, adjust parameter placeholder).
+Every function accepts an asyncpg.Connection and returns plain dicts or
+lists of dicts.  No ORM — raw SQL so queries are transparent.
+
+Parameter style: $1, $2, ... (PostgreSQL / asyncpg).
+Multi-statement write functions are wrapped in explicit transactions.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import aiosqlite
+import asyncpg
 
 from .connection import new_id, ANON_USER_ID
 
@@ -20,82 +23,86 @@ Row = dict[str, Any]
 
 # ── utility ────────────────────────────────────────────────────────────────────
 
-def _row(row: aiosqlite.Row | None) -> Row | None:
+def _row(row: asyncpg.Record | None) -> Row | None:
     return dict(row) if row is not None else None
 
 
-def _rows(rows) -> list[Row]:
+def _rows(rows: list[asyncpg.Record]) -> list[Row]:
     return [dict(r) for r in rows]
 
 
 # ── sessions ───────────────────────────────────────────────────────────────────
 
-async def create_session(conn: aiosqlite.Connection, user_id: str = ANON_USER_ID) -> str:
+async def create_session(conn: asyncpg.Connection, user_id: str = ANON_USER_ID) -> str:
     sid = new_id()
     await conn.execute(
-        "INSERT INTO sessions (id, user_id) VALUES (?, ?)",
-        (sid, user_id),
+        "INSERT INTO sessions (id, user_id) VALUES ($1, $2)",
+        sid, user_id,
     )
-    await conn.commit()
     return sid
 
 
-async def get_session(conn: aiosqlite.Connection, session_id: str) -> Row | None:
-    async with conn.execute(
-        "SELECT * FROM sessions WHERE id = ?", (session_id,)
-    ) as cur:
-        return _row(await cur.fetchone())
+async def get_session(conn: asyncpg.Connection, session_id: str) -> Row | None:
+    return _row(await conn.fetchrow(
+        "SELECT * FROM sessions WHERE id = $1", session_id
+    ))
 
 
-async def touch_session(conn: aiosqlite.Connection, session_id: str) -> None:
+async def touch_session(conn: asyncpg.Connection, session_id: str) -> None:
     await conn.execute(
-        "UPDATE sessions SET last_seen = datetime('now') WHERE id = ?",
-        (session_id,),
+        "UPDATE sessions SET last_seen = NOW() WHERE id = $1",
+        session_id,
     )
-    await conn.commit()
 
 
-async def delete_session(conn: aiosqlite.Connection, session_id: str) -> None:
-    await conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-    await conn.commit()
+async def delete_session(conn: asyncpg.Connection, session_id: str) -> None:
+    await conn.execute("DELETE FROM sessions WHERE id = $1", session_id)
+
+
+async def expire_old_sessions(conn: asyncpg.Connection, retention_days: int) -> int:
+    """Delete sessions not seen in the last *retention_days* days. Returns row count."""
+    result = await conn.execute(
+        "DELETE FROM sessions WHERE last_seen < NOW() - ($1 || ' days')::INTERVAL",
+        str(retention_days),
+    )
+    # asyncpg returns e.g. "DELETE 3"
+    return int(result.split()[-1])
 
 
 # ── upload tokens ──────────────────────────────────────────────────────────────
 
 async def create_upload_token(
-    conn: aiosqlite.Connection, session_id: str, ttl_seconds: int = 300
+    conn: asyncpg.Connection, session_id: str, ttl_seconds: int = 300
 ) -> str:
     token = new_id()
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
     await conn.execute(
-        """INSERT INTO upload_tokens (token, session_id, expires_at)
-           VALUES (?, ?, datetime('now', ?))""",
-        (token, session_id, f"+{ttl_seconds} seconds"),
+        "INSERT INTO upload_tokens (token, session_id, expires_at) VALUES ($1, $2, $3)",
+        token, session_id, expires_at,
     )
-    await conn.commit()
     return token
 
 
 async def consume_upload_token(
-    conn: aiosqlite.Connection, token: str
+    conn: asyncpg.Connection, token: str
 ) -> Row | None:
     """Validate and delete a token; return session row or None if invalid/expired."""
-    async with conn.execute(
-        """SELECT s.* FROM upload_tokens ut
-           JOIN sessions s ON s.id = ut.session_id
-           WHERE ut.token = ? AND ut.expires_at > datetime('now')""",
-        (token,),
-    ) as cur:
-        session = _row(await cur.fetchone())
-    if session:
-        await conn.execute("DELETE FROM upload_tokens WHERE token = ?", (token,))
-        await conn.commit()
+    async with conn.transaction():
+        session = _row(await conn.fetchrow(
+            """SELECT s.* FROM upload_tokens ut
+               JOIN sessions s ON s.id = ut.session_id
+               WHERE ut.token = $1 AND ut.expires_at > CLOCK_TIMESTAMP()""",
+            token,
+        ))
+        if session:
+            await conn.execute("DELETE FROM upload_tokens WHERE token = $1", token)
     return session
 
 
 # ── courses ────────────────────────────────────────────────────────────────────
 
 async def create_course(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     creator_id: str,
     title: str,
     description: str | None = None,
@@ -103,58 +110,50 @@ async def create_course(
 ) -> Row:
     cid = new_id()
     await conn.execute(
-        "INSERT INTO courses (id, creator_id, title, description, visibility) VALUES (?, ?, ?, ?, ?)",
-        (cid, creator_id, title, description, visibility),
+        "INSERT INTO courses (id, creator_id, title, description, visibility) VALUES ($1, $2, $3, $4, $5)",
+        cid, creator_id, title, description, visibility,
     )
-    await conn.commit()
-    async with conn.execute("SELECT * FROM courses WHERE id = ?", (cid,)) as cur:
-        return _row(await cur.fetchone())  # type: ignore[return-value]
+    return _row(await conn.fetchrow("SELECT * FROM courses WHERE id = $1", cid))  # type: ignore[return-value]
 
 
-async def get_course(conn: aiosqlite.Connection, course_id: str) -> Row | None:
-    async with conn.execute(
-        "SELECT * FROM courses WHERE id = ?", (course_id,)
-    ) as cur:
-        return _row(await cur.fetchone())
+async def get_course(conn: asyncpg.Connection, course_id: str) -> Row | None:
+    return _row(await conn.fetchrow("SELECT * FROM courses WHERE id = $1", course_id))
 
 
 async def list_courses(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     user_id: str,
 ) -> list[Row]:
-    """Return courses created by user_id or published to all users."""
-    async with conn.execute(
+    return _rows(await conn.fetch(
         """SELECT * FROM courses
-           WHERE creator_id = ? OR visibility = 'published'
+           WHERE creator_id = $1 OR visibility = 'published'
            ORDER BY updated_at DESC""",
-        (user_id,),
-    ) as cur:
-        return _rows(await cur.fetchall())
+        user_id,
+    ))
 
 
 async def update_course(
-    conn: aiosqlite.Connection, course_id: str, **kwargs: Any
+    conn: asyncpg.Connection, course_id: str, **kwargs: Any
 ) -> None:
     allowed = {"title", "description", "visibility"}
-    for key, value in kwargs.items():
-        if key not in allowed:
-            continue
-        await conn.execute(
-            f"UPDATE courses SET {key} = ?, updated_at = datetime('now') WHERE id = ?",
-            (value, course_id),
-        )
-    await conn.commit()
+    async with conn.transaction():
+        for key, value in kwargs.items():
+            if key not in allowed:
+                continue
+            await conn.execute(
+                f"UPDATE courses SET {key} = $1, updated_at = NOW() WHERE id = $2",
+                value, course_id,
+            )
 
 
-async def delete_course(conn: aiosqlite.Connection, course_id: str) -> None:
-    await conn.execute("DELETE FROM courses WHERE id = ?", (course_id,))
-    await conn.commit()
+async def delete_course(conn: asyncpg.Connection, course_id: str) -> None:
+    await conn.execute("DELETE FROM courses WHERE id = $1", course_id)
 
 
 # ── lessons ────────────────────────────────────────────────────────────────────
 
 async def create_lesson(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     creator_id: str,
     title: str,
     pdf_path: str | None = None,
@@ -164,165 +163,146 @@ async def create_lesson(
 ) -> str:
     lid = new_id()
     await conn.execute(
-        "INSERT INTO lessons (id, creator_id, title, pdf_path, course_id, description, visibility) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (lid, creator_id, title, pdf_path, course_id, description, visibility),
+        "INSERT INTO lessons (id, creator_id, title, pdf_path, course_id, description, visibility) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        lid, creator_id, title, pdf_path, course_id, description, visibility,
     )
-    await conn.commit()
     return lid
 
 
-async def get_lesson(conn: aiosqlite.Connection, lesson_id: str) -> Row | None:
-    async with conn.execute(
-        "SELECT * FROM lessons WHERE id = ?", (lesson_id,)
-    ) as cur:
-        return _row(await cur.fetchone())
+async def get_lesson(conn: asyncpg.Connection, lesson_id: str) -> Row | None:
+    return _row(await conn.fetchrow("SELECT * FROM lessons WHERE id = $1", lesson_id))
 
 
 async def list_lessons(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     user_id: str,
     limit: int = 50,
     offset: int = 0,
     course_id: str | None = None,
     standalone: bool = False,
 ) -> list[Row]:
-    """
-    Return lessons accessible to user_id (created by them or published),
-    joined with their enrollment state (current_section_idx, completed).
-    """
     sql = (
         "SELECT l.*, "
         "COALESCE(e.current_section_idx, 0) AS current_section_idx, "
         "COALESCE(e.completed, 0) AS completed, "
         "(SELECT COUNT(*) FROM lesson_sections WHERE lesson_id = l.id) AS section_count "
         "FROM lessons l "
-        "LEFT JOIN lesson_enrollments e ON e.lesson_id = l.id AND e.user_id = ? "
-        "WHERE (l.creator_id = ? OR l.visibility = 'published')"
+        "LEFT JOIN lesson_enrollments e ON e.lesson_id = l.id AND e.user_id = $1 "
+        "WHERE (l.creator_id = $1 OR l.visibility = 'published')"
     )
-    params: list[Any] = [user_id, user_id]
+    params: list[Any] = [user_id]
     if standalone:
         sql += " AND l.course_id IS NULL"
     elif course_id is not None:
-        sql += " AND l.course_id = ?"
         params.append(course_id)
-    sql += " ORDER BY l.updated_at DESC LIMIT ? OFFSET ?"
+        sql += f" AND l.course_id = ${len(params)}"
     params.extend([limit, offset])
-    async with conn.execute(sql, params) as cur:
-        return _rows(await cur.fetchall())
+    sql += f" ORDER BY l.updated_at DESC LIMIT ${len(params) - 1} OFFSET ${len(params)}"
+    return _rows(await conn.fetch(sql, *params))
 
 
 _LESSON_UPDATE_SQL: dict[str, str] = {
-    "title": "UPDATE lessons SET title = ?, updated_at = datetime('now') WHERE id = ?",
-    "description": "UPDATE lessons SET description = ?, updated_at = datetime('now') WHERE id = ?",
-    "course_id": "UPDATE lessons SET course_id = ?, updated_at = datetime('now') WHERE id = ?",
-    "pdf_path": "UPDATE lessons SET pdf_path = ?, updated_at = datetime('now') WHERE id = ?",
-    "visibility": "UPDATE lessons SET visibility = ?, updated_at = datetime('now') WHERE id = ?",
+    "title":       "UPDATE lessons SET title = $1,       updated_at = NOW() WHERE id = $2",
+    "description": "UPDATE lessons SET description = $1, updated_at = NOW() WHERE id = $2",
+    "course_id":   "UPDATE lessons SET course_id = $1,   updated_at = NOW() WHERE id = $2",
+    "pdf_path":    "UPDATE lessons SET pdf_path = $1,    updated_at = NOW() WHERE id = $2",
+    "visibility":  "UPDATE lessons SET visibility = $1,  updated_at = NOW() WHERE id = $2",
 }
 
 
 async def update_lesson(
-    conn: aiosqlite.Connection, lesson_id: str, **kwargs: Any
+    conn: asyncpg.Connection, lesson_id: str, **kwargs: Any
 ) -> None:
-    """Update lesson template columns.  Always bumps updated_at."""
-    for key, value in kwargs.items():
-        sql = _LESSON_UPDATE_SQL.get(key)
-        if sql is None:
-            continue
-        await conn.execute(sql, (value, lesson_id))
-    await conn.commit()
+    async with conn.transaction():
+        for key, value in kwargs.items():
+            sql = _LESSON_UPDATE_SQL.get(key)
+            if sql is None:
+                continue
+            await conn.execute(sql, value, lesson_id)
 
 
-async def delete_lesson(conn: aiosqlite.Connection, lesson_id: str) -> None:
-    await conn.execute("DELETE FROM lessons WHERE id = ?", (lesson_id,))
-    await conn.commit()
+async def delete_lesson(conn: asyncpg.Connection, lesson_id: str) -> None:
+    await conn.execute("DELETE FROM lessons WHERE id = $1", lesson_id)
 
 
 # ── lesson enrollments ─────────────────────────────────────────────────────────
 
 async def get_or_create_enrollment(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     lesson_id: str,
     user_id: str,
 ) -> Row:
-    """Return the enrollment row, creating it lazily if it doesn't exist."""
-    async with conn.execute(
-        "SELECT * FROM lesson_enrollments WHERE lesson_id = ? AND user_id = ?",
-        (lesson_id, user_id),
-    ) as cur:
-        row = _row(await cur.fetchone())
+    row = _row(await conn.fetchrow(
+        "SELECT * FROM lesson_enrollments WHERE lesson_id = $1 AND user_id = $2",
+        lesson_id, user_id,
+    ))
     if row is not None:
         return row
     eid = new_id()
-    await conn.execute(
-        """INSERT INTO lesson_enrollments (id, lesson_id, user_id)
-           VALUES (?, ?, ?)""",
-        (eid, lesson_id, user_id),
-    )
-    await conn.commit()
-    async with conn.execute(
-        "SELECT * FROM lesson_enrollments WHERE id = ?", (eid,)
-    ) as cur:
-        return _row(await cur.fetchone())  # type: ignore[return-value]
+    async with conn.transaction():
+        await conn.execute(
+            "INSERT INTO lesson_enrollments (id, lesson_id, user_id) VALUES ($1, $2, $3)",
+            eid, lesson_id, user_id,
+        )
+    return _row(await conn.fetchrow(  # type: ignore[return-value]
+        "SELECT * FROM lesson_enrollments WHERE id = $1", eid
+    ))
 
 
 async def get_enrollment(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     lesson_id: str,
     user_id: str,
 ) -> Row | None:
-    async with conn.execute(
-        "SELECT * FROM lesson_enrollments WHERE lesson_id = ? AND user_id = ?",
-        (lesson_id, user_id),
-    ) as cur:
-        return _row(await cur.fetchone())
+    return _row(await conn.fetchrow(
+        "SELECT * FROM lesson_enrollments WHERE lesson_id = $1 AND user_id = $2",
+        lesson_id, user_id,
+    ))
 
 
 async def get_enrollment_by_id(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     enrollment_id: str,
 ) -> Row | None:
-    async with conn.execute(
-        "SELECT * FROM lesson_enrollments WHERE id = ?", (enrollment_id,)
-    ) as cur:
-        return _row(await cur.fetchone())
+    return _row(await conn.fetchrow(
+        "SELECT * FROM lesson_enrollments WHERE id = $1", enrollment_id
+    ))
 
 
 _ENROLLMENT_UPDATE_SQL: dict[str, str] = {
-    "current_section_idx": "UPDATE lesson_enrollments SET current_section_idx = ?, updated_at = datetime('now') WHERE id = ?",
-    "completed": "UPDATE lesson_enrollments SET completed = ?, updated_at = datetime('now') WHERE id = ?",
-    "lesson_goal": "UPDATE lesson_enrollments SET lesson_goal = ?, updated_at = datetime('now') WHERE id = ?",
+    "current_section_idx": "UPDATE lesson_enrollments SET current_section_idx = $1, updated_at = NOW() WHERE id = $2",
+    "completed":           "UPDATE lesson_enrollments SET completed = $1,           updated_at = NOW() WHERE id = $2",
+    "lesson_goal":         "UPDATE lesson_enrollments SET lesson_goal = $1,         updated_at = NOW() WHERE id = $2",
 }
 
 
 async def update_enrollment(
-    conn: aiosqlite.Connection, enrollment_id: str, **kwargs: Any
+    conn: asyncpg.Connection, enrollment_id: str, **kwargs: Any
 ) -> None:
-    """Update enrollment state columns.  Always bumps updated_at."""
-    for key, value in kwargs.items():
-        sql = _ENROLLMENT_UPDATE_SQL.get(key)
-        if sql is None:
-            continue
-        await conn.execute(sql, (value, enrollment_id))
-    await conn.commit()
+    async with conn.transaction():
+        for key, value in kwargs.items():
+            sql = _ENROLLMENT_UPDATE_SQL.get(key)
+            if sql is None:
+                continue
+            await conn.execute(sql, value, enrollment_id)
 
 
 # ── sections ───────────────────────────────────────────────────────────────────
 
 async def upsert_sections(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     lesson_id: str,
     sections: list[dict],
 ) -> None:
-    """Replace all sections for a lesson."""
-    await conn.execute(
-        "DELETE FROM lesson_sections WHERE lesson_id = ?", (lesson_id,)
-    )
-    for idx, sec in enumerate(sections):
+    async with conn.transaction():
         await conn.execute(
-            """INSERT INTO lesson_sections
-               (id, lesson_id, idx, title, content, key_concepts, page_start, page_end)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
+            "DELETE FROM lesson_sections WHERE lesson_id = $1", lesson_id
+        )
+        for idx, sec in enumerate(sections):
+            await conn.execute(
+                """INSERT INTO lesson_sections
+                   (id, lesson_id, idx, title, content, key_concepts, page_start, page_end)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)""",
                 new_id(),
                 lesson_id,
                 idx,
@@ -331,20 +311,16 @@ async def upsert_sections(
                 json.dumps(sec.get("key_concepts", [])),
                 sec.get("page_start"),
                 sec.get("page_end"),
-            ),
-        )
-    await conn.commit()
+            )
 
 
 async def get_sections(
-    conn: aiosqlite.Connection, lesson_id: str
+    conn: asyncpg.Connection, lesson_id: str
 ) -> list[Row]:
-    async with conn.execute(
-        "SELECT * FROM lesson_sections WHERE lesson_id = ? ORDER BY idx",
-        (lesson_id,),
-    ) as cur:
-        rows = _rows(await cur.fetchall())
-    # Deserialise key_concepts back to list
+    rows = _rows(await conn.fetch(
+        "SELECT * FROM lesson_sections WHERE lesson_id = $1 ORDER BY idx",
+        lesson_id,
+    ))
     for row in rows:
         row["key_concepts"] = json.loads(row.get("key_concepts", "[]"))
     return rows
@@ -353,35 +329,32 @@ async def get_sections(
 # ── messages ───────────────────────────────────────────────────────────────────
 
 async def upsert_messages(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     enrollment_id: str,
     messages: list[dict],
 ) -> None:
-    """Replace all messages for an enrollment with a serialised list."""
-    await conn.execute(
-        "DELETE FROM messages WHERE enrollment_id = ?", (enrollment_id,)
-    )
-    for idx, msg in enumerate(messages):
-        content = msg["content"]
-        content_json = (
-            json.dumps(content) if not isinstance(content, str) else content
-        )
+    async with conn.transaction():
         await conn.execute(
-            "INSERT INTO messages (id, enrollment_id, idx, role, content) VALUES (?, ?, ?, ?, ?)",
-            (new_id(), enrollment_id, idx, msg["role"], content_json),
+            "DELETE FROM messages WHERE enrollment_id = $1", enrollment_id
         )
-    await conn.commit()
+        for idx, msg in enumerate(messages):
+            content = msg["content"]
+            content_json = (
+                json.dumps(content) if not isinstance(content, str) else content
+            )
+            await conn.execute(
+                "INSERT INTO messages (id, enrollment_id, idx, role, content) VALUES ($1, $2, $3, $4, $5)",
+                new_id(), enrollment_id, idx, msg["role"], content_json,
+            )
 
 
 async def get_messages(
-    conn: aiosqlite.Connection, enrollment_id: str
+    conn: asyncpg.Connection, enrollment_id: str
 ) -> list[dict]:
-    """Return messages as Anthropic SDK-compatible dicts."""
-    async with conn.execute(
-        "SELECT role, content FROM messages WHERE enrollment_id = ? ORDER BY idx",
-        (enrollment_id,),
-    ) as cur:
-        rows = await cur.fetchall()
+    rows = await conn.fetch(
+        "SELECT role, content FROM messages WHERE enrollment_id = $1 ORDER BY idx",
+        enrollment_id,
+    )
     result = []
     for row in rows:
         role = row[0]
@@ -392,7 +365,6 @@ async def get_messages(
             content = content_raw
         result.append({"role": role, "content": content})
 
-    # Repair any dangling tool_use blocks (disconnect/save race condition).
     from .util import _strip_dangling_tool_use
     _strip_dangling_tool_use(result)
 
@@ -402,7 +374,7 @@ async def get_messages(
 # ── enrollment assets ──────────────────────────────────────────────────────────
 
 async def create_enrollment_asset(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     enrollment_id: str,
     section_idx: int,
     image_path: str,
@@ -417,170 +389,152 @@ async def create_enrollment_asset(
         """INSERT INTO enrollment_assets
            (id, enrollment_id, section_idx, asset_type, image_path, prompt,
             revised_prompt, tool_use_id, idx)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (aid, enrollment_id, section_idx, asset_type, image_path, prompt,
-         revised_prompt, tool_use_id, idx),
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
+        aid, enrollment_id, section_idx, asset_type, image_path, prompt,
+        revised_prompt, tool_use_id, idx,
     )
-    await conn.commit()
-    async with conn.execute(
-        "SELECT * FROM enrollment_assets WHERE id = ?", (aid,)
-    ) as cur:
-        return _row(await cur.fetchone())  # type: ignore[return-value]
+    return _row(await conn.fetchrow(  # type: ignore[return-value]
+        "SELECT * FROM enrollment_assets WHERE id = $1", aid
+    ))
 
 
 async def get_enrollment_assets(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     enrollment_id: str,
     section_idx: int | None = None,
 ) -> list[Row]:
     if section_idx is not None:
-        async with conn.execute(
+        return _rows(await conn.fetch(
             """SELECT * FROM enrollment_assets
-               WHERE enrollment_id = ? AND section_idx = ?
+               WHERE enrollment_id = $1 AND section_idx = $2
                ORDER BY section_idx, idx""",
-            (enrollment_id, section_idx),
-        ) as cur:
-            return _rows(await cur.fetchall())
-    async with conn.execute(
+            enrollment_id, section_idx,
+        ))
+    return _rows(await conn.fetch(
         """SELECT * FROM enrollment_assets
-           WHERE enrollment_id = ?
+           WHERE enrollment_id = $1
            ORDER BY section_idx, idx""",
-        (enrollment_id,),
-    ) as cur:
-        return _rows(await cur.fetchall())
+        enrollment_id,
+    ))
 
 
 # ── users / auth ───────────────────────────────────────────────────────────────
 
 async def create_user(
-    conn: aiosqlite.Connection, email: str, password_hash: str, username: str = ""
+    conn: asyncpg.Connection, email: str, password_hash: str, username: str = ""
 ) -> Row:
     uid = new_id()
     clean_email = email.lower().strip()
     uname = username.strip() if username.strip() else clean_email.split("@")[0][:30]
     await conn.execute(
-        "INSERT INTO users (id, email, password_hash, email_verified, username) VALUES (?, ?, ?, 0, ?)",
-        (uid, clean_email, password_hash, uname),
+        "INSERT INTO users (id, email, password_hash, email_verified, username) VALUES ($1, $2, $3, 0, $4)",
+        uid, clean_email, password_hash, uname,
     )
-    await conn.commit()
-    async with conn.execute("SELECT * FROM users WHERE id = ?", (uid,)) as cur:
-        return _row(await cur.fetchone())  # type: ignore[return-value]
+    return _row(await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid))  # type: ignore[return-value]
 
 
 async def get_user_by_email(
-    conn: aiosqlite.Connection, email: str
+    conn: asyncpg.Connection, email: str
 ) -> Row | None:
-    async with conn.execute(
-        "SELECT * FROM users WHERE email = ?", (email.lower().strip(),)
-    ) as cur:
-        return _row(await cur.fetchone())
+    return _row(await conn.fetchrow(
+        "SELECT * FROM users WHERE email = $1", email.lower().strip()
+    ))
 
 
 async def get_user_by_id(
-    conn: aiosqlite.Connection, user_id: str
+    conn: asyncpg.Connection, user_id: str
 ) -> Row | None:
-    async with conn.execute(
-        "SELECT * FROM users WHERE id = ?", (user_id,)
-    ) as cur:
-        return _row(await cur.fetchone())
+    return _row(await conn.fetchrow("SELECT * FROM users WHERE id = $1", user_id))
 
 
-async def delete_user(conn: aiosqlite.Connection, user_id: str) -> None:
-    await conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
-    await conn.commit()
+async def delete_user(conn: asyncpg.Connection, user_id: str) -> None:
+    await conn.execute("DELETE FROM users WHERE id = $1", user_id)
 
 
 async def mark_email_verified(
-    conn: aiosqlite.Connection, user_id: str
+    conn: asyncpg.Connection, user_id: str
 ) -> None:
     await conn.execute(
-        "UPDATE users SET email_verified = 1 WHERE id = ?", (user_id,)
+        "UPDATE users SET email_verified = 1 WHERE id = $1", user_id
     )
-    await conn.commit()
 
 
 async def create_verification_token(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     user_id: str,
     token: str,
     ttl_hours: int = 24,
 ) -> None:
-    # Remove any existing tokens for this user first.
-    await conn.execute(
-        "DELETE FROM email_verifications WHERE user_id = ?", (user_id,)
-    )
-    await conn.execute(
-        """INSERT INTO email_verifications (token, user_id, expires_at)
-           VALUES (?, ?, datetime('now', ?))""",
-        (token, user_id, f"+{ttl_hours} hours"),
-    )
-    await conn.commit()
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
+    async with conn.transaction():
+        await conn.execute(
+            "DELETE FROM email_verifications WHERE user_id = $1", user_id
+        )
+        await conn.execute(
+            "INSERT INTO email_verifications (token, user_id, expires_at) VALUES ($1, $2, $3)",
+            token, user_id, expires_at,
+        )
 
 
 async def consume_verification_token(
-    conn: aiosqlite.Connection, token: str
+    conn: asyncpg.Connection, token: str
 ) -> str | None:
     """Validate and delete token; returns user_id or None if invalid/expired."""
-    async with conn.execute(
-        """SELECT user_id FROM email_verifications
-           WHERE token = ? AND expires_at > datetime('now')""",
-        (token,),
-    ) as cur:
-        row = await cur.fetchone()
-    if row is None:
-        return None
-    user_id = row[0]
-    await conn.execute(
-        "DELETE FROM email_verifications WHERE token = ?", (token,)
-    )
-    await conn.commit()
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            "SELECT user_id FROM email_verifications WHERE token = $1 AND expires_at > CLOCK_TIMESTAMP()",
+            token,
+        )
+        if row is None:
+            return None
+        user_id = row[0]
+        await conn.execute(
+            "DELETE FROM email_verifications WHERE token = $1", token
+        )
     return user_id
 
 
 async def create_password_reset_token(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     user_id: str,
     token: str,
     ttl_hours: int = 1,
 ) -> None:
-    await conn.execute(
-        "DELETE FROM password_reset_tokens WHERE user_id = ?", (user_id,)
-    )
-    await conn.execute(
-        """INSERT INTO password_reset_tokens (token, user_id, expires_at)
-           VALUES (?, ?, datetime('now', ?))""",
-        (token, user_id, f"+{ttl_hours} hours"),
-    )
-    await conn.commit()
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
+    async with conn.transaction():
+        await conn.execute(
+            "DELETE FROM password_reset_tokens WHERE user_id = $1", user_id
+        )
+        await conn.execute(
+            "INSERT INTO password_reset_tokens (token, user_id, expires_at) VALUES ($1, $2, $3)",
+            token, user_id, expires_at,
+        )
 
 
 async def consume_password_reset_token(
-    conn: aiosqlite.Connection, token: str
+    conn: asyncpg.Connection, token: str
 ) -> str | None:
     """Validate and delete token; returns user_id or None if invalid/expired."""
-    async with conn.execute(
-        """SELECT user_id FROM password_reset_tokens
-           WHERE token = ? AND expires_at > datetime('now')""",
-        (token,),
-    ) as cur:
-        row = await cur.fetchone()
-    if row is None:
-        return None
-    user_id = row[0]
-    await conn.execute(
-        "DELETE FROM password_reset_tokens WHERE token = ?", (token,)
-    )
-    await conn.commit()
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            "SELECT user_id FROM password_reset_tokens WHERE token = $1 AND expires_at > CLOCK_TIMESTAMP()",
+            token,
+        )
+        if row is None:
+            return None
+        user_id = row[0]
+        await conn.execute(
+            "DELETE FROM password_reset_tokens WHERE token = $1", token
+        )
     return user_id
 
 
 async def update_password_hash(
-    conn: aiosqlite.Connection, user_id: str, password_hash: str
+    conn: asyncpg.Connection, user_id: str, password_hash: str
 ) -> None:
     await conn.execute(
-        "UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id)
+        "UPDATE users SET password_hash = $1 WHERE id = $2", password_hash, user_id
     )
-    await conn.commit()
 
 
 # ── personas ───────────────────────────────────────────────────────────────────
@@ -621,10 +575,9 @@ BUILT_IN_PERSONAS = [
 
 
 async def seed_admin_users(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     admin_emails: tuple[str, ...] | list[str] | set[str] = (),
 ) -> None:
-    """Grant admin to listed emails that already exist (grant-only)."""
     normalized = {
         str(email).strip().lower()
         for email in admin_emails
@@ -632,123 +585,105 @@ async def seed_admin_users(
     }
     for email in normalized:
         await conn.execute(
-            "UPDATE users SET is_admin = 1 WHERE email = ?",
-            (email,),
+            "UPDATE users SET is_admin = 1 WHERE email = $1",
+            email,
         )
-    await conn.commit()
 
 
-async def get_user_is_admin(conn: aiosqlite.Connection, user_id: str) -> bool:
-    async with conn.execute(
-        "SELECT is_admin FROM users WHERE id = ?", (user_id,)
-    ) as cur:
-        row = await cur.fetchone()
+async def get_user_is_admin(conn: asyncpg.Connection, user_id: str) -> bool:
+    row = await conn.fetchrow(
+        "SELECT is_admin FROM users WHERE id = $1", user_id
+    )
     return bool(row and row[0])
 
 
-async def list_users_for_admin_iam(conn: aiosqlite.Connection) -> list[Row]:
-    async with conn.execute(
+async def list_users_for_admin_iam(conn: asyncpg.Connection) -> list[Row]:
+    return _rows(await conn.fetch(
         """SELECT id, email, display_name, username, email_verified, is_admin, created_at
            FROM users
            ORDER BY created_at"""
-    ) as cur:
-        return _rows(await cur.fetchall())
+    ))
 
 
-async def count_admin_users(conn: aiosqlite.Connection) -> int:
-    async with conn.execute(
-        "SELECT COUNT(*) FROM users WHERE is_admin = 1"
-    ) as cur:
-        row = await cur.fetchone()
-    return int(row[0]) if row else 0
+async def count_admin_users(conn: asyncpg.Connection) -> int:
+    val = await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_admin = 1")
+    return int(val) if val else 0
 
 
 async def set_user_admin(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     user_id: str,
     *,
     is_admin: bool,
 ) -> None:
     await conn.execute(
-        "UPDATE users SET is_admin = ? WHERE id = ?",
-        (1 if is_admin else 0, user_id),
+        "UPDATE users SET is_admin = $1 WHERE id = $2",
+        1 if is_admin else 0, user_id,
     )
-    await conn.commit()
 
 
-async def seed_personas(conn: aiosqlite.Connection) -> None:
+async def seed_personas(conn: asyncpg.Connection) -> None:
     for p in BUILT_IN_PERSONAS:
         await conn.execute(
-            """INSERT OR IGNORE INTO personas (id, user_id, name, instructions)
-               VALUES (?, ?, ?, ?)""",
-            (p["id"], p["user_id"], p["name"], p["instructions"]),
+            """INSERT INTO personas (id, user_id, name, instructions)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT DO NOTHING""",
+            p["id"], p["user_id"], p["name"], p["instructions"],
         )
-    await conn.commit()
 
 
 async def get_personas(
-    conn: aiosqlite.Connection, user_id: str | None = None
+    conn: asyncpg.Connection, user_id: str | None = None
 ) -> list[Row]:
-    """Return built-in personas plus any owned by user_id."""
     if user_id:
-        async with conn.execute(
-            "SELECT * FROM personas WHERE user_id IS NULL OR user_id = ? ORDER BY created_at",
-            (user_id,),
-        ) as cur:
-            return _rows(await cur.fetchall())
-    async with conn.execute(
+        return _rows(await conn.fetch(
+            "SELECT * FROM personas WHERE user_id IS NULL OR user_id = $1 ORDER BY created_at",
+            user_id,
+        ))
+    return _rows(await conn.fetch(
         "SELECT * FROM personas WHERE user_id IS NULL ORDER BY created_at"
-    ) as cur:
-        return _rows(await cur.fetchall())
+    ))
 
 
 async def create_persona(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     persona_id: str,
     user_id: str,
     name: str,
     instructions: str,
 ) -> Row:
     await conn.execute(
-        "INSERT INTO personas (id, user_id, name, instructions) VALUES (?, ?, ?, ?)",
-        (persona_id, user_id, name, instructions),
+        "INSERT INTO personas (id, user_id, name, instructions) VALUES ($1, $2, $3, $4)",
+        persona_id, user_id, name, instructions,
     )
-    await conn.commit()
-    async with conn.execute(
-        "SELECT * FROM personas WHERE id = ?", (persona_id,)
-    ) as cur:
-        return _row(await cur.fetchone())  # type: ignore[return-value]
+    return _row(await conn.fetchrow("SELECT * FROM personas WHERE id = $1", persona_id))  # type: ignore[return-value]
 
 
 async def delete_persona(
-    conn: aiosqlite.Connection, persona_id: str, user_id: str
+    conn: asyncpg.Connection, persona_id: str, user_id: str
 ) -> bool:
     """Delete only if owned by user_id.  Returns True if deleted."""
-    async with conn.execute(
-        "DELETE FROM personas WHERE id = ? AND user_id = ?",
-        (persona_id, user_id),
-    ) as cur:
-        deleted = cur.rowcount > 0
-    if deleted:
-        await conn.commit()
-    return deleted
+    status = await conn.execute(
+        "DELETE FROM personas WHERE id = $1 AND user_id = $2",
+        persona_id, user_id,
+    )
+    return status != "DELETE 0"
 
 
 # ── points / gamification ───────────────────────────────────────────────────────
 
 async def get_enrollment_section_idx(
-    conn: aiosqlite.Connection, enrollment_id: str
+    conn: asyncpg.Connection, enrollment_id: str
 ) -> int:
-    """Return the persisted current_section_idx for an enrollment (0 if not found)."""
-    async with conn.execute(
-        "SELECT current_section_idx FROM lesson_enrollments WHERE id = ?", (enrollment_id,)
-    ) as cur:
-        row = await cur.fetchone()
-    return int(row[0]) if row else 0
+    val = await conn.fetchval(
+        "SELECT current_section_idx FROM lesson_enrollments WHERE id = $1",
+        enrollment_id,
+    )
+    return int(val) if val is not None else 0
 
 
 async def upsert_user_points(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     user_id: str,
     *,
     delta_points: int = 0,
@@ -762,47 +697,43 @@ async def upsert_user_points(
     await conn.execute(
         """INSERT INTO user_points (user_id, total_points, lessons_completed, sections_advanced,
                current_streak, longest_streak, last_lesson_date, updated_at)
-           VALUES (?, ?, ?, ?, COALESCE(?, 0), COALESCE(?, 0), ?, datetime('now'))
+           VALUES ($1, $2, $3, $4, COALESCE($5, 0), COALESCE($6, 0), $7, NOW())
            ON CONFLICT(user_id) DO UPDATE SET
-               total_points      = total_points + excluded.total_points,
-               lessons_completed = lessons_completed + excluded.lessons_completed,
-               sections_advanced = sections_advanced + excluded.sections_advanced,
-               current_streak    = CASE WHEN excluded.current_streak != 0 OR ? IS NOT NULL
+               total_points      = user_points.total_points + excluded.total_points,
+               lessons_completed = user_points.lessons_completed + excluded.lessons_completed,
+               sections_advanced = user_points.sections_advanced + excluded.sections_advanced,
+               current_streak    = CASE WHEN excluded.current_streak != 0 OR $8::int IS NOT NULL
                                         THEN excluded.current_streak
-                                        ELSE current_streak END,
-               longest_streak    = CASE WHEN excluded.longest_streak != 0 OR ? IS NOT NULL
-                                        THEN MAX(longest_streak, excluded.longest_streak)
-                                        ELSE longest_streak END,
+                                        ELSE user_points.current_streak END,
+               longest_streak    = CASE WHEN excluded.longest_streak != 0 OR $9::int IS NOT NULL
+                                        THEN GREATEST(user_points.longest_streak, excluded.longest_streak)
+                                        ELSE user_points.longest_streak END,
                last_lesson_date  = CASE WHEN excluded.last_lesson_date IS NOT NULL
                                         THEN excluded.last_lesson_date
-                                        ELSE last_lesson_date END,
-               updated_at        = datetime('now')""",
-        (
-            user_id,
-            delta_points,
-            delta_lessons,
-            delta_sections,
-            streak,
-            longest_streak,
-            last_lesson_date,
-            streak,   # for streak CASE
-            longest_streak,  # for longest_streak CASE
-        ),
+                                        ELSE user_points.last_lesson_date END,
+               updated_at        = NOW()""",
+        user_id,
+        delta_points,
+        delta_lessons,
+        delta_sections,
+        streak,
+        longest_streak,
+        last_lesson_date,
+        streak,          # $8 — streak CASE
+        longest_streak,  # $9 — longest_streak CASE
     )
-    await conn.commit()
 
 
 async def get_user_points(
-    conn: aiosqlite.Connection, user_id: str
+    conn: asyncpg.Connection, user_id: str
 ) -> Row | None:
-    async with conn.execute(
-        "SELECT * FROM user_points WHERE user_id = ?", (user_id,)
-    ) as cur:
-        return _row(await cur.fetchone())
+    return _row(await conn.fetchrow(
+        "SELECT * FROM user_points WHERE user_id = $1", user_id
+    ))
 
 
 async def insert_point_event(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     event_id: str,
     user_id: str,
     event_type: str,
@@ -810,55 +741,45 @@ async def insert_point_event(
     enrollment_id: str | None = None,
 ) -> bool:
     """Insert a point event. Returns False if a unique-constrained duplicate was ignored."""
-    async with conn.execute(
-        """INSERT OR IGNORE INTO point_events (id, user_id, enrollment_id, event_type, points)
-           VALUES (?, ?, ?, ?, ?)""",
-        (event_id, user_id, enrollment_id, event_type, points),
-    ) as cur:
-        inserted = cur.rowcount > 0
-    if inserted:
-        await conn.commit()
-    return inserted
+    status = await conn.execute(
+        """INSERT INTO point_events (id, user_id, enrollment_id, event_type, points)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT DO NOTHING""",
+        event_id, user_id, enrollment_id, event_type, points,
+    )
+    return status != "INSERT 0 0"
 
 
 async def get_leaderboard(
-    conn: aiosqlite.Connection, limit: int = 50
+    conn: asyncpg.Connection, limit: int = 50
 ) -> list[Row]:
-    """Return top users by total_points, excluding the anonymous user."""
-    from .connection import ANON_USER_ID
-    async with conn.execute(
+    return _rows(await conn.fetch(
         """SELECT u.username, u.display_name,
                   up.total_points, up.lessons_completed, up.sections_advanced,
                   up.current_streak, up.longest_streak,
                   ROW_NUMBER() OVER (ORDER BY up.total_points DESC) AS rank
            FROM user_points up
            JOIN users u ON u.id = up.user_id
-           WHERE up.total_points > 0 AND up.user_id != ?
+           WHERE up.total_points > 0 AND up.user_id != $1
            ORDER BY up.total_points DESC
-           LIMIT ?""",
-        (ANON_USER_ID, limit),
-    ) as cur:
-        return _rows(await cur.fetchall())
+           LIMIT $2""",
+        ANON_USER_ID, limit,
+    ))
 
 
 async def get_user_rank(
-    conn: aiosqlite.Connection, user_id: str
+    conn: asyncpg.Connection, user_id: str
 ) -> int | None:
-    """Return the rank of a specific user (1-based), or None if they have no points."""
-    from .connection import ANON_USER_ID
-    async with conn.execute(
-        """SELECT COUNT(*) + 1
-           FROM user_points
-           WHERE total_points > (
-               SELECT COALESCE(total_points, 0) FROM user_points WHERE user_id = ?
-           )
-           AND user_id != ?""",
-        (user_id, ANON_USER_ID),
-    ) as cur:
-        row = await cur.fetchone()
-    # Confirm user actually has a points row
     pts = await get_user_points(conn, user_id)
     if pts is None:
         return None
-    return int(row[0]) if row else None
-    return deleted
+    val = await conn.fetchval(
+        """SELECT COUNT(*) + 1
+           FROM user_points
+           WHERE total_points > (
+               SELECT COALESCE(total_points, 0) FROM user_points WHERE user_id = $1
+           )
+           AND user_id != $2""",
+        user_id, ANON_USER_ID,
+    )
+    return int(val) if val is not None else None

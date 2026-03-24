@@ -55,8 +55,7 @@ async def test_lesson_decompose_requires_admin(client, mem_db):
 @pytest.mark.asyncio
 async def test_textbook_draft_uses_hash_cache_and_exposes_chapters(client, mem_db):
     admin = await models.create_user(mem_db, "admin-textbook@example.com", "pw")
-    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (admin["id"],))
-    await mem_db.commit()
+    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = $1", admin["id"])
 
     pdf_bytes = _build_textbook_pdf_bytes()
 
@@ -83,8 +82,7 @@ async def test_textbook_draft_uses_hash_cache_and_exposes_chapters(client, mem_d
     assert second_payload["source"]["cache_hit"] is True
     assert second_payload["source"]["pdf_hash"] == first_payload["source"]["pdf_hash"]
 
-    async with mem_db.execute("SELECT COUNT(*) FROM textbook_toc_cache") as cur:
-        row = await cur.fetchone()
+    row = await mem_db.fetchrow("SELECT COUNT(*) FROM textbook_toc_cache")
     assert row is not None
     assert int(row[0]) == 1
 
@@ -92,8 +90,7 @@ async def test_textbook_draft_uses_hash_cache_and_exposes_chapters(client, mem_d
 @pytest.mark.asyncio
 async def test_textbook_chapter_edit_roundtrip(client, mem_db):
     admin = await models.create_user(mem_db, "admin-chapters@example.com", "pw")
-    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (admin["id"],))
-    await mem_db.commit()
+    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = $1", admin["id"])
 
     create = await client.post(
         "/courses/textbook/draft",

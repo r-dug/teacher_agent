@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
+import asyncpg
 
 from ...app_state import registry
 from ...config import settings
@@ -622,19 +622,18 @@ def extract_toc_chapters_sync(
 
 
 async def ensure_advisor_session(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     *,
     course_id: str,
     user_id: str,
     reset: bool = False,
 ) -> dict[str, Any]:
-    async with conn.execute(
+    row = await conn.fetchrow(
         """SELECT transcript_json, objectives_prompt, status
            FROM course_advisor_sessions
-           WHERE course_id = ?""",
-        (course_id,),
-    ) as cur:
-        row = await cur.fetchone()
+           WHERE course_id = $1""",
+        course_id,
+    )
 
     transcript: list[dict[str, str]]
     objectives_prompt: str | None
@@ -655,16 +654,15 @@ async def ensure_advisor_session(
     await conn.execute(
         """INSERT INTO course_advisor_sessions
            (course_id, creator_id, transcript_json, objectives_prompt, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+           VALUES ($1, $2, $3, $4, $5, now(), now())
            ON CONFLICT(course_id) DO UPDATE SET
              creator_id = excluded.creator_id,
              transcript_json = excluded.transcript_json,
              objectives_prompt = excluded.objectives_prompt,
              status = excluded.status,
-             updated_at = datetime('now')""",
-        (course_id, user_id, json.dumps(transcript), objectives_prompt, status),
+             updated_at = now()""",
+        course_id, user_id, json.dumps(transcript), objectives_prompt, status,
     )
-    await conn.commit()
     return {
         "course_id": course_id,
         "status": status,
@@ -674,7 +672,7 @@ async def ensure_advisor_session(
 
 
 async def advisor_user_message(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     *,
     course_id: str,
     user_id: str,
@@ -695,16 +693,15 @@ async def advisor_user_message(
 
     await conn.execute(
         """UPDATE course_advisor_sessions
-           SET transcript_json = ?, status = 'draft', updated_at = datetime('now')
-           WHERE course_id = ?""",
-        (json.dumps(transcript), course_id),
+           SET transcript_json = $1, status = 'draft', updated_at = now()
+           WHERE course_id = $2""",
+        json.dumps(transcript), course_id,
     )
-    await conn.commit()
     return {"course_id": course_id, "status": "draft", "transcript": transcript, "assistant": reply}
 
 
 async def finalize_advisor_session(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     *,
     course_id: str,
     user_id: str,
@@ -733,9 +730,9 @@ async def finalize_advisor_session(
     )
     await conn.execute(
         """UPDATE course_advisor_sessions
-           SET objectives_prompt = ?, status = 'finalized', updated_at = datetime('now')
-           WHERE course_id = ?""",
-        (objectives_prompt, course_id),
+           SET objectives_prompt = $1, status = 'finalized', updated_at = now()
+           WHERE course_id = $2""",
+        objectives_prompt, course_id,
     )
 
     # When the PDF had no embedded bookmarks AND chapters are still generic
@@ -758,7 +755,6 @@ async def finalize_advisor_session(
         await _write_chapter_drafts(conn, course_id=course_id, chapters=suggested_chapters)
         updated_chapters = await _load_chapters(conn, course_id)
 
-    await conn.commit()
     return {
         "course_id": course_id,
         "status": "finalized",
@@ -769,7 +765,7 @@ async def finalize_advisor_session(
 
 
 async def create_decomposition_job(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     *,
     course_id: str,
     user_id: str,
@@ -777,36 +773,34 @@ async def create_decomposition_job(
     objectives_prompt_override: str | None = None,
     decompose_mode: str = "pdf",
 ) -> dict[str, Any]:
-    async with conn.execute(
+    active = await conn.fetchrow(
         """SELECT id, status FROM course_decomposition_jobs
-           WHERE course_id = ?
+           WHERE course_id = $1
              AND status IN ('queued', 'running')
            ORDER BY created_at DESC
            LIMIT 1""",
-        (course_id,),
-    ) as cur:
-        active = await cur.fetchone()
+        course_id,
+    )
     if active is not None:
         raise RuntimeError("A decomposition job is already in progress for this course.")
 
-    async with conn.execute(
-        "SELECT objectives_prompt, status FROM course_advisor_sessions WHERE course_id = ?",
-        (course_id,),
-    ) as cur:
-        advisor = await cur.fetchone()
+    advisor = await conn.fetchrow(
+        "SELECT objectives_prompt, status FROM course_advisor_sessions WHERE course_id = $1",
+        course_id,
+    )
     override_prompt = (objectives_prompt_override or "").strip()
     if override_prompt:
         objectives_prompt = override_prompt
         await conn.execute(
             """INSERT INTO course_advisor_sessions
                (course_id, creator_id, transcript_json, objectives_prompt, status, created_at, updated_at)
-               VALUES (?, ?, '[]', ?, 'finalized', datetime('now'), datetime('now'))
+               VALUES ($1, $2, '[]', $3, 'finalized', now(), now())
                ON CONFLICT(course_id) DO UPDATE SET
                  creator_id = excluded.creator_id,
                  objectives_prompt = excluded.objectives_prompt,
                  status = 'finalized',
-                 updated_at = datetime('now')""",
-            (course_id, user_id, objectives_prompt),
+                 updated_at = now()""",
+            course_id, user_id, objectives_prompt,
         )
     else:
         objectives_prompt = str(advisor[0] or "").strip() if advisor else ""
@@ -823,25 +817,22 @@ async def create_decomposition_job(
         """INSERT INTO course_decomposition_jobs
            (id, course_id, creator_id, status, decompose_mode, objectives_prompt, total_items, completed_items, failed_items,
             notify_session_id, created_at, updated_at)
-           VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, 0, ?, datetime('now'), datetime('now'))""",
-        (job_id, course_id, user_id, decompose_mode, objectives_prompt, len(chapters), notify_session_id),
+           VALUES ($1, $2, $3, 'queued', $4, $5, $6, 0, 0, $7, now(), now())""",
+        job_id, course_id, user_id, decompose_mode, objectives_prompt, len(chapters), notify_session_id,
     )
     for idx, chapter in enumerate(chapters):
         await conn.execute(
             """INSERT INTO course_decomposition_job_items
                (id, job_id, chapter_id, idx, title, page_start, page_end, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', datetime('now'), datetime('now'))""",
-            (
-                db.new_id(),
-                job_id,
-                str(chapter["id"]),
-                idx,
-                str(chapter["title"]),
-                int(chapter["page_start"]),
-                int(chapter["page_end"]),
-            ),
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', now(), now())""",
+            db.new_id(),
+            job_id,
+            str(chapter["id"]),
+            idx,
+            str(chapter["title"]),
+            int(chapter["page_start"]),
+            int(chapter["page_end"]),
         )
-    await conn.commit()
     return await get_job_status(conn, course_id=course_id, job_id=job_id)
 
 
@@ -859,39 +850,36 @@ def launch_decomposition_job(job_id: str) -> None:
 
 
 async def get_job_status(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     *,
     course_id: str,
     job_id: str | None = None,
 ) -> dict[str, Any]:
     if job_id:
-        async with conn.execute(
+        row = await conn.fetchrow(
             """SELECT * FROM course_decomposition_jobs
-               WHERE id = ? AND course_id = ?""",
-            (job_id, course_id),
-        ) as cur:
-            row = await cur.fetchone()
+               WHERE id = $1 AND course_id = $2""",
+            job_id, course_id,
+        )
     else:
-        async with conn.execute(
+        row = await conn.fetchrow(
             """SELECT * FROM course_decomposition_jobs
-               WHERE course_id = ?
+               WHERE course_id = $1
                ORDER BY created_at DESC
                LIMIT 1""",
-            (course_id,),
-        ) as cur:
-            row = await cur.fetchone()
+            course_id,
+        )
     if row is None:
         return {"job": None, "items": []}
 
     job = dict(row)
-    async with conn.execute(
+    items = [dict(r) for r in await conn.fetch(
         """SELECT id, chapter_id, idx, title, page_start, page_end, lesson_id, cache_key, status, error
            FROM course_decomposition_job_items
-           WHERE job_id = ?
+           WHERE job_id = $1
            ORDER BY idx""",
-        (job["id"],),
-    ) as cur:
-        items = [dict(r) for r in await cur.fetchall()]
+        job["id"],
+    )]
 
     total = int(job.get("total_items") or 0)
     completed = int(job.get("completed_items") or 0)
@@ -903,14 +891,11 @@ async def get_job_status(
 
 
 async def _run_decomposition_job(job_id: str) -> None:
-    conn = await aiosqlite.connect(str(settings.DB_PATH))
-    conn.row_factory = aiosqlite.Row
-    try:
-        async with conn.execute(
-            "SELECT * FROM course_decomposition_jobs WHERE id = ?",
-            (job_id,),
-        ) as cur:
-            job_row = await cur.fetchone()
+    async with db.acquire() as conn:
+        job_row = await conn.fetchrow(
+            "SELECT * FROM course_decomposition_jobs WHERE id = $1",
+            job_id,
+        )
         if job_row is None:
             return
         job = dict(job_row)
@@ -925,11 +910,10 @@ async def _run_decomposition_job(job_id: str) -> None:
 
         await conn.execute(
             """UPDATE course_decomposition_jobs
-               SET status = 'running', started_at = datetime('now'), updated_at = datetime('now')
-               WHERE id = ?""",
-            (job_id,),
+               SET status = 'running', started_at = now(), updated_at = now()
+               WHERE id = $1""",
+            job_id,
         )
-        await conn.commit()
         await _notify(notify_session_id, {"event": "course_decompose_progress", "course_id": course_id, "job_id": job_id, "status": "running", "message": "Decomposition started."})
 
         source = await _load_source(conn, course_id)
@@ -944,13 +928,12 @@ async def _run_decomposition_job(job_id: str) -> None:
             full_pdf_path = settings.STORAGE_DIR / Path(source_pdf_rel)
             full_pdf_text = await asyncio.to_thread(extract_full_text_from_pdf, full_pdf_path)
 
-        async with conn.execute(
+        items = [dict(r) for r in await conn.fetch(
             """SELECT * FROM course_decomposition_job_items
-               WHERE job_id = ?
+               WHERE job_id = $1
                ORDER BY idx""",
-            (job_id,),
-        ) as cur:
-            items = [dict(r) for r in await cur.fetchall()]
+            job_id,
+        )]
 
         completed = 0
         failed = 0
@@ -963,11 +946,10 @@ async def _run_decomposition_job(job_id: str) -> None:
             next_chapter_title = items[item_idx + 1]["title"] if item_idx + 1 < len(items) else None
             await conn.execute(
                 """UPDATE course_decomposition_job_items
-                   SET status = 'running', error = NULL, updated_at = datetime('now')
-                   WHERE id = ?""",
-                (item_id,),
+                   SET status = 'running', error = NULL, updated_at = now()
+                   WHERE id = $1""",
+                item_id,
             )
-            await conn.commit()
 
             try:
                 cache_key = _build_cache_key(
@@ -1008,28 +990,27 @@ async def _run_decomposition_job(job_id: str) -> None:
                 )
                 await conn.execute(
                     """UPDATE course_decomposition_job_items
-                       SET status = ?, lesson_id = ?, cache_key = ?, error = NULL, updated_at = datetime('now')
-                       WHERE id = ?""",
-                    ("cached" if cache_hit else "completed", lesson_id, cache_key, item_id),
+                       SET status = $1, lesson_id = $2, cache_key = $3, error = NULL, updated_at = now()
+                       WHERE id = $4""",
+                    "cached" if cache_hit else "completed", lesson_id, cache_key, item_id,
                 )
                 completed += 1
             except Exception as exc:
                 failed += 1
                 await conn.execute(
                     """UPDATE course_decomposition_job_items
-                       SET status = 'failed', error = ?, updated_at = datetime('now')
-                       WHERE id = ?""",
-                    (str(exc), item_id),
+                       SET status = 'failed', error = $1, updated_at = now()
+                       WHERE id = $2""",
+                    str(exc), item_id,
                 )
                 log.exception("chapter decomposition failed for job %s item %s", job_id, item_id)
 
             await conn.execute(
                 """UPDATE course_decomposition_jobs
-                   SET completed_items = ?, failed_items = ?, updated_at = datetime('now')
-                   WHERE id = ?""",
-                (completed, failed, job_id),
+                   SET completed_items = $1, failed_items = $2, updated_at = now()
+                   WHERE id = $3""",
+                completed, failed, job_id,
             )
-            await conn.commit()
             total = len(items)
             pct = 0 if total <= 0 else int(round((completed / total) * 100))
             await _notify(
@@ -1051,11 +1032,10 @@ async def _run_decomposition_job(job_id: str) -> None:
         final_error = None if failed == 0 else "One or more chapter decomposition jobs failed."
         await conn.execute(
             """UPDATE course_decomposition_jobs
-               SET status = ?, error = ?, finished_at = datetime('now'), updated_at = datetime('now')
-               WHERE id = ?""",
-            (final_status, final_error, job_id),
+               SET status = $1, error = $2, finished_at = now(), updated_at = now()
+               WHERE id = $3""",
+            final_status, final_error, job_id,
         )
-        await conn.commit()
         await _notify(
             notify_session_id,
             {
@@ -1068,8 +1048,6 @@ async def _run_decomposition_job(job_id: str) -> None:
                 "total_items": len(items),
             },
         )
-    finally:
-        await conn.close()
 
 
 async def _notify(session_id: str | None, event: dict[str, Any]) -> None:
@@ -1083,7 +1061,7 @@ async def _notify(session_id: str | None, event: dict[str, Any]) -> None:
 
 async def _resolve_sections(
     *,
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     cache_key: str,
     pdf_hash: str,
     source_pdf_rel: str,
@@ -1099,19 +1077,17 @@ async def _resolve_sections(
     chapter_title: str = "",
     next_chapter_title: str | None = None,
 ) -> tuple[bool, list[dict[str, Any]]]:
-    async with conn.execute(
-        "SELECT sections_json FROM decomposition_cache WHERE cache_key = ?",
-        (cache_key,),
-    ) as cur:
-        row = await cur.fetchone()
+    row = await conn.fetchrow(
+        "SELECT sections_json FROM decomposition_cache WHERE cache_key = $1",
+        cache_key,
+    )
     if row is not None:
         try:
             cached_sections = _normalize_sections_or_raise(_json_loads(row[0], []))
             return True, cached_sections
         except Exception:
             # Existing cache row is empty/invalid; invalidate and recompute.
-            await conn.execute("DELETE FROM decomposition_cache WHERE cache_key = ?", (cache_key,))
-            await conn.commit()
+            await conn.execute("DELETE FROM decomposition_cache WHERE cache_key = $1", cache_key)
 
     raw_sections = await asyncio.to_thread(
         _decompose_chapter_sync,
@@ -1131,22 +1107,19 @@ async def _resolve_sections(
     await conn.execute(
         """INSERT INTO decomposition_cache
            (cache_key, pdf_hash, page_start, page_end, objectives_hash, model, prompt_version, sections_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())
            ON CONFLICT(cache_key) DO UPDATE SET
              sections_json = excluded.sections_json,
-             updated_at = datetime('now')""",
-        (
-            cache_key,
-            pdf_hash,
-            page_start,
-            page_end,
-            _sha256_text(objectives_prompt),
-            cache_model_key,
-            _PROMPT_VERSION,
-            json.dumps(sections),
-        ),
+             updated_at = now()""",
+        cache_key,
+        pdf_hash,
+        page_start,
+        page_end,
+        _sha256_text(objectives_prompt),
+        cache_model_key,
+        _PROMPT_VERSION,
+        json.dumps(sections),
     )
-    await conn.commit()
     return False, sections
 
 
@@ -1482,7 +1455,7 @@ def _decompose_chapter_openai_sync(
 
 async def _upsert_chapter_lesson(
     *,
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     course_id: str,
     user_id: str,
     chapter_id: str,
@@ -1495,12 +1468,11 @@ async def _upsert_chapter_lesson(
     if not sections:
         raise ValueError("Cannot upsert chapter lesson with zero sections.")
 
-    async with conn.execute(
+    row = await conn.fetchrow(
         """SELECT lesson_id FROM course_chapter_lessons
-           WHERE course_id = ? AND chapter_id = ?""",
-        (course_id, chapter_id),
-    ) as cur:
-        row = await cur.fetchone()
+           WHERE course_id = $1 AND chapter_id = $2""",
+        course_id, chapter_id,
+    )
 
     lesson_id = str(row[0]) if row else ""
     lesson = await models.get_lesson(conn, lesson_id) if lesson_id else None
@@ -1527,76 +1499,69 @@ async def _upsert_chapter_lesson(
     await conn.execute(
         """INSERT INTO course_chapter_lessons
            (course_id, chapter_id, lesson_id, created_at, updated_at)
-           VALUES (?, ?, ?, datetime('now'), datetime('now'))
+           VALUES ($1, $2, $3, now(), now())
            ON CONFLICT(course_id, chapter_id)
            DO UPDATE SET
              lesson_id = excluded.lesson_id,
-             updated_at = datetime('now')""",
-        (course_id, chapter_id, lesson_id),
+             updated_at = now()""",
+        course_id, chapter_id, lesson_id,
     )
-    await conn.commit()
     return lesson_id
 
 
-async def _course_title(conn: aiosqlite.Connection, course_id: str) -> str:
-    async with conn.execute("SELECT title FROM courses WHERE id = ?", (course_id,)) as cur:
-        row = await cur.fetchone()
+async def _course_title(conn: asyncpg.Connection, course_id: str) -> str:
+    row = await conn.fetchrow("SELECT title FROM courses WHERE id = $1", course_id)
     return str(row[0]) if row else "Untitled Course"
 
 
-async def _load_source(conn: aiosqlite.Connection, course_id: str) -> dict[str, Any]:
-    async with conn.execute(
+async def _load_source(conn: asyncpg.Connection, course_id: str) -> dict[str, Any]:
+    row = await conn.fetchrow(
         """SELECT course_id, creator_id, pdf_hash, pdf_path, page_count, toc_json
            FROM course_source_files
-           WHERE course_id = ?""",
-        (course_id,),
-    ) as cur:
-        row = await cur.fetchone()
+           WHERE course_id = $1""",
+        course_id,
+    )
     if row is None:
         raise RuntimeError("No textbook source found for this course.")
     return dict(row)
 
 
 async def _load_chapters(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     course_id: str,
     *,
     included_only: bool = False,
 ) -> list[dict[str, Any]]:
     sql = (
         "SELECT id, idx, title, page_start, page_end, included "
-        "FROM course_chapter_drafts WHERE course_id = ?"
+        "FROM course_chapter_drafts WHERE course_id = $1"
     )
-    params: list[Any] = [course_id]
     if included_only:
         sql += " AND included = 1"
     sql += " ORDER BY idx"
-    async with conn.execute(sql, params) as cur:
-        rows = await cur.fetchall()
+    rows = await conn.fetch(sql, course_id)
     return [dict(r) for r in rows]
 
 
 async def _write_chapter_drafts(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     *,
     course_id: str,
     chapters: list[dict[str, Any]],
 ) -> None:
     await conn.execute(
-        "DELETE FROM course_chapter_drafts WHERE course_id = ?", (course_id,)
+        "DELETE FROM course_chapter_drafts WHERE course_id = $1", course_id
     )
     for idx, chapter in enumerate(chapters):
         await conn.execute(
             """INSERT INTO course_chapter_drafts
                (id, course_id, idx, title, page_start, page_end, included, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))""",
-            (
-                db.new_id(),
-                course_id,
-                idx,
-                chapter["title"],
-                int(chapter["page_start"]),
-                int(chapter["page_end"]),
-                1 if chapter.get("included", True) else 0,
-            ),
+               VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())""",
+            db.new_id(),
+            course_id,
+            idx,
+            chapter["title"],
+            int(chapter["page_start"]),
+            int(chapter["page_end"]),
+            1 if chapter.get("included", True) else 0,
         )

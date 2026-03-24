@@ -23,9 +23,8 @@ async def test_publish_requires_admin(client, mem_db):
 @pytest.mark.asyncio
 async def test_publish_returns_409_when_no_decomposed_lessons(client, mem_db):
     admin = await models.create_user(mem_db, "admin-publish@example.com", "pw")
-    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (admin["id"],))
+    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = $1", admin["id"])
     target = await models.create_user(mem_db, "student-publish@example.com", "pw")
-    await mem_db.commit()
 
     course = await models.create_course(mem_db, admin["id"], "JP 101", "desc")
     await models.create_lesson(mem_db, admin["id"], "Undecomposed", course_id=course["id"])

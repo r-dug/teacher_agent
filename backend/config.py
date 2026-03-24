@@ -24,7 +24,7 @@ class Settings:
 
     # Storage
     STORAGE_DIR: Path = Path(os.getenv("STORAGE_DIR", "./storage"))
-    DB_PATH: Path = Path(os.getenv("DB_PATH", "./storage/db.sqlite3"))
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://localhost/pdf_to_audio")
 
     # Models
     STT_MODEL_SIZE: str = os.getenv("STT_MODEL_SIZE", "base")
@@ -94,6 +94,9 @@ class Settings:
         "Clear educational diagram, labelled, white background: ",
     )
 
+    # Session retention
+    SESSION_RETENTION_DAYS: int = int(os.getenv("SESSION_RETENTION_DAYS", "30"))
+
     # Auth (prototype: all requests trusted from the frontend server)
     FRONTEND_ORIGIN: str = os.getenv("FRONTEND_ORIGIN", "http://127.0.0.1:8000")
     # Shared secret for BFF→backend calls.  When set, all inbound requests must
@@ -160,7 +163,6 @@ class Settings:
 
     def ensure_dirs(self) -> None:
         self.STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-        self.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()

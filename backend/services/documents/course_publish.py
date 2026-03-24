@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import aiosqlite
+import asyncpg
 
 from ...db import models
 
@@ -14,7 +14,7 @@ class CoursePublishPreconditionError(RuntimeError):
 
 
 async def publish_course_to_all_users(
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     *,
     source_course_id: str,
     actor_user_id: str,
@@ -52,8 +52,6 @@ async def publish_course_to_all_users(
     # Publish each decomposed lesson
     for lesson in decomposed_lessons:
         await models.update_lesson(conn, lesson["id"], visibility="published")
-
-    await conn.commit()
 
     return {
         "source_course_id": source_course_id,

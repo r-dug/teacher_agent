@@ -59,19 +59,32 @@ async def _usage_background_task() -> None:
             last_roll_month = now.month
 
 
+async def _session_cleanup_task() -> None:
+    """Delete sessions not seen in SESSION_RETENTION_DAYS. Runs once per day."""
+    while True:
+        await asyncio.sleep(24 * 3600)
+        try:
+            async with db.acquire() as conn:
+                deleted = await models.expire_old_sessions(conn, settings.SESSION_RETENTION_DAYS)
+            if deleted:
+                log.info("[sessions] expired %d stale session(s) (>%d days)", deleted, settings.SESSION_RETENTION_DAYS)
+        except Exception as exc:
+            log.warning("[sessions] expiry cleanup error: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Ensure storage dirs exist
     settings.ensure_dirs()
 
     # Initialise database
-    await db.init(settings.DB_PATH)
-    conn = await db.get().__anext__()
-    await models.seed_personas(conn)
-    await models.seed_admin_users(conn, settings.ADMIN_EMAILS)
+    await db.init(settings.DATABASE_URL)
+    async with db.acquire() as conn:
+        await models.seed_personas(conn)
+        await models.seed_admin_users(conn, settings.ADMIN_EMAILS)
 
-    # Initialise usage tracker with its own sync SQLite connection
-    app_state.token_tracker.init(settings.DB_PATH)
+    # Initialise usage tracker with its own sync psycopg2 connection
+    app_state.token_tracker.init(settings.DATABASE_URL)
     # Roll previous month if we're on the 1st
     from datetime import datetime, timezone
     if datetime.now(timezone.utc).day == 1:
@@ -138,23 +151,26 @@ async def lifespan(app: FastAPI):
 
     # Background usage aggregation
     bg_task = asyncio.create_task(_usage_background_task())
+    # Nightly session expiry cleanup
+    session_cleanup_task = asyncio.create_task(_session_cleanup_task())
 
     yield
 
     # Shutdown
     bg_task.cancel()
+    session_cleanup_task.cancel()
     app_state.token_tracker.close()
     await db.close()
 
 
 # ── app ────────────────────────────────────────────────────────────────────────
 
+_is_production = settings.ENV == "production"
 app = FastAPI(
     title="pdf-to-audio Backend",
     version="0.1.0",
     lifespan=lifespan,
-    # Only accessible from the frontend server; no public docs in production.
-    docs_url="/docs",
+    docs_url=None if _is_production else "/docs",
     redoc_url=None,
 )
 

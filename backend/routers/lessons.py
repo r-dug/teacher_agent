@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
-import aiosqlite
+import asyncpg
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
+
+log = logging.getLogger(__name__)
 
 from ..authz import require_admin
 from ..config import settings
@@ -18,7 +22,7 @@ from ..db import connection as db, models
 
 router = APIRouter(prefix="/lessons", tags=["lessons"])
 
-Conn = Annotated[aiosqlite.Connection, Depends(db.get)]
+Conn = Annotated[asyncpg.Connection, Depends(db.get)]
 
 
 # ── PDF page image ─────────────────────────────────────────────────────────────
@@ -28,7 +32,7 @@ async def get_lesson_page(
     lesson_id: str,
     page_number: int,
     user_id: str,
-    conn: Annotated[aiosqlite.Connection, Depends(db.get)],
+    conn: Annotated[asyncpg.Connection, Depends(db.get)],
 ):
     """
     Render a single PDF page as a PNG image.
@@ -67,7 +71,8 @@ async def get_lesson_page(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"PDF render error: {exc}")
+        log.exception("PDF render error for lesson %s page %s", lesson_id, page_number)
+        raise HTTPException(status_code=500, detail="PDF render error — please try again")
 
     return Response(content=img_bytes, media_type="image/png")
 
@@ -115,8 +120,8 @@ class LessonResponse(BaseModel):
     current_section_idx: int
     completed: bool
     section_count: int = 0
-    created_at: str
-    updated_at: str
+    created_at: datetime
+    updated_at: datetime
 
 
 class LessonDetailResponse(LessonResponse):
@@ -241,10 +246,9 @@ async def update_lesson(lesson_id: str, user_id: str, body: LessonUpdate, conn: 
     if updates:
         await models.update_lesson(conn, lesson_id, **updates)
     lesson = await models.get_lesson(conn, lesson_id)
-    async with conn.execute(
-        "SELECT COUNT(*) FROM lesson_sections WHERE lesson_id = ?", (lesson_id,)
-    ) as cur:
-        cnt_row = await cur.fetchone()
+    cnt_row = await conn.fetchrow(
+        "SELECT COUNT(*) FROM lesson_sections WHERE lesson_id = $1", lesson_id
+    )
     section_count = cnt_row[0] if cnt_row else 0
     return _lesson_to_response(lesson, section_count)  # type: ignore[arg-type]
 

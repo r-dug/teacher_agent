@@ -19,15 +19,13 @@ export default defineConfig({
     host: true,  // bind to 0.0.0.0 so LAN devices can reach the dev server
     proxy: {
       '/api': {
-        target: 'https://localhost:8000',
+        target: 'http://localhost:8000',
         changeOrigin: true,
-        secure: false,
       },
       '/ws': {
-        target: 'wss://localhost:8000',
+        target: 'ws://localhost:8000',
         changeOrigin: true,
         ws: true,
-        secure: false,
       },
     },
   },

@@ -17,8 +17,7 @@ from backend.routers.iam import (
 async def _create_user(mem_db, email: str, *, is_admin: bool = False) -> dict:
     user = await models.create_user(mem_db, email, "pw")
     if is_admin:
-        await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (user["id"],))
-        await mem_db.commit()
+        await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = $1", user["id"])
     return user
 
 
@@ -198,8 +197,7 @@ async def test_demoted_admin_cannot_update_or_delete_templates(client, mem_db):
     assert can_update_lesson.status_code == 200
 
     # Demote and verify write access is revoked immediately.
-    await mem_db.execute("UPDATE users SET is_admin = 0 WHERE id = ?", (admin["id"],))
-    await mem_db.commit()
+    await mem_db.execute("UPDATE users SET is_admin = 0 WHERE id = $1", admin["id"])
 
     cannot_update_course = await client.patch(
         f"/courses/{course['id']}",

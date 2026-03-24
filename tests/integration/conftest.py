@@ -1,37 +1,57 @@
 """
 Integration test fixtures.
 
-ws_test_client: Starlette TestClient wired to a fresh file-based SQLite DB with
+ws_test_client: Starlette TestClient wired to the PostgreSQL test database with
   ML models mocked out.  Use this for WebSocket protocol tests.
 
 Design
 ------
 The TestClient runs the ASGI app in a background portal event loop (anyio).
-aiosqlite connections are pinned to the event loop that creates them; sharing
-one connection between the pytest setup loop and the portal loop causes
-call_soon_threadsafe races after ~3 tests.
+Each request inside the portal loop gets its own fresh asyncpg connection via
+the overridden db.get dependency.
 
-Solution: the ``db.get`` FastAPI dependency is overridden to create a *fresh*
-aiosqlite connection for each request inside the portal loop.  A *separate*
-connection (``conn``) is opened in the test's own mini event loop solely for
-setup and post-assertion DB queries.  Both connections talk to the same
-SQLite file so data is shared via the filesystem.
+A *separate* asyncpg connection (``conn``) is opened in the test's own mini
+event loop solely for setup and post-assertion DB queries.  Both connections
+talk to the same PostgreSQL database so data is shared.
+
+Between tests, all tables are truncated to give a clean slate.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import aiosqlite
+import asyncpg
 import pytest
+
+TEST_DATABASE_URL = os.getenv(
+    "TEST_DATABASE_URL", "postgresql://localhost/pdf_to_audio_test"
+)
+
+_SCHEMA_SQL = (
+    Path(__file__).parent.parent.parent / "backend" / "db" / "schema.sql"
+).read_text()
+
+_TRUNCATE_SQL = """
+TRUNCATE TABLE
+    messages, enrollment_assets, lesson_enrollments, lesson_sections,
+    section_assets, course_chapter_lessons, course_decomposition_job_items,
+    course_decomposition_jobs, course_advisor_sessions, course_chapter_drafts,
+    course_source_files, textbook_toc_cache, decomposition_cache,
+    course_publish_copies, lesson_publish_copies, lessons, courses,
+    point_events, user_points, password_reset_tokens, email_verifications,
+    upload_tokens, sessions, personas, usage_raw, usage_minutes, usage_hours, users
+RESTART IDENTITY CASCADE
+"""
 
 
 @pytest.fixture
 def ws_test_client(tmp_path):
     """
-    Yield (TestClient, aiosqlite.Connection, asyncio.EventLoop).
+    Yield (TestClient, asyncpg.Connection, asyncio.EventLoop).
 
     - TestClient  : Starlette sync WS client.
     - conn        : Setup/verification connection (use with loop.run_until_complete).
@@ -48,38 +68,36 @@ def ws_test_client(tmp_path):
     from backend.db import connection as db, models
     from backend import app_state as _app_state_mod
 
-    db_path = str(tmp_path / "test.db")
-    schema_sql = (
-        Path(__file__).parent.parent.parent / "backend" / "db" / "schema.sql"
-    ).read_text()
-
-    # ── setup loop: seed DB and keep a connection for test verification ────────
+    # ── setup loop: apply schema, truncate for clean state, keep setup conn ────
 
     loop = asyncio.new_event_loop()
 
-    async def _seed():
-        c = await aiosqlite.connect(db_path)
-        c.row_factory = aiosqlite.Row
-        await c.executescript(schema_sql)
-        await c.commit()
-        await c.execute(
-            "INSERT OR IGNORE INTO users (id, display_name) VALUES (?, ?)",
-            (db.ANON_USER_ID, "Anonymous"),
+    async def _setup():
+        conn = await asyncpg.connect(TEST_DATABASE_URL)
+        # Terminate any other connections that might block TRUNCATE
+        await conn.execute("""
+            SELECT pg_terminate_backend(pid)
+            FROM pg_stat_activity
+            WHERE datname = current_database() AND pid <> pg_backend_pid()
+        """)
+        # Ensure schema exists (idempotent)
+        await conn.execute(_SCHEMA_SQL)
+        # Clean state
+        await conn.execute(_TRUNCATE_SQL)
+        # Seed anonymous user and personas
+        await conn.execute(
+            "INSERT INTO users (id, display_name) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            db.ANON_USER_ID, "Anonymous",
         )
-        await c.commit()
-        await models.seed_personas(c)
-        return c
+        await models.seed_personas(conn)
+        return conn
 
-    conn = loop.run_until_complete(_seed())
+    conn = loop.run_until_complete(_setup())
 
     # ── override db.get: fresh connection per request in the portal loop ───────
-    #
-    # Each invocation of this async generator runs inside the ASGI portal's
-    # event loop, so aiosqlite futures are always created on the correct loop.
 
     async def _override_db():
-        c = await aiosqlite.connect(db_path)
-        c.row_factory = aiosqlite.Row
+        c = await asyncpg.connect(TEST_DATABASE_URL)
         try:
             yield c
         finally:
@@ -97,7 +115,6 @@ def ws_test_client(tmp_path):
     # ── patch STT + teaching agent ─────────────────────────────────────────────
 
     def _fake_run_turn(self, curriculum, messages, agent_instructions, lesson_goal=None):
-        """Sync mock: append one assistant reply and return immediately."""
         messages.append({"role": "assistant", "content": "Let's begin!"})
 
     with patch(
@@ -108,7 +125,6 @@ def ws_test_client(tmp_path):
             "backend.services.agents.teacher_agent.TeacherAgent.run_turn",
             new=_fake_run_turn,
         ):
-            # Skip lifespan by NOT using TestClient as a context manager.
             client = TestClient(app, raise_server_exceptions=True)
             yield client, conn, loop
 

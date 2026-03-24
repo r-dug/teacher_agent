@@ -25,7 +25,7 @@ from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
-import aiosqlite
+import asyncpg
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from websockets.asyncio.client import connect as ws_connect
 
@@ -55,7 +55,7 @@ router = APIRouter(tags=["ws"])
 
 # ── dependency shorthand ───────────────────────────────────────────────────────
 
-Conn = Annotated[aiosqlite.Connection, Depends(db.get)]
+Conn = Annotated[asyncpg.Connection, Depends(db.get)]
 
 
 def _normalize_voice_arch(value: str | None) -> str | None:
@@ -471,7 +471,7 @@ async def ws_session(
 async def _receive_loop(
     websocket: WebSocket,
     state: SessionState,
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     loop: asyncio.AbstractEventLoop,
     auto_start=None,
 ) -> None:
@@ -934,7 +934,7 @@ async def _close_realtime_stream(state: SessionState, *, cancel_reader: bool = T
 async def _ensure_realtime_stream_connected(
     websocket: WebSocket,
     state: SessionState,
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
 ) -> None:
     if state.realtime_stream_connected and state.realtime_ws is not None:
         return
@@ -972,7 +972,7 @@ async def _emit_realtime_turn_start_if_needed(websocket: WebSocket, turn: Realti
 async def _finalize_realtime_stream_turn(
     websocket: WebSocket,
     state: SessionState,
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     *,
     usage: dict,
 ) -> None:
@@ -1024,7 +1024,7 @@ async def _finalize_realtime_stream_turn(
 async def _dispatch_realtime_transcript_to_teacher(
     websocket: WebSocket,
     state: SessionState,
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     text: str,
     turn_id: str,
 ) -> None:
@@ -1089,7 +1089,7 @@ async def _dispatch_realtime_transcript_to_teacher(
 async def _realtime_stream_reader(
     websocket: WebSocket,
     state: SessionState,
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
 ) -> None:
     try:
         while state.realtime_stream_connected and state.realtime_ws is not None:
@@ -1134,7 +1134,7 @@ async def _realtime_stream_reader(
 async def _handle_realtime_stream_start(
     websocket: WebSocket,
     state: SessionState,
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
 ) -> None:
     if state.voice_arch != "realtime":
         await websocket.send_json({
@@ -1154,7 +1154,7 @@ async def _handle_realtime_stream_chunk(
     websocket: WebSocket,
     msg: dict,
     state: SessionState,
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
 ) -> None:
     if state.voice_arch != "realtime":
         return
@@ -1192,7 +1192,7 @@ async def _handle_audio_input(
     websocket: WebSocket,
     msg: dict,
     state: SessionState,
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
 ) -> None:
     """
     Entry point for mic utterances.
@@ -1256,7 +1256,7 @@ async def _handle_audio_input_realtime_turn(
     *,
     websocket: WebSocket,
     state: SessionState,
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
     audio_b64: str,
     sample_rate: int,
     turn_id: str,
@@ -1368,7 +1368,7 @@ async def _handle_audio_input_chained(
     websocket: WebSocket,
     msg: dict,
     state: SessionState,
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
 ) -> None:
     """Transcribe audio, append to messages, launch agent turn."""
     if state.agent_task and not state.agent_task.done():
@@ -1471,7 +1471,7 @@ async def _handle_text_message(
     websocket: WebSocket,
     msg: dict,
     state: SessionState,
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
 ) -> None:
     """Handle a typed text message from the client — runs an agent turn directly."""
     if state.agent_task and not state.agent_task.done():
@@ -1557,7 +1557,7 @@ async def _handle_voice_message(
     websocket: WebSocket,
     msg: dict,
     state: SessionState,
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
 ) -> None:
     """
     Transcribe a compressed audio file (webm/opus etc.) and run an agent turn.
@@ -1647,7 +1647,7 @@ async def _handle_image_input(
     websocket: WebSocket,
     msg: dict,
     state: SessionState,
-    conn: aiosqlite.Connection,
+    conn: asyncpg.Connection,
 ) -> None:
     """Student submitted an annotation/photo from the slide viewer (not agent-requested)."""
     if state.agent_task and not state.agent_task.done():
@@ -1730,7 +1730,7 @@ async def _handle_reconnect(
 # ── persistence ────────────────────────────────────────────────────────────────
 
 async def _save_state(
-    conn: aiosqlite.Connection, state: SessionState
+    conn: asyncpg.Connection, state: SessionState
 ) -> None:
     from ..db.connection import ANON_USER_ID
     from ..services.points import (

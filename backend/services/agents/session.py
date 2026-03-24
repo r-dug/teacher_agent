@@ -583,8 +583,7 @@ class AgentSession:
 
             # Persist the image under storage/enrollment_assets/<enrollment_id>/<asset_id>.png
             try:
-                import aiosqlite
-                from ...db import models
+                from ...db import models, connection as _db
                 from ...config import settings
 
                 asset_dir = self._storage_dir / "enrollment_assets" / self._enrollment_id
@@ -596,14 +595,12 @@ class AgentSession:
 
                 rel_path = str(image_path.relative_to(self._storage_dir))
 
-                async with aiosqlite.connect(str(settings.DB_PATH)) as conn:
-                    conn.row_factory = aiosqlite.Row
-                    async with conn.execute(
-                        "SELECT COUNT(*) FROM enrollment_assets WHERE enrollment_id = ?",
-                        (self._enrollment_id,),
-                    ) as cur:
-                        row = await cur.fetchone()
-                        idx = row[0] if row else 0
+                async with _db.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT COUNT(*) FROM enrollment_assets WHERE enrollment_id = $1",
+                        self._enrollment_id,
+                    )
+                    idx = row[0] if row else 0
 
                     await models.create_enrollment_asset(
                         conn,

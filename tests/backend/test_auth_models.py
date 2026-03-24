@@ -125,8 +125,7 @@ async def test_create_verification_token_replaces_old(mem_db):
 async def test_seed_admin_users_grant_only_and_normalized(mem_db):
     target = await models.create_user(mem_db, "TargetAdmin@example.com", "pw")
     existing = await models.create_user(mem_db, "existing-admin@example.com", "pw")
-    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (existing["id"],))
-    await mem_db.commit()
+    await mem_db.execute("UPDATE users SET is_admin = 1 WHERE id = $1", existing["id"])
 
     await models.seed_admin_users(mem_db, admin_emails={"  targetadmin@EXAMPLE.com  "})
 
