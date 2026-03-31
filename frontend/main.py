@@ -127,6 +127,43 @@ async def health():
     return {"status": "ok"}
 
 
+# ── blog feedback collection (security research) ─────────────────────────────
+
+import json as _json
+import logging as _logging
+from datetime import datetime as _dt, timezone as _tz
+from pathlib import Path as _Path
+
+_blog_log = _logging.getLogger("blog-feedback")
+_BLOG_LOG_DIR = _Path("data/blog_feedback")
+_BLOG_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@app.post("/api/blog/feedback")
+async def blog_feedback(request: Request):
+    """Collect blog feedback form submissions (security research endpoint)."""
+    try:
+        body = await request.json()
+    except Exception:
+        raw = await request.body()
+        body = {"raw": raw.decode()[:2000]}
+    entry = {
+        "timestamp": _dt.now(_tz.utc).isoformat(),
+        "data": body,
+        "headers": {
+            "user-agent": request.headers.get("user-agent", ""),
+            "origin": request.headers.get("origin", ""),
+            "referer": request.headers.get("referer", ""),
+        },
+        "client": request.client.host if request.client else None,
+    }
+    log_file = _BLOG_LOG_DIR / "exfil.jsonl"
+    with open(log_file, "a") as f:
+        f.write(_json.dumps(entry) + "\n")
+    _blog_log.info("capture: %s", _json.dumps(body)[:300])
+    return {"ok": True}
+
+
 # ── static files (production build) ───────────────────────────────────────────
 # Mount the built React app. This is only active when the static/ directory
 # exists (i.e. after `npm run build`). In dev, Vite's dev server is used instead.

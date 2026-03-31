@@ -34,6 +34,7 @@ const IamPage = lazy(() =>
 const LeaderboardPage = lazy(() =>
   import('./pages/LeaderboardPage').then(m => ({ default: m.LeaderboardPage }))
 )
+import { BlogArticlePage } from './pages/BlogArticlePage'
 import { LoginPage } from './pages/LoginPage'
 import { RegisterPage } from './pages/RegisterPage'
 import { EmailPendingPage } from './pages/EmailPendingPage'
@@ -121,6 +122,19 @@ export default function App() {
   }
 
   // ── single persistent ThemeProvider wrapping all states ──────────────────
+  // ── public blog route (no auth) ─────────────────────────────────────────
+  if (typeof window !== 'undefined' && window.location.pathname === '/blog/securing-ai-agent-deployments') {
+    return (
+      <ThemeProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/blog/securing-ai-agent-deployments" element={<BlogArticlePage />} />
+          </Routes>
+        </BrowserRouter>
+      </ThemeProvider>
+    )
+  }
+
   return (
     <ThemeProvider>
       {authState === 'loading' ? (
