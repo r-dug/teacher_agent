@@ -269,22 +269,21 @@ async def get_enrollment_by_id(
     ))
 
 
-_ENROLLMENT_UPDATE_SQL: dict[str, str] = {
-    "current_section_idx": "UPDATE lesson_enrollments SET current_section_idx = $1, updated_at = NOW() WHERE id = $2",
-    "completed":           "UPDATE lesson_enrollments SET completed = $1,           updated_at = NOW() WHERE id = $2",
-    "lesson_goal":         "UPDATE lesson_enrollments SET lesson_goal = $1,         updated_at = NOW() WHERE id = $2",
-}
+_ENROLLMENT_ALLOWED_COLS = {"current_section_idx", "completed", "lesson_goal"}
 
 
 async def update_enrollment(
     conn: asyncpg.Connection, enrollment_id: str, **kwargs: Any
 ) -> None:
-    async with conn.transaction():
-        for key, value in kwargs.items():
-            sql = _ENROLLMENT_UPDATE_SQL.get(key)
-            if sql is None:
-                continue
-            await conn.execute(sql, value, enrollment_id)
+    cols = {k: v for k, v in kwargs.items() if k in _ENROLLMENT_ALLOWED_COLS}
+    if not cols:
+        return
+    assignments = ", ".join(f"{k} = ${i+1}" for i, k in enumerate(cols))
+    values = list(cols.values()) + [enrollment_id]
+    await conn.execute(
+        f"UPDATE lesson_enrollments SET {assignments}, updated_at = NOW() WHERE id = ${len(values)}",
+        *values,
+    )
 
 
 # ── sections ───────────────────────────────────────────────────────────────────
@@ -333,19 +332,22 @@ async def upsert_messages(
     enrollment_id: str,
     messages: list[dict],
 ) -> None:
+    records = []
+    for idx, msg in enumerate(messages):
+        content = msg["content"]
+        content_json = (
+            json.dumps(content) if not isinstance(content, str) else content
+        )
+        records.append((new_id(), enrollment_id, idx, msg["role"], content_json))
+
     async with conn.transaction():
         await conn.execute(
             "DELETE FROM messages WHERE enrollment_id = $1", enrollment_id
         )
-        for idx, msg in enumerate(messages):
-            content = msg["content"]
-            content_json = (
-                json.dumps(content) if not isinstance(content, str) else content
-            )
-            await conn.execute(
-                "INSERT INTO messages (id, enrollment_id, idx, role, content) VALUES ($1, $2, $3, $4, $5)",
-                new_id(), enrollment_id, idx, msg["role"], content_json,
-            )
+        await conn.executemany(
+            "INSERT INTO messages (id, enrollment_id, idx, role, content) VALUES ($1, $2, $3, $4, $5)",
+            records,
+        )
 
 
 async def get_messages(

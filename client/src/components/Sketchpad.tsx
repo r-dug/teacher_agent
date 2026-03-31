@@ -340,10 +340,13 @@ export function Sketchpad({ prompt, invocationId, textBg, imBg, onSubmit, onCanc
               isErasing ? 'cursor-cell' : 'cursor-crosshair'
             )}
             style={{ width: '100%', height: '100%' }}
-            onPointerDown={onPointerDown}
-            onPointerMove={onPointerMove}
-            onPointerUp={onPointerUp}
-            onPointerLeave={onPointerUp}
+            onPointerDown={(e) => { e.preventDefault(); onPointerDown(e) }}
+            onPointerMove={(e) => { e.preventDefault(); onPointerMove(e) }}
+            onPointerUp={(e) => { e.preventDefault(); onPointerUp() }}
+            onPointerLeave={(e) => { e.preventDefault(); onPointerUp() }}
+            onTouchStart={(e) => e.preventDefault()}
+            onTouchMove={(e) => e.preventDefault()}
+            onTouchEnd={(e) => e.preventDefault()}
           />
         </div>
 

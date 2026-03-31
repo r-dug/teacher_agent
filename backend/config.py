@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import urllib.parse
 from pathlib import Path
 
 
@@ -17,6 +18,20 @@ def _parse_admin_emails(raw: str | None) -> tuple[str, ...]:
     return tuple(emails)
 
 
+def _build_database_url() -> str:
+    """Build DATABASE_URL from PG* env vars if DATABASE_URL is not explicitly set."""
+    if explicit := os.getenv("DATABASE_URL"):
+        return explicit
+    host = os.getenv("PGHOST", "localhost")
+    port = os.getenv("PGPORT", "5432")
+    user = os.getenv("PGUSER", "")
+    dbname = os.getenv("PGDATABASE", "pdf_to_audio")
+    # Omit password from URL — Azure AD tokens are fetched dynamically via pg_password()
+    if user:
+        return f"postgresql://{urllib.parse.quote(user, safe='')}@{host}:{port}/{dbname}"
+    return f"postgresql://{host}:{port}/{dbname}"
+
+
 class Settings:
     # Server
     HOST: str = os.getenv("BACKEND_HOST", "127.0.0.1")
@@ -24,7 +39,26 @@ class Settings:
 
     # Storage
     STORAGE_DIR: Path = Path(os.getenv("STORAGE_DIR", "./storage"))
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://localhost/pdf_to_audio")
+    DATABASE_URL: str = _build_database_url()
+    # True when connecting to Azure Database for PostgreSQL (AAD token auth)
+    IS_AZURE_PG: bool = ".postgres.database.azure.com" in os.getenv("PGHOST", "")
+
+    def pg_password(self) -> str:
+        """Return the current PostgreSQL password/token.
+
+        If PGPASSWORD is unset or contains an un-evaluated shell substitution
+        (starts with '$('), fetch a fresh Azure AD access token via
+        azure-identity's DefaultAzureCredential (supports managed identity,
+        service principal env vars, and az CLI in that order).
+        Otherwise return PGPASSWORD as-is.
+        """
+        raw = os.getenv("PGPASSWORD", "")
+        if not raw or raw.startswith("$("):
+            from azure.identity import DefaultAzureCredential
+            credential = DefaultAzureCredential()
+            token = credential.get_token("https://ossrdbms-aad.database.windows.net/.default")
+            return token.token
+        return raw
 
     # Models
     STT_MODEL_SIZE: str = os.getenv("STT_MODEL_SIZE", "base")

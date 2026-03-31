@@ -78,13 +78,17 @@ async def lifespan(app: FastAPI):
     settings.ensure_dirs()
 
     # Initialise database
-    await db.init(settings.DATABASE_URL)
+    # For Azure Database for PostgreSQL, pass pg_password as a callable so
+    # asyncpg fetches a fresh AAD token for each new connection.
+    password_fn = settings.pg_password if settings.IS_AZURE_PG else None
+    await db.init(settings.DATABASE_URL, password=password_fn)
     async with db.acquire() as conn:
         await models.seed_personas(conn)
         await models.seed_admin_users(conn, settings.ADMIN_EMAILS)
 
     # Initialise usage tracker with its own sync psycopg2 connection
-    app_state.token_tracker.init(settings.DATABASE_URL)
+    pg_password = settings.pg_password() if settings.IS_AZURE_PG else None
+    app_state.token_tracker.init(settings.DATABASE_URL, password=pg_password)
     # Roll previous month if we're on the 1st
     from datetime import datetime, timezone
     if datetime.now(timezone.utc).day == 1:

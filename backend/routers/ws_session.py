@@ -106,6 +106,7 @@ class SessionState:
         self.code_run_semaphore: asyncio.Semaphore = asyncio.Semaphore(3)
         self.phase: str = "intro"  # 'intro' | 'teaching'
         self.lesson_goal: str | None = None
+        self.saved_section_idx: int = curriculum.idx  # last-persisted idx, avoids a DB read in _save_state
         # Multi-turn intro messages (separate from teaching messages).
         self.intro_messages: list[dict] = []
         self.intro_raw_text: str | None = None
@@ -1739,7 +1740,7 @@ async def _save_state(
         award_section_advance,
     )
 
-    old_idx = await models.get_enrollment_section_idx(conn, state.enrollment_id)
+    old_idx = state.saved_section_idx
     new_idx = state.curriculum.idx
     is_complete = state.curriculum.is_last and state.turn_status == "complete"
 
@@ -1750,6 +1751,7 @@ async def _save_state(
         completed=int(is_complete),
     )
     await models.upsert_messages(conn, state.enrollment_id, state.messages)
+    state.saved_section_idx = new_idx
 
     if state.user_id and state.user_id != ANON_USER_ID:
         if new_idx > old_idx:

@@ -113,9 +113,12 @@ class UsageTracker:
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
-    def init(self, database_url: str) -> None:
+    def init(self, database_url: str, password: str | None = None) -> None:
         """Open a dedicated sync psycopg2 connection for usage writes."""
-        self._db = psycopg2.connect(database_url)
+        kwargs = {"sslmode": "require"}
+        if password is not None:
+            kwargs["password"] = password
+        self._db = psycopg2.connect(database_url, **kwargs)
         self._db.autocommit = False
 
     def close(self) -> None:

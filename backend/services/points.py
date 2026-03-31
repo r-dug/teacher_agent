@@ -1,7 +1,7 @@
 """
 Points / gamification logic.
 
-All public functions are async and accept an aiosqlite connection.
+All public functions are async and accept an asyncpg.Connection.
 They are called from ws_session._save_state() at the end of every agent turn.
 
 Scoring:

@@ -33,10 +33,21 @@ _pool: asyncpg.Pool | None = None
 
 # ── lifecycle ──────────────────────────────────────────────────────────────────
 
-async def init(database_url: str) -> None:
-    """Create the connection pool and apply schema."""
+async def init(database_url: str, password=None) -> None:
+    """Create the connection pool and apply schema.
+
+    Args:
+        database_url: PostgreSQL connection string (password may be omitted).
+        password: Optional static password string or callable (sync or async)
+            that returns the password.  Pass ``settings.pg_password`` here when
+            using Azure AD token authentication so each new connection fetches a
+            fresh token.
+    """
     global _pool
-    _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
+    kwargs: dict = {"min_size": 2, "max_size": 10, "ssl": "require"}
+    if password is not None:
+        kwargs["password"] = password
+    _pool = await asyncpg.create_pool(database_url, **kwargs)
     async with _pool.acquire() as conn:
         from pathlib import Path
         schema = (Path(__file__).parent / "schema.sql").read_text()
