@@ -190,6 +190,7 @@ async def ws_session(
         title=lesson["title"],
         sections=[_section_to_dict(s) for s in sections],
         idx=enrollment["current_section_idx"],
+        task_progress=models.parse_task_progress(enrollment.get("task_progress")),
     )
 
     # For existing lessons, send the curriculum to the client immediately so it
@@ -203,6 +204,15 @@ async def ws_session(
                 "sections": curriculum.sections,
                 "idx": curriculum.idx,
             },
+        })
+
+    # Send current task checklist so the client can render progress on reconnect.
+    if sections:
+        await websocket.send_json({
+            "event": "task_progress",
+            "section_idx": curriculum.idx,
+            "tasks": curriculum.current_tasks(),
+            "all_done": curriculum.all_tasks_done(),
         })
 
     # Send prior conversation history so the client can render past turns.
@@ -241,6 +251,7 @@ async def ws_session(
         decompose_llm_provider=settings.effective_decompose_llm_provider(),
         decompose_llm_model=settings.effective_decompose_llm_model(),
         openai_api_key=settings.OPENAI_API_KEY,
+        openai_api_base=settings.OPENAI_API_BASE,
         openai_timeout_seconds=settings.OPENAI_LLM_TIMEOUT_S,
         openai_max_retries=settings.OPENAI_LLM_MAX_RETRIES,
         openai_decompose_timeout_seconds=settings.OPENAI_DECOMPOSE_TIMEOUT_S,
@@ -255,6 +266,16 @@ async def ws_session(
         storage_dir=settings.STORAGE_DIR,
         messages=messages,
     )
+
+    # ── Distillation: wire live collection if user consented ───────────────
+    _distillation_logger = None
+    if settings.DISTILLATION_COLLECT:
+        user_prefs = await models.get_user_preferences(conn, user_id)
+        if user_prefs.get("training_consent"):
+            from ..services.agents.distillation import make_turn_logger
+            _distillation_logger = make_turn_logger(user_has_consent=True, collect_enabled=True)
+    if _distillation_logger:
+        agent_session.set_distillation_logger(_distillation_logger)
 
     state = SessionState(
         session_id=session_id,
@@ -1749,6 +1770,7 @@ async def _save_state(
         state.enrollment_id,
         current_section_idx=new_idx,
         completed=int(is_complete),
+        task_progress=state.curriculum.task_progress_json(),
     )
     await models.upsert_messages(conn, state.enrollment_id, state.messages)
     state.saved_section_idx = new_idx

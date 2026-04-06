@@ -25,7 +25,7 @@ class TeachingCallbacks:
     on_chunk_ready: Callable[[str, int, int], None] | None = None
     on_audio_chunk: Callable[[np.ndarray, int, int], None] | None = None
     on_show_slide: Callable[[int, int, str], None] | None = None
-    on_open_sketchpad: Callable[[str, list, threading.Event, str | None, int | None], None] | None = None
+    on_open_sketchpad: Callable[[str, list, threading.Event, str | None, int | None, str | None], None] | None = None
     on_take_photo: Callable[[str, list, threading.Event], None] | None = None
     on_record_video: Callable[[str, list, threading.Event], None] | None = None
     on_open_code_editor: Callable[[str, str, str | None, list, threading.Event], None] | None = None
@@ -33,7 +33,10 @@ class TeachingCallbacks:
     on_start_timer: Callable[[str, int, list, threading.Event], None] | None = None
     # (prompt, caption, tool_use_id, result_holder, done_event)
     on_generate_visual_aid: Callable[[str, str, str, list, threading.Event], None] | None = None
+    # (query, caption, tool_use_id, result_holder, done_event)
+    on_search_image: Callable[[str, str, str, list, threading.Event], None] | None = None
     on_token_usage: Callable[[str, str, object], None] | None = None
+    on_task_complete: Callable[[Curriculum], None] | None = None
     on_section_advanced: Callable[[Curriculum], None] | None = None
     on_curriculum_complete: Callable[[], None] | None = None
     on_turn_complete: Callable[[np.ndarray | None], None] | None = None
@@ -41,3 +44,5 @@ class TeachingCallbacks:
     on_tts_playing: Callable[[bool], None] | None = None
     on_tts_done: Callable[..., None] | None = None
     on_error: Callable[[str], None] | None = None
+    # Distillation: (system_prompt, messages_snapshot, tools, model)
+    on_turn_logged: Callable[[str, list[dict], list[dict], str], None] | None = None

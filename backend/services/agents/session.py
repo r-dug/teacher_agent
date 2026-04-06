@@ -76,6 +76,7 @@ class AgentSession:
         decompose_llm_provider: str | None = None,
         decompose_llm_model: str | None = None,
         openai_api_key: str | None = None,
+        openai_api_base: str | None = None,
         openai_timeout_seconds: float = 30.0,
         openai_max_retries: int = 1,
         openai_decompose_timeout_seconds: float | None = None,
@@ -131,6 +132,7 @@ class AgentSession:
                     api_key=_openai_key,
                     timeout_seconds=max(1.0, float(openai_timeout_seconds)),
                     max_retries=max(0, int(openai_max_retries)),
+                    base_url=openai_api_base,  # Ollama/vLLM override for primary
                 ),
                 _teach_model,
             ))
@@ -145,6 +147,7 @@ class AgentSession:
                         api_key=_openai_key,
                         timeout_seconds=max(1.0, float(openai_timeout_seconds)),
                         max_retries=max(0, int(openai_max_retries)),
+                        # No base_url — fallback always hits real OpenAI API
                     ),
                     "gpt-4o-mini",
                 ))
@@ -197,7 +200,9 @@ class AgentSession:
             on_start_timer=self._on_start_timer,
             # on_generate_visual_aid starts as None (tool hidden until enabled by client)
             on_generate_visual_aid=None,
+            on_search_image=self._on_search_image,
             on_token_usage=self._on_token_usage,
+            on_task_complete=self._on_task_complete,
             on_section_advanced=self._on_section_advanced,
             on_curriculum_complete=self._on_curriculum_complete,
             on_turn_complete=self._on_turn_complete,
@@ -216,6 +221,10 @@ class AgentSession:
             tts_voice=tts_voice,
             model=_teach_model,
         )
+
+    def set_distillation_logger(self, logger) -> None:
+        """Attach a live turn logger for distillation data collection."""
+        self._teacher._callbacks.on_turn_logged = logger
 
     # ── public API ─────────────────────────────────────────────────────────────
 
@@ -425,12 +434,16 @@ class AgentSession:
         done_event: threading.Event,
         text_bg: str | None = None,
         bg_page: int | None = None,
+        bg_image_url: str | None = None,
     ) -> None:
         inv_id = str(uuid.uuid4())
         self._tool_events[inv_id] = (done_event, result_holder)
 
         im_bg: str | None = None
-        if bg_page is not None and self._pdf_path:
+        # Priority: bg_image_url (web image) > bg_page (PDF page)
+        if bg_image_url:
+            im_bg = bg_image_url
+        elif bg_page is not None and self._pdf_path:
             try:
                 import fitz
                 doc = fitz.open(self._pdf_path)
@@ -635,6 +648,59 @@ class AgentSession:
         finally:
             done_event.set()
 
+    def _on_search_image(
+        self,
+        query: str,
+        caption: str,
+        tool_use_id: str,
+        result_holder: list,
+        done_event: threading.Event,
+    ) -> None:
+        """Called from the agent thread; schedules async image search on the event loop."""
+        asyncio.run_coroutine_threadsafe(
+            self._search_and_send(query, caption, tool_use_id, result_holder, done_event),
+            self._loop,
+        )
+
+    async def _search_and_send(
+        self,
+        query: str,
+        caption: str,
+        tool_use_id: str,
+        result_holder: list,
+        done_event: threading.Event,
+    ) -> None:
+        """Async coroutine: search for an image and send it to the client."""
+        try:
+            await self._send({"event": "generating_image", "caption": f"Searching: {caption}"})
+
+            from ..images.search import search_image_sync
+            from ...config import settings
+
+            api_key = (settings.OPENAI_API_KEY or "").strip()
+            if not api_key:
+                await self._send({"event": "generation_failed", "reason": "API key not configured."})
+                return
+
+            image_url = await asyncio.to_thread(search_image_sync, query, api_key)
+            if not image_url:
+                await self._send({"event": "generation_failed", "reason": "No image found."})
+                return
+
+            await self._send({
+                "event": "show_image",
+                "image_url": image_url,
+                "caption": caption,
+                "prompt": query,
+            })
+            result_holder[0] = image_url
+
+        except Exception:
+            log.exception("[AgentSession] unexpected error in _search_and_send")
+
+        finally:
+            done_event.set()
+
     def _on_token_usage(self, call_type: str, model: str, usage) -> None:
         app_state.token_tracker.record_api(
             call_type, model, usage,
@@ -658,6 +724,14 @@ class AgentSession:
             user_id=self._user_id,
         )
 
+    def _on_task_complete(self, curriculum: Curriculum) -> None:
+        self._fire(self._send({
+            "event": "task_progress",
+            "section_idx": curriculum.idx,
+            "tasks": curriculum.current_tasks(),
+            "all_done": curriculum.all_tasks_done(),
+        }))
+
     def _on_section_advanced(self, curriculum: Curriculum) -> None:
         self._current_section_idx = curriculum.idx
         self._fire(self._send({
@@ -669,6 +743,7 @@ class AgentSession:
                 "section_title": curriculum.current.get("title", ""),
                 "progress": f"{curriculum.idx + 1}/{len(curriculum.sections)}",
             },
+            "tasks": curriculum.current_tasks(),
         }))
 
     def _on_curriculum_complete(self) -> None:

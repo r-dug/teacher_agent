@@ -181,23 +181,32 @@ async def list_lessons(
     course_id: str | None = None,
     standalone: bool = False,
 ) -> list[Row]:
+    extra_joins = ""
+    order_clause = "l.updated_at DESC"
+    params: list[Any] = [user_id]
+    where_extra = ""
+    if standalone:
+        where_extra = " AND l.course_id IS NULL"
+    elif course_id is not None:
+        params.append(course_id)
+        where_extra = f" AND l.course_id = ${len(params)}"
+        extra_joins = (
+            " LEFT JOIN course_chapter_lessons ccl ON ccl.lesson_id = l.id AND ccl.course_id = l.course_id"
+            " LEFT JOIN course_chapter_drafts ccd ON ccd.id = ccl.chapter_id"
+        )
+        order_clause = "ccd.idx ASC NULLS LAST, l.updated_at DESC"
     sql = (
         "SELECT l.*, "
         "COALESCE(e.current_section_idx, 0) AS current_section_idx, "
         "COALESCE(e.completed, 0) AS completed, "
         "(SELECT COUNT(*) FROM lesson_sections WHERE lesson_id = l.id) AS section_count "
         "FROM lessons l "
-        "LEFT JOIN lesson_enrollments e ON e.lesson_id = l.id AND e.user_id = $1 "
-        "WHERE (l.creator_id = $1 OR l.visibility = 'published')"
+        "LEFT JOIN lesson_enrollments e ON e.lesson_id = l.id AND e.user_id = $1"
+        f"{extra_joins}"
+        f" WHERE (l.creator_id = $1 OR l.visibility = 'published'){where_extra}"
     )
-    params: list[Any] = [user_id]
-    if standalone:
-        sql += " AND l.course_id IS NULL"
-    elif course_id is not None:
-        params.append(course_id)
-        sql += f" AND l.course_id = ${len(params)}"
     params.extend([limit, offset])
-    sql += f" ORDER BY l.updated_at DESC LIMIT ${len(params) - 1} OFFSET ${len(params)}"
+    sql += f" ORDER BY {order_clause} LIMIT ${len(params) - 1} OFFSET ${len(params)}"
     return _rows(await conn.fetch(sql, *params))
 
 
@@ -269,7 +278,17 @@ async def get_enrollment_by_id(
     ))
 
 
-_ENROLLMENT_ALLOWED_COLS = {"current_section_idx", "completed", "lesson_goal"}
+_ENROLLMENT_ALLOWED_COLS = {"current_section_idx", "completed", "lesson_goal", "task_progress"}
+
+
+def parse_task_progress(raw: str | None) -> dict[str, list[dict]]:
+    """Deserialize task_progress JSON from DB."""
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
 
 
 async def update_enrollment(
@@ -433,6 +452,16 @@ async def create_user(
         uid, clean_email, password_hash, uname,
     )
     return _row(await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid))  # type: ignore[return-value]
+
+
+async def update_username(
+    conn: asyncpg.Connection, user_id: str, username: str
+) -> None:
+    """Update a user's username. Raises asyncpg.UniqueViolationError if taken."""
+    await conn.execute(
+        "UPDATE users SET username = $1 WHERE id = $2",
+        username, user_id,
+    )
 
 
 async def get_user_by_email(
@@ -785,3 +814,26 @@ async def get_user_rank(
         user_id, ANON_USER_ID,
     )
     return int(val) if val is not None else None
+
+
+# ── user preferences ──────────────────────────────────────────────────────────
+
+async def get_user_preferences(conn: asyncpg.Connection, user_id: str) -> dict:
+    row = await conn.fetchval(
+        "SELECT prefs_json FROM user_preferences WHERE user_id = $1", user_id
+    )
+    if row is None:
+        return {}
+    return json.loads(row)
+
+
+async def upsert_user_preferences(
+    conn: asyncpg.Connection, user_id: str, prefs: dict
+) -> None:
+    await conn.execute(
+        """INSERT INTO user_preferences (user_id, prefs_json, updated_at)
+           VALUES ($1, $2, NOW())
+           ON CONFLICT (user_id)
+           DO UPDATE SET prefs_json = $2, updated_at = NOW()""",
+        user_id, json.dumps(prefs),
+    )

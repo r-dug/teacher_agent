@@ -128,58 +128,59 @@ export function CoursePage({ sessionId, isAdmin = false, onLogout, userEmail = '
   return (
     <div className="mx-auto max-w-2xl px-4 py-8 space-y-6">
       {/* Header */}
-      <div className="flex items-center gap-3">
-        <Button variant="ghost" size="sm" onClick={() => navigate('/')} data-page-transition>
-          ← Back
-        </Button>
-        <div className="flex-1 min-w-0">
-          {course ? (
-            <>
-              <h1 className="text-2xl font-bold truncate">{course.title}</h1>
-              {course.description && (
-                <p className="text-sm text-[hsl(var(--muted-foreground))] mt-0.5">{course.description}</p>
-              )}
-            </>
-          ) : (
-            <div className="h-7 w-48 rounded bg-[hsl(var(--muted))] animate-pulse" />
+      <div className="space-y-3">
+        {course ? (
+          <>
+            <h1 className="text-2xl font-bold">{course.title}</h1>
+            {course.description && (
+              <p className="text-sm text-[hsl(var(--muted-foreground))] line-clamp-3">{course.description}</p>
+            )}
+          </>
+        ) : (
+          <div className="h-7 w-48 rounded bg-[hsl(var(--muted))] animate-pulse" />
+        )}
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" onClick={() => navigate('/')} data-page-transition>
+            ← Back
+          </Button>
+          {isAdmin && (
+            <Button
+              size="sm"
+              onClick={() => setLessonDrawer({ mode: 'create' })}
+            >
+              + Add Lesson
+            </Button>
           )}
+          {isAdmin && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setChaptersDrawerOpen(true)}
+              disabled={!course}
+            >
+              Edit Chapters
+            </Button>
+          )}
+          {isAdmin && (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={handlePublishToAllUsers}
+              disabled={publishing || !course}
+            >
+              {publishing ? 'Publishing…' : 'Publish To All Users'}
+            </Button>
+          )}
+          <div className="flex-1" />
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setSettingsOpen(true)}
+            aria-label="Settings"
+          >
+            ⚙
+          </Button>
         </div>
-        {isAdmin && (
-          <Button
-            size="sm"
-            onClick={() => setLessonDrawer({ mode: 'create' })}
-          >
-            + Add Lesson
-          </Button>
-        )}
-        {isAdmin && (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setChaptersDrawerOpen(true)}
-            disabled={!course}
-          >
-            Edit Chapters
-          </Button>
-        )}
-        {isAdmin && (
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={handlePublishToAllUsers}
-            disabled={publishing || !course}
-          >
-            {publishing ? 'Publishing…' : 'Publish To All Users'}
-          </Button>
-        )}
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setSettingsOpen(true)}
-          aria-label="Settings"
-        >
-          ⚙
-        </Button>
       </div>
 
       <SettingsDrawer

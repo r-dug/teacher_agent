@@ -38,6 +38,7 @@ class FallbackLLMProvider(LLMProvider):
         tools: list[dict],
         on_text_chunk: Callable[[str], None] | None = None,
     ) -> LLMTurnResult:
+        errors: list[str] = []
         last_exc: Exception | None = None
         for idx, (provider, pmodel) in enumerate(self._providers):
             if idx > 0:
@@ -55,8 +56,10 @@ class FallbackLLMProvider(LLMProvider):
                     pmodel,
                     exc,
                 )
+                errors.append(f"[{provider.name}/{pmodel}] {exc}")
                 last_exc = exc
 
+        chain_summary = " → ".join(errors)
         raise RuntimeError(
-            f"All LLM providers exhausted. Last error: {last_exc}"
+            f"All LLM providers exhausted. Chain: {chain_summary}"
         ) from last_exc

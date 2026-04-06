@@ -231,3 +231,26 @@ async def auth_verify_email(body: VerifyTokenRequest, conn: Conn):
         email_verified=True,
         is_admin=bool(user["is_admin"]),
     )
+
+
+class UpdateUsernameRequest(BaseModel):
+    user_id: str
+    username: str
+
+
+@router.patch("/auth/username")
+async def auth_update_username(body: UpdateUsernameRequest, conn: Conn):
+    import re as _re
+    uname = body.username.strip()
+    if not uname or not _re.match(r'^[a-zA-Z][a-zA-Z0-9_]{2,29}$', uname):
+        raise HTTPException(
+            status_code=400,
+            detail="Username must be 3-30 characters, start with a letter, and contain only letters, numbers, or underscores.",
+        )
+    try:
+        await models.update_username(conn, body.user_id, uname)
+    except Exception as exc:
+        if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+            raise HTTPException(status_code=409, detail="Username is already taken.")
+        raise
+    return {"ok": True, "username": uname}

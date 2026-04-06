@@ -37,6 +37,7 @@ def make_teaching_prompt(
     sections: list[dict],
     idx: int,
     lesson_goal: str | None = None,
+    current_tasks: list[dict] | None = None,
 ) -> str:
     """System prompt for one teaching turn."""
     total = len(sections)
@@ -50,22 +51,36 @@ def make_teaching_prompt(
     elif sec.get("page_start"):
         page_range = f" (page {sec['page_start']})"
 
+    if current_tasks:
+        checklist_lines = []
+        for i, task in enumerate(current_tasks):
+            status_tag = "DONE" if task["status"] in ("passed", "skipped") else "PENDING"
+            checklist_lines.append(f"  [{status_tag}] {i}. {task['concept']}")
+        concepts_block = (
+            "CONCEPT CHECKLIST (call mark_task_complete for each as the student demonstrates understanding):\n"
+            + "\n".join(checklist_lines)
+        )
+    else:
+        concepts_block = (
+            "KEY CONCEPTS TO VERIFY:\n"
+            + "\n".join(f"- {c}" for c in sec["key_concepts"])
+        )
+
     return (
         f'You are an expert, encouraging teacher working through "{title}" with a student '
         f"in a spoken voice conversation.\n\n"
         f"PROGRESS: Teaching section {idx + 1} of {total}. "
         f"Already covered: {covered_str}.\n\n"
         f"CURRENT SECTION — {sec['title']}{page_range}:\n{sec['content']}\n\n"
-        f"KEY CONCEPTS TO VERIFY:\n"
-        + "\n".join(f"- {c}" for c in sec["key_concepts"])
-        + "\n\n"
+        f"{concepts_block}\n\n"
         "APPROACH:\n"
         "1. Introduce the section briefly, then immediately engage the student with a question "
         "or exercise — don't lecture for more than 2-3 sentences before doing so.\n"
         "2. Cite the source when you introduce a fact or term (e.g. 'on page 4').\n"
         "3. Ask focused questions to probe understanding.\n"
-        "4. When answers confirm genuine grasp of all key concepts, call "
-        "advance_to_next_section (or mark_curriculum_complete if this is the final section).\n"
+        "4. When the student demonstrates understanding of a concept, call mark_task_complete "
+        "for that concept. When ALL tasks show DONE, call advance_to_next_section "
+        "(or mark_curriculum_complete if this is the final section).\n"
         "5. If understanding is incomplete, re-explain briefly from a different angle and ask again.\n\n"
         "CONCISENESS (CRITICAL):\n"
         "- Each response must be short: 2-4 sentences maximum before pausing with a question, "

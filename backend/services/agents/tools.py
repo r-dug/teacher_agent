@@ -52,6 +52,30 @@ SEARCH_WEB_TOOL = {
     },
 }
 
+SEARCH_IMAGE_TOOL = {
+    "name": "search_image",
+    "description": (
+        "Search the web for an image to show the student. Use when a real-world photo, "
+        "chart, reference image, or existing diagram would help — e.g. a hiragana chart, "
+        "a map, a photo of a cultural item, or a technical diagram. "
+        "The image is displayed to the student automatically."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Search query for the image, e.g. 'hiragana chart with stroke order'.",
+            },
+            "caption": {
+                "type": "string",
+                "description": "Short caption shown below the image (1 sentence).",
+            },
+        },
+        "required": ["query", "caption"],
+    },
+}
+
 # ── teaching tools ─────────────────────────────────────────────────────────────
 
 GENERATE_VISUAL_AID_TOOL = {
@@ -135,12 +159,10 @@ TEACHING_TOOLS = [
     {
         "name": "open_sketchpad",
         "description": (
-            "Open a drawing canvas for the student to practise writing characters, diagrams, "
-            "or anything else that benefits from freehand input (e.g. Japanese kana, kanji, "
-            "mathematical notation, diagrams). The canvas is returned to you as an image so "
-            "you can evaluate what the student drew and give feedback. "
-            "Optionally supply a background: text_bg for a faint reference character the "
-            "student should trace or copy, or bg_page to show a PDF slide behind the canvas."
+            "Open a drawing canvas for freehand input (characters, diagrams, notation). "
+            "Returns the drawing as an image for evaluation. "
+            "Optionally set a background: text_bg for reference characters to trace, "
+            "bg_page for a PDF page, or bg_image_url for a web image."
         ),
         "input_schema": {
             "type": "object",
@@ -153,15 +175,19 @@ TEACHING_TOOLS = [
                     "type": "string",
                     "description": (
                         "Optional reference text to display as a faint guide behind the canvas "
-                        "(e.g. 'さ', 'あ', '猫'). The student traces or copies it. "
-                        "Use for character-writing practice."
+                        "(e.g. 'さ', 'あ', '猫'). The student traces or copies it."
                     ),
                 },
                 "bg_page": {
                     "type": "integer",
+                    "description": "Optional 1-based PDF page number as a faint background.",
+                },
+                "bg_image_url": {
+                    "type": "string",
                     "description": (
-                        "Optional 1-based PDF page number to display as a faint image behind "
-                        "the canvas. Use when the student should annotate or reproduce a diagram."
+                        "Optional URL of a web image to display as a faint background "
+                        "(e.g. a stroke order chart or reference diagram). "
+                        "Use search_image first to find the URL, then pass it here."
                     ),
                 },
             },
@@ -287,6 +313,28 @@ TEACHING_TOOLS = [
                 },
             },
             "required": ["prompt", "duration_seconds"],
+        },
+    },
+    {
+        "name": "mark_task_complete",
+        "description": (
+            "Mark a specific concept-check task as complete for the current section. "
+            "Call this after the student demonstrates understanding of an individual key concept. "
+            "You MUST call this for each key concept before calling advance_to_next_section."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_idx": {
+                    "type": "integer",
+                    "description": "Zero-based index of the task in the current section's checklist.",
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": "What the student said or did that demonstrates understanding of this concept.",
+                },
+            },
+            "required": ["task_idx", "evidence"],
         },
     },
     {

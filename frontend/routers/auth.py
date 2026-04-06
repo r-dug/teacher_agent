@@ -360,6 +360,28 @@ async def change_password(body: ChangePasswordRequest, x_session_id: str = Heade
     )
 
 
+class UpdateUsernameRequest(BaseModel):
+    username: str
+
+
+@router.patch("/username")
+async def update_username(body: UpdateUsernameRequest, x_session_id: str = Header(...)):
+    entry = store.get(x_session_id)
+    if entry is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    http = get_http()
+    resp = await http.patch(
+        "/internal/auth/username",
+        json={"user_id": entry.user_id, "username": body.username},
+    )
+    if not resp.is_success:
+        detail = resp.json().get("detail", "Failed to update username") if resp.headers.get("content-type", "").startswith("application/json") else "Failed to update username"
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+    data = resp.json()
+    entry.username = data["username"]
+    return {"ok": True, "username": data["username"]}
+
+
 @router.post("/resend", status_code=200)
 async def resend_verification(body: ResendRequest):
     email = _validate_email(body.email)

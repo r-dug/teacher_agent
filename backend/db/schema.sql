@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS lesson_enrollments (
     current_section_idx INTEGER NOT NULL DEFAULT 0,
     completed           SMALLINT NOT NULL DEFAULT 0,
     lesson_goal         TEXT,
+    task_progress       TEXT NOT NULL DEFAULT '{}',
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (lesson_id, user_id)
@@ -392,3 +393,14 @@ CREATE INDEX IF NOT EXISTS idx_point_events_enrollment ON point_events(enrollmen
 CREATE UNIQUE INDEX IF NOT EXISTS idx_point_events_lesson_complete
     ON point_events(enrollment_id, event_type)
     WHERE event_type = 'lesson_complete';
+
+-- ── User Preferences ─────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS user_preferences (
+    user_id    TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    prefs_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ── Idempotent migrations ────────────────────────────────────────────────────
+ALTER TABLE lesson_enrollments ADD COLUMN IF NOT EXISTS task_progress TEXT NOT NULL DEFAULT '{}';

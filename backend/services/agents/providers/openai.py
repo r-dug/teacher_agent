@@ -23,14 +23,19 @@ class OpenAILLMProvider(LLMProvider):
         api_key: str,
         timeout_seconds: float = 60.0,
         max_retries: int = 2,
+        base_url: str | None = None,
     ) -> None:
         if not (api_key or "").strip():
             raise ValueError("OpenAILLMProvider requires a non-empty api_key.")
-        self._client = openai.OpenAI(
-            api_key=api_key.strip(),
-            timeout=timeout_seconds,
-            max_retries=max_retries,
-        )
+        kwargs: dict = {
+            "api_key": api_key.strip(),
+            "timeout": timeout_seconds,
+            "max_retries": max_retries,
+        }
+        if base_url:
+            kwargs["base_url"] = base_url
+        self._client = openai.OpenAI(**kwargs)
+        self._base_url = base_url
 
     @property
     def name(self) -> str:

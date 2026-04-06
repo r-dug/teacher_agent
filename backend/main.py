@@ -28,7 +28,7 @@ from .config import settings
 configure_logging(storage_dir=settings.STORAGE_DIR)
 log = logging.getLogger(__name__)
 from .db import connection as db, models
-from .routers import courses, iam, internal, leaderboard, lessons, ws_session, usage
+from .routers import courses, iam, internal, leaderboard, lessons, preferences, ws_session, usage
 from .routers.agents import personas
 from .routers.voice import voices
 
@@ -217,6 +217,7 @@ app.include_router(iam.router)
 app.include_router(leaderboard.router)
 app.include_router(personas.router)
 app.include_router(voices.router)
+app.include_router(preferences.router)
 app.include_router(ws_session.router)
 app.include_router(usage.router)
 

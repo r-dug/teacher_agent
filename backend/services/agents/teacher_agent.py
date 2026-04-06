@@ -29,7 +29,7 @@ from .prompts.persona import CONDENSE_EPISODE_SYSTEM, GENERATE_INSTRUCTIONS_SYST
 from .prompts.teaching import make_intro_prompt, make_teaching_prompt
 from .prompts.tts_prep import TTS_PREP_USER_PREFIX, make_tts_prep_system
 from .providers.base import LLMProvider
-from .tools import CAPTURE_GOAL_TOOL, GENERATE_VISUAL_AID_TOOL, TEACHING_TOOLS
+from .tools import CAPTURE_GOAL_TOOL, GENERATE_VISUAL_AID_TOOL, SEARCH_IMAGE_TOOL, TEACHING_TOOLS
 from .tts_pipeline import TTSPipeline
 
 log = logging.getLogger(__name__)
@@ -68,10 +68,13 @@ class TeacherAgent(Agent):
 
     @property
     def _effective_tools(self) -> list:
-        """TEACHING_TOOLS extended with generate_visual_aid when the callback is set."""
+        """TEACHING_TOOLS extended with optional image tools when callbacks are set."""
+        tools = list(TEACHING_TOOLS)
         if self._callbacks.on_generate_visual_aid is not None:
-            return TEACHING_TOOLS + [GENERATE_VISUAL_AID_TOOL]
-        return TEACHING_TOOLS
+            tools.append(GENERATE_VISUAL_AID_TOOL)
+        if self._callbacks.on_search_image is not None:
+            tools.append(SEARCH_IMAGE_TOOL)
+        return tools
 
     @property
     def audio_turns(self) -> list[list[np.ndarray]]:
@@ -164,7 +167,7 @@ class TeacherAgent(Agent):
             _INTERACTIVE_TOOLS = frozenset({
                 "open_sketchpad", "take_photo", "record_video",
                 "open_code_editor", "open_html_editor", "start_timer",
-                "generate_visual_aid",
+                "generate_visual_aid", "search_image",
             })
             if tool.name in _INTERACTIVE_TOOLS:
                 pending_assistant_msg = messages.pop()
@@ -175,7 +178,30 @@ class TeacherAgent(Agent):
                 })
                 pending_assistant_msg = None
 
+            if tool.name == "mark_task_complete":
+                task_idx = int(tool.input.get("task_idx", -1))
+                evidence = tool.input.get("evidence", "")
+                result = curriculum.mark_task(task_idx, evidence)
+                if result and self._callbacks.on_task_complete:
+                    self._callbacks.on_task_complete(curriculum)
+                continue
+
             if tool.name == "advance_to_next_section":
+                if not curriculum.all_tasks_done():
+                    # Replace the OK tool_result with an error — loop back
+                    messages[-1] = {
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": tool.id,
+                            "content": (
+                                "Cannot advance: not all concept tasks are marked complete. "
+                                "Please verify remaining concepts and call mark_task_complete first."
+                            ),
+                            "is_error": True,
+                        }],
+                    }
+                    continue
                 if curriculum.is_last:
                     if self._callbacks.on_curriculum_complete:
                         self._callbacks.on_curriculum_complete()
@@ -206,10 +232,11 @@ class TeacherAgent(Agent):
                 prompt = tool.input.get("prompt", "Please draw:")
                 text_bg: str | None = tool.input.get("text_bg")
                 bg_page: int | None = tool.input.get("bg_page")
+                bg_image_url: str | None = tool.input.get("bg_image_url")
                 result_holder: list[str | None] = [None]
                 done_event = threading.Event()
                 if self._callbacks.on_open_sketchpad:
-                    self._callbacks.on_open_sketchpad(prompt, result_holder, done_event, text_bg, bg_page)
+                    self._callbacks.on_open_sketchpad(prompt, result_holder, done_event, text_bg, bg_page, bg_image_url)
                 done_event.wait()
                 messages.append(pending_assistant_msg)
                 if result_holder[0] is None:
@@ -368,6 +395,30 @@ class TeacherAgent(Agent):
                     "content": [{"type": "tool_result", "tool_use_id": tool.id, "content": content}],
                 })
 
+            elif tool.name == "search_image":
+                query = tool.input.get("query", "")
+                caption = tool.input.get("caption", "")
+                result_holder_search: list[str | None] = [None]
+                done_event_search = threading.Event()
+                if self._callbacks.on_search_image:
+                    self._callbacks.on_search_image(
+                        query, caption, tool.id, result_holder_search, done_event_search
+                    )
+                done_event_search.wait()
+                image_url = result_holder_search[0]
+                messages.append(pending_assistant_msg)
+                if image_url:
+                    content = "Image found and displayed to the student."
+                else:
+                    content = (
+                        "Image search returned no results. Continue teaching without a visual. "
+                        "Let the student know briefly that no image was found."
+                    )
+                messages.append({
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": tool.id, "content": content}],
+                })
+
             elif tool.name == "mark_curriculum_complete":
                 if self._callbacks.on_curriculum_complete:
                     self._callbacks.on_curriculum_complete()
@@ -478,7 +529,8 @@ class TeacherAgent(Agent):
             system = _system
         else:
             system = make_teaching_prompt(
-                curriculum.title, curriculum.sections, curriculum.idx, lesson_goal
+                curriculum.title, curriculum.sections, curriculum.idx, lesson_goal,
+                current_tasks=curriculum.current_tasks(),
             )
             if agent_instructions:
                 system += f"\n\nADDITIONAL STYLE INSTRUCTIONS:\n{agent_instructions}"
@@ -557,6 +609,19 @@ class TeacherAgent(Agent):
             )
 
             messages.append({"role": "assistant", "content": result.content_blocks})
+
+            # Distillation: log the full turn for training data collection
+            if self._callbacks.on_turn_logged:
+                try:
+                    import copy
+                    self._callbacks.on_turn_logged(
+                        system,
+                        copy.deepcopy(messages),
+                        tools,
+                        self._model,
+                    )
+                except Exception:
+                    log.debug("on_turn_logged callback failed", exc_info=True)
 
         except Exception as e:
             log.exception("_do_single_llm_turn: LLM exception: %s", e)

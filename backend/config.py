@@ -87,6 +87,13 @@ class Settings:
         os.getenv("OPENAI_DECOMPOSE_ENABLE_VISION_OCR", "true").strip().lower()
         in {"1", "true", "yes", "on"}
     )
+    # Distillation / fine-tuning
+    DISTILLATION_COLLECT: bool = (
+        os.getenv("DISTILLATION_COLLECT", "false").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    OPENAI_API_BASE: str | None = os.getenv("OPENAI_API_BASE")
+
     DEFAULT_VOICE: str = os.getenv("DEFAULT_VOICE", "af_heart")
     ENV: str = os.getenv("ENV", "development")
     TTS_PROVIDER: str | None = os.getenv("TTS_PROVIDER")

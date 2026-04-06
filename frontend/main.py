@@ -30,7 +30,7 @@ from .config import settings
 from . import http_client
 
 configure_logging(storage_dir=Path("./storage"))
-from .routers import auth, sessions, courses, iam, leaderboard, lessons, personas, voices, ws_proxy, usage
+from .routers import auth, sessions, courses, iam, leaderboard, lessons, personas, preferences, voices, ws_proxy, usage
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -112,6 +112,7 @@ app.include_router(personas.router, prefix="/api")
 app.include_router(voices.router, prefix="/api")
 app.include_router(iam.router, prefix="/api")
 app.include_router(leaderboard.router, prefix="/api")
+app.include_router(preferences.router, prefix="/api")
 app.include_router(ws_proxy.router)  # /ws/... — no /api prefix
 app.include_router(usage.router, prefix="/api")
 

@@ -25,7 +25,7 @@ import { CurriculumPanel } from '@/components/CurriculumPanel'
 import { SlideViewer } from '@/components/SlideViewer'
 import { ImageViewer } from '@/components/ImageViewer'
 import { ZoomableImage } from '@/components/ZoomableImage'
-import { Sketchpad } from '@/components/Sketchpad'
+import { Sketchpad, type SketchpadPrefs } from '@/components/Sketchpad'
 import { CameraCapture } from '@/components/CameraCapture'
 import { VideoCapture } from '@/components/VideoCapture'
 import { CodeEditor, type CodeOutput } from '@/components/CodeEditor'
@@ -107,6 +107,32 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const lastTurnIdRef = useRef<string | null>(null)
+
+  // ── sketchpad preferences ───────────────────────────────────────────────
+  const [sketchPrefs, setSketchPrefs] = useState<SketchpadPrefs>({})
+  const sketchPrefsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    fetch('/api/preferences', { headers: { 'X-Session-Id': sessionId } })
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (data?.prefs?.sketchpad) setSketchPrefs(data.prefs.sketchpad)
+      })
+      .catch(() => {/* non-fatal */})
+  }, [sessionId])
+
+  const handleSketchPrefsChange = useCallback((prefs: SketchpadPrefs) => {
+    setSketchPrefs(prefs)
+    // Debounce save to avoid spamming API on slider drags
+    if (sketchPrefsSaveTimer.current) clearTimeout(sketchPrefsSaveTimer.current)
+    sketchPrefsSaveTimer.current = setTimeout(() => {
+      fetch('/api/preferences', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Session-Id': sessionId },
+        body: JSON.stringify({ prefs: { sketchpad: prefs } }),
+      }).catch(() => {/* non-fatal */})
+    }, 800)
+  }, [sessionId])
 
   // ── personas ─────────────────────────────────────────────────────────────
   const [personas, setPersonas] = useState<Persona[]>([])
@@ -999,6 +1025,8 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
           invocationId={sketchpad.invocationId}
           textBg={sketchpad.textBg}
           imBg={sketchpad.imBg}
+          prefs={sketchPrefs}
+          onPrefsChange={handleSketchPrefsChange}
           onSubmit={handleSketchSubmit}
           onCancel={() => { send({ event: 'tool_result', invocation_id: sketchpad.invocationId, result: {} }); setSketchpad(null) }}
         />

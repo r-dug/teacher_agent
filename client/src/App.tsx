@@ -144,7 +144,7 @@ export default function App() {
       ) : authState === 'authenticated' && sessionId ? (
         <BrowserRouter>
           <Routes>
-            <Route path="/" element={<HomePage sessionId={sessionId} onLogout={onLogout} isAdmin={isAdmin} userEmail={userEmail} username={username} />} />
+            <Route path="/" element={<HomePage sessionId={sessionId} onLogout={onLogout} isAdmin={isAdmin} userEmail={userEmail} username={username} onUsernameChange={setUsername} />} />
             <Route path="/leaderboard" element={
               <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
                 <LeaderboardPage sessionId={sessionId} username={username} />

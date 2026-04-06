@@ -21,6 +21,7 @@ interface HomePageProps {
   isAdmin?: boolean
   userEmail?: string
   username?: string
+  onUsernameChange?: (name: string) => void
 }
 
 // ── Collapsible section header ────────────────────────────────────────────────
@@ -54,7 +55,7 @@ function SectionHeader({
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-export function HomePage({ sessionId, onLogout, isAdmin, userEmail = '', username: _username = '' }: HomePageProps) {
+export function HomePage({ sessionId, onLogout, isAdmin, userEmail = '', username: _username = '', onUsernameChange }: HomePageProps) {
   const navigate = useNavigate()
 
   const [courses, setCourses] = useState<Course[]>([])
@@ -161,6 +162,8 @@ export function HomePage({ sessionId, onLogout, isAdmin, userEmail = '', usernam
         onClose={() => setSettingsOpen(false)}
         sessionId={sessionId}
         userEmail={userEmail}
+        username={_username}
+        onUsernameChange={(name) => onUsernameChange?.(name)}
         onLogout={onLogout}
       />
 
