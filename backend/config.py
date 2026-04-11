@@ -74,12 +74,14 @@ class Settings:
     TEACH_LLM_MODEL: str | None = os.getenv("TEACH_LLM_MODEL")
     DECOMPOSE_LLM_PROVIDER: str | None = os.getenv("DECOMPOSE_LLM_PROVIDER")
     DECOMPOSE_LLM_MODEL: str | None = os.getenv("DECOMPOSE_LLM_MODEL")
+    MEMORY_STRATEGY: str = os.getenv("MEMORY_STRATEGY", "turn_summaries")
     AUTHORING_LLM_PROVIDER: str | None = os.getenv("AUTHORING_LLM_PROVIDER")
     AUTHORING_LLM_MODEL: str | None = os.getenv("AUTHORING_LLM_MODEL")
-    OPENAI_LLM_TIMEOUT_S: float = float(os.getenv("OPENAI_LLM_TIMEOUT_S", "30"))
-    OPENAI_LLM_MAX_RETRIES: int = int(os.getenv("OPENAI_LLM_MAX_RETRIES", "1"))
-    OPENAI_DECOMPOSE_TIMEOUT_S: float = float(os.getenv("OPENAI_DECOMPOSE_TIMEOUT_S", "45"))
-    OPENAI_DECOMPOSE_MAX_RETRIES: int = int(os.getenv("OPENAI_DECOMPOSE_MAX_RETRIES", "1"))
+    # Plan B follow-up A2: OPENAI_LLM_TIMEOUT_S, OPENAI_LLM_MAX_RETRIES,
+    # OPENAI_DECOMPOSE_TIMEOUT_S, and OPENAI_DECOMPOSE_MAX_RETRIES were
+    # dropped — their values now live in backend/services/agents/model_chains.py
+    # under each ChainSpec's source_config.  Operational toggles for the
+    # decomposition path stay here because they're not LLM-call config.
     OPENAI_DECOMPOSE_MAX_INPUT_CHARS: int = int(
         os.getenv("OPENAI_DECOMPOSE_MAX_INPUT_CHARS", "120000")
     )

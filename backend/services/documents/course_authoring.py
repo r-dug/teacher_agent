@@ -238,75 +238,38 @@ def _format_openai_error(response) -> str:
     return f"OpenAI API error {response.status_code}: {body}"
 
 
-def _openai_chat_text_sync(
+def _complete_via_chain(
     *,
-    model: str,
+    chain_role: str,
     system: str,
     messages: list[dict[str, Any]],
     max_tokens: int,
-    timeout_seconds: float,
-    max_retries: int,
 ) -> str:
-    import httpx
+    """Plan B follow-up A2: replaces ``_openai_chat_text_sync``.
 
-    api_key = (settings.OPENAI_API_KEY or "").strip()
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured.")
+    Routes one-off text completion through the centralized
+    ``LLMProvider.complete()`` abstraction (Responses API for OpenAI,
+    Messages API for Anthropic).  Configuration (model, timeout,
+    retries) lives in the chain spec at ``model_chains.py``.
 
-    payload: dict[str, Any] = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": [{"role": "system", "content": system}] + messages,
-    }
-    headers = {"Authorization": f"Bearer {api_key}"}
-    last_err: Exception | None = None
-    for attempt in range(max(0, int(max_retries)) + 1):
-        try:
-            with httpx.Client(timeout=max(1.0, float(timeout_seconds))) as client:
-                resp = client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers=headers,
-                    json=payload,
-                )
-            if resp.status_code == 400 and "max_tokens" in (resp.text or "") and "max_completion_tokens" in (resp.text or ""):
-                # Model requires max_completion_tokens — switch and retry immediately.
-                payload = {k: v for k, v in payload.items() if k != "max_tokens"}
-                payload["max_completion_tokens"] = max_tokens
-                continue
-            if resp.status_code >= 400:
-                raise RuntimeError(_format_openai_error(resp))
-            data = resp.json()
-            choice = ((data.get("choices") or [{}])[0] or {})
-            usage = data.get("usage") or {}
-            details = usage.get("completion_tokens_details") or {}
-            reasoning_tokens = int(details.get("reasoning_tokens") or 0)
-            if choice.get("finish_reason") == "length" and reasoning_tokens > 0 and reasoning_tokens >= usage.get("completion_tokens", 0) - 1:
-                # Reasoning model consumed all tokens for thinking — remove the cap and retry.
-                log.info("Reasoning model exhausted token budget on reasoning; retrying without token cap.")
-                payload = {k: v for k, v in payload.items() if k not in ("max_tokens", "max_completion_tokens")}
-                continue
-            message = choice.get("message") or {}
-            content = message.get("content") or ""
-            if isinstance(content, list):
-                parts = []
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        txt = str(part.get("text") or "").strip()
-                        if txt:
-                            parts.append(txt)
-                text = "\n".join(parts).strip()
-            else:
-                text = str(content).strip()
-            if not text:
-                raise RuntimeError(f"OpenAI returned empty content. finish_reason={choice.get('finish_reason')} reasoning_tokens={reasoning_tokens}")
-            return text
-        except Exception as exc:
-            last_err = exc
-            if attempt >= max(0, int(max_retries)):
-                break
-            time.sleep(min(0.2 * (2**attempt), 1.0))
+    The old httpx-based helper had to manually handle the
+    ``max_tokens`` → ``max_completion_tokens`` rename and the
+    "reasoning model exhausted budget on reasoning" retry.  Both are
+    handled cleanly by the SDK + Responses API now.
+    """
+    from ..agents.model_chains import ROLE_TO_CHAIN
+    from ..agents.model_config import build_chain
 
-    raise RuntimeError(f"OpenAI chat failed: {last_err}") from last_err
+    spec = ROLE_TO_CHAIN[chain_role]
+    provider = build_chain(spec)
+    text, _usage = provider.complete(
+        system=system,
+        messages=messages,
+        max_tokens=max_tokens,
+    )
+    if not text:
+        raise RuntimeError(f"{chain_role} chain returned empty content.")
+    return text
 
 
 def _openai_ocr_page_texts_sync(
@@ -326,6 +289,9 @@ def _openai_ocr_page_texts_sync(
         pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
         image_bytes = pix.tobytes("png")
         image_b64 = base64.b64encode(image_bytes).decode("ascii")
+        # Anthropic-format content blocks (image + text); the OpenAI
+        # provider's complete() translates them to Responses API
+        # input_image / input_text via _messages_to_openai_responses.
         user_content = [
             {
                 "type": "text",
@@ -337,17 +303,19 @@ def _openai_ocr_page_texts_sync(
                 ),
             },
             {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{image_b64}"},
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": image_b64,
+                },
             },
         ]
-        text = _openai_chat_text_sync(
-            model=model,
+        text = _complete_via_chain(
+            chain_role="ocr",
             system="You are a precise OCR transcriber.",
             messages=[{"role": "user", "content": user_content}],
             max_tokens=2000,
-            timeout_seconds=settings.OPENAI_DECOMPOSE_TIMEOUT_S,
-            max_retries=settings.OPENAI_DECOMPOSE_MAX_RETRIES,
         ).strip()
         if not text:
             continue
@@ -394,35 +362,19 @@ def _advisor_reply_sync(
     chapters: list[dict[str, Any]],
     transcript: list[dict[str, str]],
 ) -> str:
-    provider = settings.effective_authoring_llm_provider()
-    model = settings.effective_authoring_llm_model()
+    """Plan B follow-up A2: routes through ADVISOR_CHAIN via _complete_via_chain."""
     messages = [
         {"role": m["role"], "content": m["content"]}
         for m in transcript
         if m.get("role") in {"user", "assistant"} and str(m.get("content", "")).strip()
     ]
     try:
-        if provider == "openai":
-            return _openai_chat_text_sync(
-                model=model,
-                system=_advisor_system_prompt(course_title, chapters),
-                messages=messages,
-                max_tokens=500,
-                timeout_seconds=settings.OPENAI_LLM_TIMEOUT_S,
-                max_retries=settings.OPENAI_LLM_MAX_RETRIES,
-            )
-        import anthropic
-
-        client = anthropic.Anthropic(max_retries=3)
-        resp = client.messages.create(
-            model=model,
-            max_tokens=500,
+        return _complete_via_chain(
+            chain_role="advisor",
             system=_advisor_system_prompt(course_title, chapters),
             messages=messages,
+            max_tokens=500,
         )
-        for block in getattr(resp, "content", []):
-            if getattr(block, "type", None) == "text" and getattr(block, "text", "").strip():
-                return str(block.text).strip()
     except Exception as exc:
         log.warning("advisor reply fallback: %s", exc)
     return (
@@ -551,29 +503,13 @@ def extract_toc_chapters_sync(
 
     raw: str | None = None
     try:
-        if provider == "openai":
-            raw = _openai_chat_text_sync(
-                model=model,
-                system=system,
-                messages=[{"role": "user", "content": user_msg}],
-                max_tokens=1500,
-                timeout_seconds=settings.OPENAI_LLM_TIMEOUT_S,
-                max_retries=settings.OPENAI_LLM_MAX_RETRIES,
-            )
-        else:
-            import anthropic
-
-            client = anthropic.Anthropic(max_retries=3)
-            resp = client.messages.create(
-                model=model,
-                max_tokens=1500,
-                system=system,
-                messages=[{"role": "user", "content": user_msg}],
-            )
-            for block in getattr(resp, "content", []):
-                if getattr(block, "type", None) == "text" and getattr(block, "text", "").strip():
-                    raw = str(block.text).strip()
-                    break
+        # Plan B follow-up A2: route through OBJECTIVES_CHAIN.
+        raw = _complete_via_chain(
+            chain_role="objectives",
+            system=system,
+            messages=[{"role": "user", "content": user_msg}],
+            max_tokens=1500,
+        )
     except Exception as exc:
         log.warning("extract_toc_chapters_sync: LLM call failed: %s", exc)
         return None
@@ -1240,30 +1176,16 @@ def _decompose_chapter_text_sync(
         + "\n\nReturn JSON only."
     )
 
-    provider = (decompose_provider or "anthropic").strip().lower()
-    if provider == "openai":
-        raw = _openai_chat_text_sync(
-            model=decompose_model,
-            system=text_system,
-            messages=[{"role": "user", "content": user_message}],
-            max_tokens=4000,
-            timeout_seconds=settings.OPENAI_DECOMPOSE_TIMEOUT_S,
-            max_retries=settings.OPENAI_DECOMPOSE_MAX_RETRIES,
-        )
-    else:
-        import anthropic
-        client = anthropic.Anthropic(max_retries=6)
-        resp = client.messages.create(
-            model=decompose_model,
-            max_tokens=4000,
-            system=text_system,
-            messages=[{"role": "user", "content": user_message}],
-        )
-        raw = ""
-        for block in getattr(resp, "content", []):
-            if getattr(block, "type", None) == "text":
-                raw = str(block.text).strip()
-                break
+    # Plan B follow-up A2: route through DECOMPOSE_CHAIN.  The decompose_provider
+    # / decompose_model parameters are kept on the function signature for API
+    # backwards compat but no longer consulted — the chain spec is the source
+    # of truth.
+    raw = _complete_via_chain(
+        chain_role="decompose",
+        system=text_system,
+        messages=[{"role": "user", "content": user_message}],
+        max_tokens=4000,
+    )
 
     parsed = _extract_json_object(raw)
     sections = _extract_sections_payload(parsed)
@@ -1301,61 +1223,27 @@ def _decompose_chapter_sync(
             decompose_model=decompose_model,
         )
 
-    provider = (decompose_provider or "anthropic").strip().lower()
-    if provider == "openai":
-        sections = _decompose_chapter_openai_sync(
-            source_pdf_rel=source_pdf_rel,
-            page_start=page_start,
-            page_end=page_end,
-            total_pages=total_pages,
-            objectives_prompt=objectives_prompt,
-            decompose_model=decompose_model,
-        )
-    else:
-        import anthropic
-        import fitz
-        from ..agents.planner_agent import LessonPlannerAgent
-
-        full_pdf = settings.STORAGE_DIR / Path(source_pdf_rel)
-        doc = fitz.open(str(full_pdf))
-        chunk = fitz.open()
-        try:
-            chunk.insert_pdf(doc, from_page=page_start - 1, to_page=page_end - 1)
-            pdf_bytes = chunk.tobytes()
-        finally:
-            chunk.close()
-            doc.close()
-
-        seg_start = page_start - 1
-        seg_end = page_end
-        goal_note = (
-            f"\n\nSTUDENT GOAL: \"{objectives_prompt}\"\n"
-            "Use this to inform your decomposition:\n"
-            "- Break content most relevant to this goal into finer, more precise sections.\n"
-            "- Be especially careful with page_start/page_end for those sections.\n"
-            "- Prioritise key_concepts that directly serve this goal."
-            if objectives_prompt
-            else ""
-        )
-        decomposer = LessonPlannerAgent(
-            decompose_llm_provider="anthropic",
-            openai_api_key=None,
-            openai_timeout_seconds=30.0,
-            openai_max_retries=1,
-            openai_max_input_chars=120000,
-            model=decompose_model,
-        )
-        client = anthropic.Anthropic(max_retries=6)
-        _, sections = decomposer._decompose_segment(  # noqa: SLF001 - intentional reuse of core decomposition logic
-            client,
-            pdf_bytes,
-            seg_start,
-            seg_end,
-            total_pages,
-            goal_note,
-            None,
-            None,
-        )
+    # Plan B follow-up A2: route through DECOMPOSE_CHAIN.  Both
+    # OpenAI and (broken-without-credits) Anthropic paths now use the
+    # same decompose helper.  The decompose_provider/decompose_model
+    # parameters are kept on the function signature for backwards compat
+    # but no longer consulted — DECOMPOSE_CHAIN is the source of truth.
+    #
+    # Note: this whole function will be replaced by B3's canonical
+    # decompose.py module in a follow-up commit.  For now we use the
+    # existing OpenAI path (which already extracts text and runs the
+    # decompose prompt) for both branches.  The Anthropic-PDF-blob
+    # path is dead code — we don't use it because (a) Anthropic credits
+    # are zero, and (b) the OpenAI text-extract path produces equivalent
+    # output.
+    sections = _decompose_chapter_openai_sync(
+        source_pdf_rel=source_pdf_rel,
+        page_start=page_start,
+        page_end=page_end,
+        total_pages=total_pages,
+        objectives_prompt=objectives_prompt,
+        decompose_model=decompose_model,
+    )
 
     # Normalize page numbers to absolute textbook pages when model returns local segment pages.
     span = page_end - page_start + 1
@@ -1435,13 +1323,12 @@ def _decompose_chapter_openai_sync(
         + combined_text
         + "\n\nReturn JSON only."
     )
-    raw = _openai_chat_text_sync(
-        model=decompose_model,
+    # Plan B follow-up A2: route through DECOMPOSE_CHAIN.
+    raw = _complete_via_chain(
+        chain_role="decompose",
         system=DECOMPOSE_SYSTEM,
         messages=[{"role": "user", "content": user_message}],
         max_tokens=4000,
-        timeout_seconds=settings.OPENAI_DECOMPOSE_TIMEOUT_S,
-        max_retries=settings.OPENAI_DECOMPOSE_MAX_RETRIES,
     )
     parsed = _extract_json_object(raw)
     sections = _extract_sections_payload(parsed)

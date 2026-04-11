@@ -36,11 +36,8 @@ import numpy as np
 from ..voice.config import KOKORO_SAMPLE_RATE, DEFAULT_KOKORO_VOICE
 from ...app_state import app_state
 from .callbacks import AgentCallbacks
-from .config import DEFAULT_LLM_MODEL
 from .curriculum import Curriculum
 from .planner_agent import LessonPlannerAgent
-from .providers.anthropic import AnthropicLLMProvider
-from .providers.openai import OpenAILLMProvider
 from .search_agent import SearchAgent
 from .teacher_agent import TeacherAgent
 
@@ -72,17 +69,6 @@ class AgentSession:
         tts_voice: str = DEFAULT_KOKORO_VOICE,
         kokoro_pipeline=None,
         kokoro_voice: str = DEFAULT_KOKORO_VOICE,
-        llm_model: str = DEFAULT_LLM_MODEL,
-        teach_llm_provider: str = "anthropic",
-        teach_llm_model: str | None = None,
-        decompose_llm_provider: str | None = None,
-        decompose_llm_model: str | None = None,
-        openai_api_key: str | None = None,
-        openai_api_base: str | None = None,
-        openai_timeout_seconds: float = 30.0,
-        openai_max_retries: int = 1,
-        openai_decompose_timeout_seconds: float | None = None,
-        openai_decompose_max_retries: int | None = None,
         openai_decompose_max_input_chars: int = 120000,
         pdf_path: str | None = None,
         lesson_id: str | None = None,
@@ -136,69 +122,24 @@ class AgentSession:
                 default_voice=kokoro_voice,
             )
 
-        # ── Build teaching LLM provider chain (primary + optional fallback) ──
-        _teach_provider = (teach_llm_provider or "anthropic").strip().lower()
-        _teach_model = teach_llm_model or llm_model
-        _openai_key = (openai_api_key or "").strip()
+        # ── Build LLM provider chains (Plan B follow-up A) ────────────────
+        # Single source of truth: model_chains.py defines TEACH_CHAIN /
+        # DECOMPOSE_CHAIN / etc.  build_chain() handles fallback wiring,
+        # API key lookup from env vars, and source-specific construction.
+        # The legacy `teach_llm_provider`/`teach_llm_model`/`openai_*`
+        # constructor params are kept on the signature for backwards
+        # compat with callers but are no longer consulted.
+        from .model_chains import TEACH_CHAIN, DECOMPOSE_CHAIN
+        from .model_config import build_chain
 
-        from .providers.fallback import FallbackLLMProvider
+        llm_provider = build_chain(TEACH_CHAIN)
+        decompose_provider = build_chain(DECOMPOSE_CHAIN)
 
-        _teach_chain: list[tuple[AnthropicLLMProvider | OpenAILLMProvider, str]] = []
-        if _teach_provider == "openai" and _openai_key:
-            _teach_chain.append((
-                OpenAILLMProvider(
-                    api_key=_openai_key,
-                    timeout_seconds=max(1.0, float(openai_timeout_seconds)),
-                    max_retries=max(0, int(openai_max_retries)),
-                    base_url=openai_api_base,  # Ollama/vLLM override for primary
-                ),
-                _teach_model,
-            ))
-            # Anthropic as fallback (picks up ANTHROPIC_API_KEY from env)
-            _teach_chain.append((AnthropicLLMProvider(), DEFAULT_LLM_MODEL))
-        else:
-            _teach_chain.append((AnthropicLLMProvider(), _teach_model))
-            # OpenAI as fallback if a key is available
-            if _openai_key:
-                _teach_chain.append((
-                    OpenAILLMProvider(
-                        api_key=_openai_key,
-                        timeout_seconds=max(1.0, float(openai_timeout_seconds)),
-                        max_retries=max(0, int(openai_max_retries)),
-                        # No base_url — fallback always hits real OpenAI API
-                    ),
-                    "gpt-4o-mini",
-                ))
-
-        llm_provider: AnthropicLLMProvider | OpenAILLMProvider | FallbackLLMProvider = (
-            _teach_chain[0][0] if len(_teach_chain) == 1
-            else FallbackLLMProvider(_teach_chain)
-        )
-
-        # ── Build decomposition agents ───────────────────────────────────────
-        _decompose_provider = (decompose_llm_provider or _teach_provider or "anthropic").strip().lower()
-        _decompose_model = decompose_llm_model or llm_model
-        _decompose_timeout = max(
-            1.0,
-            float(openai_decompose_timeout_seconds if openai_decompose_timeout_seconds is not None else openai_timeout_seconds),
-        )
-        _decompose_retries = max(
-            0,
-            int(openai_decompose_max_retries if openai_decompose_max_retries is not None else openai_max_retries),
-        )
-
-        search_agent = SearchAgent(
-            model=_decompose_model,
-            on_token_usage=self._on_token_usage,
-        )
+        search_agent = SearchAgent(on_token_usage=self._on_token_usage)
 
         self._planner = LessonPlannerAgent(
-            decompose_llm_provider=_decompose_provider,
-            openai_api_key=_openai_key or None,
-            openai_timeout_seconds=_decompose_timeout,
-            openai_max_retries=_decompose_retries,
+            llm_provider=decompose_provider,
             openai_max_input_chars=max(1000, int(openai_decompose_max_input_chars)),
-            model=_decompose_model,
             search_agent=search_agent,
             on_token_usage=self._on_token_usage,
         )
@@ -246,7 +187,7 @@ class AgentSession:
             callbacks=callbacks,
             tts_providers=tts_providers,
             tts_voice=tts_voice,
-            model=_teach_model,
+            model=llm_provider.model,
             memory_strategy=_settings.MEMORY_STRATEGY,
         )
 

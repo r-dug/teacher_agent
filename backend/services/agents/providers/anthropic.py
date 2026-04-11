@@ -15,14 +15,35 @@ log = logging.getLogger(__name__)
 
 
 class AnthropicLLMProvider(LLMProvider):
-    """Streams responses from the Anthropic Messages API."""
+    """Streams responses from the Anthropic Messages API.
 
-    def __init__(self, max_retries: int = 6) -> None:
-        self._client = anthropic.Anthropic(max_retries=max_retries)
+    Plan B follow-up A: model and api_key are now baked into the
+    constructor (was: model passed per-call via ``do_turn(model=...)``,
+    api_key picked up from env var by the SDK).  ``do_turn(model=...)``
+    still accepts the param for backwards compat with FallbackLLMProvider
+    and test fakes; if empty, it falls back to ``self._model``.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        max_retries: int = 6,
+    ) -> None:
+        if not (model or "").strip():
+            raise ValueError("AnthropicLLMProvider requires a non-empty model.")
+        if not (api_key or "").strip():
+            raise ValueError("AnthropicLLMProvider requires a non-empty api_key.")
+        self._client = anthropic.Anthropic(api_key=api_key.strip(), max_retries=max_retries)
+        self._model = model
 
     @property
     def name(self) -> str:
         return "anthropic"
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     def do_turn(
         self,
@@ -32,8 +53,9 @@ class AnthropicLLMProvider(LLMProvider):
         tools: list[dict],
         on_text_chunk: Callable[[str], None] | None = None,
     ) -> LLMTurnResult:
+        effective_model = (model or "").strip() or self._model
         stream_kwargs: dict = dict(
-            model=model,
+            model=effective_model,
             max_tokens=2048,
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=messages,
@@ -46,7 +68,10 @@ class AnthropicLLMProvider(LLMProvider):
                 cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
             stream_kwargs["tools"] = cached_tools
 
-        log.info("AnthropicLLMProvider.do_turn: opening stream (model=%s, messages=%d, tools=%d)", model, len(messages), len(tools))
+        log.info(
+            "AnthropicLLMProvider.do_turn: opening stream (model=%s, messages=%d, tools=%d)",
+            effective_model, len(messages), len(tools),
+        )
 
         full_text = ""
         with self._client.messages.stream(**stream_kwargs) as stream:
@@ -69,3 +94,27 @@ class AnthropicLLMProvider(LLMProvider):
             usage=final.usage,
             tool_uses=tool_uses,
         )
+
+    def complete(
+        self,
+        system: str,
+        messages: list[dict],
+        max_tokens: int = 1024,
+    ) -> tuple[str, object]:
+        """Plan B follow-up A2: non-streaming text completion.
+
+        Used by the simple text-completion call sites that previously
+        constructed ``anthropic.Anthropic(max_retries=6)`` inline.
+        """
+        response = self._client.messages.create(
+            model=self._model,
+            max_tokens=max_tokens,
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            messages=messages,
+        )
+        # Concatenate any text content blocks (Anthropic returns a list).
+        text_parts: list[str] = []
+        for block in response.content:
+            if getattr(block, "type", None) == "text":
+                text_parts.append(block.text)
+        return "\n".join(text_parts).strip(), response.usage

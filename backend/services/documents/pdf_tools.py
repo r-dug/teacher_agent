@@ -6,7 +6,11 @@ import base64
 from pathlib import Path
 
 # ── Claude extraction ─────────────────────────────────────────────────────────
-
+"""
+NOTE I think this whole claude extraction section is dead and should be removed in code cleanup.  
+I believe this is vestigial code from days gone by when the goal was simply to transcribe / subarize, then use tts to build an audio file.
+Not really relevant or useful. Dead Code.
+"""
 CLAUDE_MODEL = "claude-sonnet-4-6"
 
 CLAUDE_PROMPTS: dict[str, str] = {
@@ -49,6 +53,14 @@ def extract_text_claude(pdf_path: str, mode: str = DEFAULT_CLAUDE_MODE) -> str:
     """Use the Claude API to read the PDF and produce TTS-ready text.
 
     Streams the response to stdout while returning the final text.
+
+    NOTE (Plan B follow-up A2): this function uses ``anthropic.Anthropic()``
+    directly because it needs Anthropic-specific PDF document blocks.  It
+    is currently dead code — nothing in the running app imports it (only
+    ``extract_text_plain`` is used).  Kept as a CLI helper.  If we ever
+    need it back, route through ``clients.anthropic_client_for("ocr")``
+    or similar.
+    NOTE from Richard: remove in code cleanup.
     """
     import anthropic
 

@@ -87,21 +87,33 @@ class TeacherAgent(Agent):
         self._current_turn_id: str = ""
 
     def _init_embeddings(self) -> None:
-        """Set up OpenAI embedding function for RAG strategy."""
+        """Set up OpenAI embedding function for RAG strategy.
+
+        Plan B follow-up A2: replaces inline ``openai.OpenAI(...)``
+        construction with ``OpenAIEmbeddingProvider`` configured from
+        ``EMBEDDING_CHAIN``.  Centralizes the embedding model name and
+        retry/timeout config.
+        """
         try:
-            import openai
-            client = openai.OpenAI(max_retries=1, timeout=10.0)
+            import os
 
-            def embed_fn(text: str) -> list[float]:
-                text = text[:2000]  # truncate to avoid token limits
-                resp = client.embeddings.create(
-                    model="text-embedding-3-small",
-                    input=[text],
-                )
-                return resp.data[0].embedding
+            from .model_chains import EMBEDDING_CHAIN
+            from .providers.openai_embeddings import OpenAIEmbeddingProvider
 
-            self._embedding_cache.set_embed_fn(embed_fn)
-            log.info("RAG semantic: OpenAI embeddings initialized")
+            spec = EMBEDDING_CHAIN.primary
+            api_key_env = spec.source_config.get("api_key_env", "OPENAI_API_KEY")
+            api_key = os.environ.get(api_key_env, "").strip()
+            if not api_key:
+                raise ValueError(f"Embedding requires {api_key_env} to be set.")
+
+            provider = OpenAIEmbeddingProvider(
+                api_key=api_key,
+                model=spec.name,
+                timeout_seconds=float(spec.source_config.get("timeout_s", 10.0)),
+                max_retries=int(spec.source_config.get("max_retries", 1)),
+            )
+            self._embedding_cache.set_embed_fn(provider.embed)
+            log.info("RAG semantic: OpenAI embeddings initialized (model=%s)", spec.name)
         except Exception:
             log.warning("RAG semantic: failed to init embeddings, falling back to recency")
 
@@ -435,36 +447,45 @@ class TeacherAgent(Agent):
         self._audio_turns.clear()
 
     def generate_instructions(self, description: str) -> str:
-        """Generate teacher persona instructions from a description.  Synchronous."""
-        import anthropic
-        client = anthropic.Anthropic(max_retries=6)
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=512,
+        """Generate teacher persona instructions from a description.
+
+        Plan B follow-up A2: uses ``provider.complete()`` via
+        ``INSTRUCTIONS_CHAIN`` instead of inline ``anthropic.Anthropic(...)``.
+        """
+        from .model_chains import INSTRUCTIONS_CHAIN
+        from .model_config import build_chain
+
+        provider = build_chain(INSTRUCTIONS_CHAIN)
+        text, usage = provider.complete(
             system=GENERATE_INSTRUCTIONS_SYSTEM,
             messages=[{"role": "user", "content": f"Teaching style: {description}"}],
+            max_tokens=512,
         )
         if self._callbacks.on_token_usage:
-            self._callbacks.on_token_usage("generate_instructions", "claude-sonnet-4-6", response.usage)
-        return response.content[0].text.strip()
+            self._callbacks.on_token_usage("generate_instructions", provider.model, usage)
+        return text
 
     def prepare_for_tts(self, text: str) -> str:
-        """Annotate text with IPA for Kokoro TTS.  Synchronous."""
+        """Annotate text with IPA for Kokoro TTS.
+
+        Plan B follow-up A2: uses ``provider.complete()`` via
+        ``TTS_PREP_CHAIN`` instead of inline ``anthropic.Anthropic(...)``.
+        """
         text = re.sub(r"\*+", "", text)
         text = replace_roman_numerals(text)
         try:
-            import anthropic as _anthropic
-            client = _anthropic.Anthropic(max_retries=6)
+            from .model_chains import TTS_PREP_CHAIN
+            from .model_config import build_chain
+
+            provider = build_chain(TTS_PREP_CHAIN)
             tts_system = make_tts_prep_system(self.accent, ACCENT_PROFILES, DEFAULT_ACCENT, IPA_REFERENCE)
-            response = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=2048,
-                system=[{"type": "text", "text": tts_system, "cache_control": {"type": "ephemeral"}}],
+            result, usage = provider.complete(
+                system=tts_system,
                 messages=[{"role": "user", "content": TTS_PREP_USER_PREFIX + text}],
+                max_tokens=2048,
             )
             if self._callbacks.on_token_usage:
-                self._callbacks.on_token_usage("tts_prep", "claude-sonnet-4-6", response.usage)
-            result = response.content[0].text.strip()
+                self._callbacks.on_token_usage("tts_prep", provider.model, usage)
             result = re.sub(r'\[([^"\]]+)\]\((/[^/]*/)\)', r'["\1"](\2)', result)
             return result
         except Exception:

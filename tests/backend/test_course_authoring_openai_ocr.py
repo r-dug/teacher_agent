@@ -51,7 +51,9 @@ def test_openai_decompose_uses_ocr_fallback_when_no_text(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(course_authoring, "_openai_ocr_page_texts_sync", _fake_ocr)
-    monkeypatch.setattr(course_authoring, "_openai_chat_text_sync", _fake_chat)
+    # Plan B follow-up A2: _openai_chat_text_sync was replaced by
+    # _complete_via_chain which routes through LLMProvider.complete().
+    monkeypatch.setattr(course_authoring, "_complete_via_chain", _fake_chat)
 
     sections = course_authoring._decompose_chapter_openai_sync(
         source_pdf_rel=rel,

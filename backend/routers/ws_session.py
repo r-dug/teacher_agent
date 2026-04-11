@@ -237,6 +237,10 @@ async def ws_session(
     default_tts_voice = (
         getattr(app_state.tts_provider, "default_voice", "") or settings.default_tts_voice()
     )
+    # Plan B follow-up A2: AgentSession no longer takes per-call LLM
+    # config (llm_model, teach_llm_*, decompose_llm_*, openai_*).  All of
+    # that lives in backend/services/agents/model_chains.py now.  We only
+    # pass the operational config and per-session state.
     agent_session = AgentSession(
         send=_send,
         loop=loop,
@@ -245,17 +249,6 @@ async def ws_session(
         tts_voice=default_tts_voice,
         kokoro_pipeline=app_state.kokoro_pipeline,
         kokoro_voice=settings.DEFAULT_VOICE,
-        llm_model=settings.LLM_MODEL,
-        teach_llm_provider=settings.TEACH_LLM_PROVIDER,
-        teach_llm_model=settings.TEACH_LLM_MODEL,
-        decompose_llm_provider=settings.effective_decompose_llm_provider(),
-        decompose_llm_model=settings.effective_decompose_llm_model(),
-        openai_api_key=settings.OPENAI_API_KEY,
-        openai_api_base=settings.OPENAI_API_BASE,
-        openai_timeout_seconds=settings.OPENAI_LLM_TIMEOUT_S,
-        openai_max_retries=settings.OPENAI_LLM_MAX_RETRIES,
-        openai_decompose_timeout_seconds=settings.OPENAI_DECOMPOSE_TIMEOUT_S,
-        openai_decompose_max_retries=settings.OPENAI_DECOMPOSE_MAX_RETRIES,
         openai_decompose_max_input_chars=settings.OPENAI_DECOMPOSE_MAX_INPUT_CHARS,
         pdf_path=pdf_full_path,
         lesson_id=lesson_id,

@@ -85,6 +85,14 @@ class _SequentialLLMProvider(LLMProvider):
     def name(self) -> str:
         return "fake-sequential"
 
+    @property
+    def model(self) -> str:
+        return "fake-model"
+
+    def complete(self, system, messages, max_tokens=1024):
+        # Tests don't currently exercise complete() — return a stub.
+        return ("OK.", _DEFAULT_USAGE)
+
     def do_turn(self, model, system, messages, tools, on_text_chunk=None):
         self._call_count += 1
         if self._queue:

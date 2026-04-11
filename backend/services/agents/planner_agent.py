@@ -7,15 +7,17 @@ import json
 import logging
 import re
 import threading
-import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .agent import Agent
-from .config import MAX_SEGMENT_WORKERS, SEGMENT_TARGET_PAGES, _HAIKU_MODEL
+from .clients import anthropic_client_for
+from .config import MAX_SEGMENT_WORKERS, SEGMENT_TARGET_PAGES
 from .curriculum import Curriculum
 from .message_utils import _block_to_api_dict
+from .model_chains import TITLE_CHAIN
+from .model_config import build_chain
 from .prompts.decompose import (
     DECOMPOSE_PROMPT,
     DECOMPOSE_SYSTEM,
@@ -23,6 +25,7 @@ from .prompts.decompose import (
     _SEGMENT_SYSTEM,
 )
 from .prompts.search import SEARCH_GUARDRAIL_SYSTEM  # noqa: F401 — re-exported for backwards compat
+from .providers.base import LLMProvider
 from .tools import SEARCH_WEB_TOOL
 
 log = logging.getLogger(__name__)
@@ -70,16 +73,18 @@ def _toc_segments(doc, total_pages: int, target: int) -> list[tuple[int, int]] |
 
 def _find_segments(
     doc,
-    client,
     total_pages: int,
 ) -> tuple[list[tuple[int, int]], str | None]:
     """Phase 1: find natural segment boundaries (TOC → LLM → fixed-size fallback).
 
     Returns (segments, doc_title) where each segment is a
     (start_0indexed, end_exclusive_0indexed) pair.
-    """
-    import anthropic as _anthropic
 
+    Plan B follow-up A2: uses ``build_chain(TITLE_CHAIN).complete()`` for
+    the structural-text LLM call (was: ``_anthropic.Anthropic(max_retries=3)
+    .messages.create(model=_HAIKU_MODEL, ...)``).  Centralizes config
+    via the chain spec.
+    """
     # 1. Try TOC (free)
     toc_segs = _toc_segments(doc, total_pages, SEGMENT_TARGET_PAGES)
     if toc_segs:
@@ -100,13 +105,12 @@ def _find_segments(
 
     doc_title: str | None = None
     try:
-        resp = _anthropic.Anthropic(max_retries=3).messages.create(
-            model=_HAIKU_MODEL,
-            max_tokens=1024,
+        provider = build_chain(TITLE_CHAIN)
+        raw, _usage = provider.complete(
             system=_SEGMENT_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
+            max_tokens=1024,
         )
-        raw = next((b.text for b in resp.content if getattr(b, "type", None) == "text"), "")
         raw = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`").strip()
         raw = raw[raw.find("{") : raw.rfind("}") + 1]
         data = json.loads(raw)
@@ -141,30 +145,44 @@ class LessonPlannerAgent(Agent):
     Phase 1 (serial, cheap): find natural segment boundaries.
     Phase 2 (parallel): analyse each segment with the configured LLM.
 
-    Uses the Anthropic client directly (not via LLMProvider) because it needs
-    document content blocks, the web-search beta, and adaptive thinking — features
-    that don't fit the generic do_turn() interface.
+    Plan B follow-up A: takes an ``LLMProvider`` instance from
+    ``build_chain(DECOMPOSE_CHAIN)`` instead of raw construction params.
+
+    The OpenAI path uses ``provider.complete()`` for text-based
+    decomposition.  The Anthropic path uses ``clients.anthropic_client_for
+    ("decompose")`` and the Anthropic SDK directly because it needs PDF
+    document content blocks + adaptive thinking + the web search beta —
+    features that don't fit the generic ``do_turn()`` / ``complete()``
+    interface.
+
+    **Note**: the Anthropic path is currently non-functional because the
+    deployed environment has zero Anthropic API credit balance.  When
+    ``DECOMPOSE_CHAIN.primary.source == "openai"`` (the default), the
+    Anthropic path is never taken.  See plan TODOs for "migrate
+    Anthropic PDF-blob decompose to provider abstraction" — out of
+    scope until we have credits to test against.
     """
 
     def __init__(
         self,
-        decompose_llm_provider: str,
-        openai_api_key: str | None,
-        openai_timeout_seconds: float,
-        openai_max_retries: int,
-        openai_max_input_chars: int,
-        model: str,
+        llm_provider: "LLMProvider",  # noqa: F821 — the decompose chain
+        openai_max_input_chars: int = 120_000,
         search_agent: "SearchAgent | None" = None,  # noqa: F821
         on_token_usage: Callable[[str, str, object], None] | None = None,
     ) -> None:
-        super().__init__(model)
-        self._provider = decompose_llm_provider
-        self._openai_api_key = openai_api_key
-        self._openai_timeout = openai_timeout_seconds
-        self._openai_max_retries = openai_max_retries
+        super().__init__(llm_provider.model)
+        self._llm_provider = llm_provider
         self._openai_max_input_chars = openai_max_input_chars
         self._on_token_usage = on_token_usage
-        self._supports_thinking = "haiku" not in model
+        # Determine which internal decompose path to use based on the
+        # provider's underlying model.  GPT/o-prefixed models go through
+        # _decompose_segment_openai (text extraction); everything else
+        # goes through _decompose_segment (Anthropic PDF blob path).
+        self._is_openai_decompose = (
+            llm_provider.name == "openai"
+            or llm_provider.model.startswith(("gpt-", "o1", "o3", "o4"))
+        )
+        self._supports_thinking = "haiku" not in llm_provider.model
         self._search_agent = search_agent
 
     def decompose(
@@ -183,9 +201,15 @@ class LessonPlannerAgent(Agent):
         doc = fitz.open(pdf_path)
         total_pages = len(doc)
 
-        if self._provider != "openai":
-            import anthropic
-            anthropic_client = anthropic.Anthropic(max_retries=6)
+        if not self._is_openai_decompose:
+            # Anthropic decompose path (currently broken — see class
+            # docstring).  Routed through the centralized client factory
+            # so config (max_retries) lives in DECOMPOSE_CHAIN.
+            try:
+                anthropic_client = anthropic_client_for("decompose")
+            except ValueError as exc:
+                log.error("Anthropic decompose client unavailable: %s", exc)
+                raise
 
         goal_note = (
             f"\n\nSTUDENT GOAL: \"{student_goal}\"\n"
@@ -200,7 +224,7 @@ class LessonPlannerAgent(Agent):
         if on_progress:
             on_progress("Analysing document structure…")
 
-        if self._provider == "openai":
+        if self._is_openai_decompose:
             toc_segs = _toc_segments(doc, total_pages, SEGMENT_TARGET_PAGES)
             if toc_segs:
                 segments, doc_title = toc_segs, None
@@ -211,7 +235,7 @@ class LessonPlannerAgent(Agent):
                 ]
                 doc_title = None
         else:
-            segments, doc_title = _find_segments(doc, anthropic_client, total_pages)
+            segments, doc_title = _find_segments(doc, total_pages)
 
         n_segs = len(segments)
         if on_progress and n_segs > 1:
@@ -238,7 +262,7 @@ class LessonPlannerAgent(Agent):
                     f"Decomposing pages {start + 1}–{end} of {total_pages}…"
                     if n_segs > 1 else "Decomposing document…"
                 )
-            if self._provider == "openai":
+            if self._is_openai_decompose:
                 return idx, self._decompose_segment_openai(
                     pdf_bytes, start, end, total_pages, goal_note, cancel_event
                 )
@@ -389,9 +413,16 @@ class LessonPlannerAgent(Agent):
         goal_note: str,
         cancel_event: threading.Event | None,
     ) -> tuple[str | None, list[dict]]:
-        """OpenAI fallback: extract text from the segment and ask for JSON decomposition."""
+        """OpenAI decompose path: extract text from the segment and ask for
+        JSON decomposition.
+
+        Plan B follow-up A2: replaces the inline ``httpx.Client`` POST to
+        ``api.openai.com/v1/chat/completions`` with
+        ``self._llm_provider.complete(...)``.  Configuration (model,
+        timeout, retries) lives in DECOMPOSE_CHAIN; the SDK retry behavior
+        replaces the manual ``time.sleep`` retry loop.
+        """
         import fitz
-        import httpx
 
         if cancel_event and cancel_event.is_set():
             return None, []
@@ -426,46 +457,19 @@ class LessonPlannerAgent(Agent):
             + "\n\nReturn JSON only."
         )
 
-        payload = {
-            "model": self._model,
-            "max_tokens": 2048,
-            "messages": [
-                {"role": "system", "content": DECOMPOSE_SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
-        }
-        headers = {"Authorization": f"Bearer {self._openai_api_key}"}
-        url = "https://api.openai.com/v1/chat/completions"
+        try:
+            content_text, usage = self._llm_provider.complete(
+                system=DECOMPOSE_SYSTEM,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=2048,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"OpenAI decompose failed: {exc}") from exc
 
-        last_err: Exception | None = None
-        for attempt in range(self._openai_max_retries + 1):
-            try:
-                with httpx.Client(timeout=self._openai_timeout) as client:
-                    resp = client.post(url, headers=headers, json=payload)
-                if resp.status_code >= 400:
-                    raise RuntimeError(f"{resp.status_code} {resp.text[:300]}")
-                data = resp.json()
-                choice = (data.get("choices") or [{}])[0]
-                message = choice.get("message") or {}
-                content_text = str(message.get("content") or "").strip()
-                usage = data.get("usage") or {}
-                if self._on_token_usage:
-                    from types import SimpleNamespace
-                    usage_obj = SimpleNamespace(
-                        input_tokens=int(usage.get("prompt_tokens") or 0),
-                        output_tokens=int(usage.get("completion_tokens") or 0),
-                        cache_read_input_tokens=0,
-                        cache_creation_input_tokens=0,
-                    )
-                    self._on_token_usage("decompose_pdf", self._model, usage_obj)
-                break
-            except Exception as exc:
-                last_err = exc
-                if attempt >= self._openai_max_retries:
-                    raise RuntimeError(f"OpenAI decompose failed: {last_err}") from last_err
-                time.sleep(min(0.2 * (2**attempt), 1.0))
+        if self._on_token_usage:
+            self._on_token_usage("decompose_pdf", self._model, usage)
 
-        raw = content_text.strip()
+        raw = (content_text or "").strip()
         if not raw:
             raise ValueError("OpenAI decompose agent returned no text block")
         raw = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`").strip()
