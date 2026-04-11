@@ -13,6 +13,16 @@ from backend.db import connection as db
 from backend.db import models
 
 
+@pytest.fixture(autouse=True)
+def _isolate_storage_dir(tmp_path, monkeypatch):
+    """Plan B follow-up B1: every test in this file writes stub PDFs to
+    ``settings.STORAGE_DIR / "courses"``.  Without this fixture they leak
+    into the real ``storage/courses/`` directory between runs.  Pin
+    ``STORAGE_DIR`` to a per-test ``tmp_path`` so the leak doesn't happen.
+    """
+    monkeypatch.setattr(settings, "STORAGE_DIR", tmp_path)
+
+
 def _build_textbook_pdf_bytes() -> bytes:
     doc = fitz.open()
     try:

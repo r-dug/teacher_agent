@@ -5,7 +5,18 @@ from __future__ import annotations
 import fitz
 import pytest
 
+from backend.config import settings
 from backend.db import models
+
+
+@pytest.fixture(autouse=True)
+def _isolate_storage_dir(tmp_path, monkeypatch):
+    """Plan B follow-up B1: every test in this file uploads stub PDFs via
+    the textbook draft endpoint, which writes them to
+    ``settings.STORAGE_DIR``.  Pin to a per-test ``tmp_path`` so leaks
+    don't accumulate in the real ``storage/`` directory between runs.
+    """
+    monkeypatch.setattr(settings, "STORAGE_DIR", tmp_path)
 
 
 def _build_textbook_pdf_bytes() -> bytes:
