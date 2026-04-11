@@ -105,8 +105,8 @@ class _FakeLLMProvider(LLMProvider):
         return LLMTurnResult(
             content_blocks=content_blocks,
             content_text=self._content_text,
-            tool_use=self._tool_use,
             usage=self._usage,
+            tool_uses=[self._tool_use] if self._tool_use is not None else [],
         )
 
 
@@ -197,8 +197,8 @@ def test_tts_provider_returns_tool_use_and_records_usage():
     tool_use = SimpleNamespace(
         type="tool_use",
         id="call_1",
-        name="advance_to_next_section",
-        input={"evidence": "ok"},
+        name="mark_task_complete",
+        input={"task_idx": 0, "evidence": "ok"},
     )
     llm_provider = _FakeLLMProvider(
         content_text="first line\nsecond line",
@@ -222,9 +222,12 @@ def test_tts_provider_returns_tool_use_and_records_usage():
 
     result = agent._do_single_llm_turn(curriculum, messages, agent_instructions=None)
 
-    assert result is not None
-    assert result.type == "tool_use"
-    assert result.name == "advance_to_next_section"
+    # Plan B: _do_single_llm_turn returns a list of tool_use blocks (the API
+    # may emit more than one per response).  Take the first.
+    assert result, "expected at least one tool_use block"
+    first = result[0]
+    assert first.type == "tool_use"
+    assert first.name == "mark_task_complete"
     assert len(token_usage_calls) == 1
     assert token_usage_calls[0][0] == "teach_turn"
     assert tts.calls == 2

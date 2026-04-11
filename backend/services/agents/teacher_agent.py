@@ -10,13 +10,18 @@ Responsibilities:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-import threading
 import time
 from collections.abc import Callable
 
 import numpy as np
+
+# Plan B: per-LLM-call timeout (seconds).  Wraps the streaming SDK call so
+# a hung provider doesn't strand run_turn.  Tool waits remain unbounded —
+# the student can take as long as they need.
+_LLM_CALL_TIMEOUT = 60.0
 
 from ...db.util import _strip_dangling_tool_use
 from ..voice.config import KOKORO_SAMPLE_RATE
@@ -29,8 +34,14 @@ from .prompts.persona import CONDENSE_EPISODE_SYSTEM, GENERATE_INSTRUCTIONS_SYST
 from .prompts.teaching import make_intro_prompt, make_teaching_prompt
 from .prompts.tts_prep import TTS_PREP_USER_PREFIX, make_tts_prep_system
 from .providers.base import LLMProvider
+from .memory_strategies import STRATEGIES as MEMORY_STRATEGIES, TurnSummaryTracker, EmbeddingCache, strategy_turn_summaries
+from .tool_registry import INTERACTIVE_TOOL_NAMES, TOOL_REGISTRY
 from .tools import CAPTURE_GOAL_TOOL, GENERATE_VISUAL_AID_TOOL, SEARCH_IMAGE_TOOL, TEACHING_TOOLS
 from .tts_pipeline import TTSPipeline
+
+# Plan B Commit 4: re-export the registry's interactive tool names under the
+# old private name for backward compat with any internal code referencing it.
+_INTERACTIVE_TOOL_NAMES = INTERACTIVE_TOOL_NAMES
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +64,7 @@ class TeacherAgent(Agent):
         tts_voice: str = "",
         model: str = DEFAULT_LLM_MODEL,
         accent: str = DEFAULT_ACCENT,
+        memory_strategy: str = "turn_summaries",
     ) -> None:
         super().__init__(model)
         self._provider = llm_provider
@@ -60,19 +72,50 @@ class TeacherAgent(Agent):
         self.tts_providers: list = list(tts_providers) if tts_providers else []
         self.tts_voice = tts_voice
         self.accent = accent
+        self._memory_strategy_name = memory_strategy
+        self._memory_strategy = MEMORY_STRATEGIES.get(memory_strategy, strategy_turn_summaries)
+        self._turn_tracker = TurnSummaryTracker()
+        self._embedding_cache = EmbeddingCache()
+        if memory_strategy == "rag_semantic":
+            self._init_embeddings()
 
         self._audio_turns: list[list[np.ndarray]] = []
         self.last_audio: np.ndarray | None = None
+        # Plan B: WS-layer turn id, set by run_turn() at entry; passed to
+        # the session's on_dispatch_context callback before each interactive
+        # tool dispatch so the persisted pending row carries it.
+        self._current_turn_id: str = ""
+
+    def _init_embeddings(self) -> None:
+        """Set up OpenAI embedding function for RAG strategy."""
+        try:
+            import openai
+            client = openai.OpenAI(max_retries=1, timeout=10.0)
+
+            def embed_fn(text: str) -> list[float]:
+                text = text[:2000]  # truncate to avoid token limits
+                resp = client.embeddings.create(
+                    model="text-embedding-3-small",
+                    input=[text],
+                )
+                return resp.data[0].embedding
+
+            self._embedding_cache.set_embed_fn(embed_fn)
+            log.info("RAG semantic: OpenAI embeddings initialized")
+        except Exception:
+            log.warning("RAG semantic: failed to init embeddings, falling back to recency")
 
     # ── public API ─────────────────────────────────────────────────────────────
 
     @property
     def _effective_tools(self) -> list:
-        """TEACHING_TOOLS extended with optional image tools when callbacks are set."""
+        """TEACHING_TOOLS extended with optional image tools when capability
+        flags are set on the callbacks (Plan B Commit 4: was per-callback
+        gating, now flag gating since the interactive callback is unified)."""
         tools = list(TEACHING_TOOLS)
-        if self._callbacks.on_generate_visual_aid is not None:
+        if self._callbacks.image_gen_enabled:
             tools.append(GENERATE_VISUAL_AID_TOOL)
-        if self._callbacks.on_search_image is not None:
+        if self._callbacks.image_search_enabled:
             tools.append(SEARCH_IMAGE_TOOL)
         return tools
 
@@ -83,7 +126,7 @@ class TeacherAgent(Agent):
     def set_tts_voice(self, voice: str) -> None:
         self.tts_voice = voice
 
-    def run_intro_turn(
+    async def run_intro_turn(
         self,
         curriculum: Curriculum,
         messages: list[dict],
@@ -95,18 +138,32 @@ class TeacherAgent(Agent):
         Returns the captured lesson goal string if the agent called
         capture_lesson_goal, otherwise None (agent asked a follow-up).
         Modifies messages in-place.
+
+        Plan B: async-native.  The single LLM call hops to a worker thread
+        via asyncio.to_thread (the SDK is sync) and is bounded by
+        ``_LLM_CALL_TIMEOUT``.
         """
+        # check if messages exist
         if not messages:
             messages.append({"role": "user", "content": "Please begin."})
 
-        tool = self._do_single_llm_turn(
-            curriculum,
-            messages,
-            agent_instructions=None,
-            _system=make_intro_prompt(curriculum.title, curriculum.sections, raw_text),
-            _tools=[CAPTURE_GOAL_TOOL],
-            _call_type="intro_turn",
+        tools = await asyncio.wait_for(
+            asyncio.to_thread(
+                self._do_single_llm_turn,
+                curriculum,
+                messages,
+                None,  # agent_instructions
+                lesson_goal=None,
+                _system=make_intro_prompt(
+                    curriculum.title, curriculum.sections, raw_text,
+                ),
+                _tools=[CAPTURE_GOAL_TOOL],
+                _call_type="intro_turn",
+            ),
+            timeout=_LLM_CALL_TIMEOUT,
         )
+        # Intro only ever has one expected tool (capture_lesson_goal); take the first.
+        tool = tools[0] if tools else None
 
         if tool is not None and getattr(tool, "name", None) == "capture_lesson_goal":
             goal = (tool.input or {}).get("goal", "").strip()
@@ -128,21 +185,41 @@ class TeacherAgent(Agent):
             self._callbacks.on_turn_complete(self.last_audio)
         return None
 
-    def run_intro(self, curriculum: Curriculum, messages: list[dict], raw_text: str | None = None) -> str | None:
+    async def run_intro(self, curriculum: Curriculum, messages: list[dict], raw_text: str | None = None) -> str | None:
         """Backward-compat alias for run_intro_turn."""
-        return self.run_intro_turn(curriculum, messages, raw_text)
+        return await self.run_intro_turn(curriculum, messages, raw_text)
 
-    def run_turn(
+    async def run_turn(
         self,
         curriculum: Curriculum,
         messages: list[dict],
         agent_instructions: str | None,
         lesson_goal: str | None = None,
+        turn_id: str = "",
     ) -> None:
         """
         Run the agentic teaching loop.  May chain multiple LLM calls via tool use.
-        Synchronous; call from a background thread.  Modifies messages in-place.
+
+        Plan B: async-native.  Runs entirely on the event loop except for the
+        LLM streaming call (which still hops to a thread because the SDK is
+        sync).  Each interactive tool dispatch awaits an async callback that
+        registers a future + sends the open_* event + awaits the student's
+        submission.  No threading.Event, no result_holder list, no
+        cross-thread blocking.
+
+        On WS disconnect the surrounding ``agent_task`` is cancelled, which
+        propagates ``CancelledError`` through every awaited callback and
+        unwinds the loop cleanly.
+
+        ``turn_id`` is the WS-layer turn identifier; the dispatcher uses it
+        to persist pending interactive-tool state to PG (decision 5 of
+        Plan B), so the same turn can be resumed across reconnect / device
+        switch.  Pass an empty string when there's no client to resume to
+        (e.g., from tests).
+
+        Modifies ``messages`` in place.
         """
+        self._current_turn_id = turn_id
         if not curriculum.sections:
             raise ValueError(
                 "No lesson sections are available for teaching. Decompose the document first."
@@ -151,66 +228,48 @@ class TeacherAgent(Agent):
         if not messages:
             messages.append({"role": "user", "content": "Please begin teaching."})
 
+        # Record student's input for turn summary tracking
+        if messages and messages[-1].get("role") == "user":
+            from .memory_strategies import _extract_text
+            self._turn_tracker.record_student(_extract_text(messages[-1].get("content", "")))
+
         _strip_dangling_tool_use(messages)
 
+        is_first_call = True
+        shared_turn_idx: list[int | None] = [None]  # filled by first call
+        _MAX_LOOP = 10  # safety: prevent infinite LLM loops
+        _loop_iter = 0
         while True:
-            tool = self._do_single_llm_turn(
-                curriculum, messages, agent_instructions, lesson_goal=lesson_goal,
-                _tools=self._effective_tools,
-            )
+            _loop_iter += 1
 
-            if tool is None:
-                if self._callbacks.on_turn_complete:
-                    self._callbacks.on_turn_complete(self.last_audio)
-                return
-
-            _INTERACTIVE_TOOLS = frozenset({
-                "open_sketchpad", "take_photo", "record_video",
-                "open_code_editor", "open_html_editor", "start_timer",
-                "generate_visual_aid", "search_image",
-            })
-            if tool.name in _INTERACTIVE_TOOLS:
-                pending_assistant_msg = messages.pop()
-            else:
-                messages.append({
-                    "role": "user",
-                    "content": [{"type": "tool_result", "tool_use_id": tool.id, "content": "OK"}],
-                })
-                pending_assistant_msg = None
-
-            if tool.name == "mark_task_complete":
-                task_idx = int(tool.input.get("task_idx", -1))
-                evidence = tool.input.get("evidence", "")
-                result = curriculum.mark_task(task_idx, evidence)
-                if result and self._callbacks.on_task_complete:
-                    self._callbacks.on_task_complete(curriculum)
-                continue
-
-            if tool.name == "advance_to_next_section":
-                if not curriculum.all_tasks_done():
-                    # Replace the OK tool_result with an error — loop back
-                    messages[-1] = {
-                        "role": "user",
-                        "content": [{
-                            "type": "tool_result",
-                            "tool_use_id": tool.id,
-                            "content": (
-                                "Cannot advance: not all concept tasks are marked complete. "
-                                "Please verify remaining concepts and call mark_task_complete first."
-                            ),
-                            "is_error": True,
-                        }],
-                    }
-                    continue
+            # ── advance check ─────────────────────────────────────────────
+            # If all tasks are done (either from a previous turn or from a
+            # mark_task_complete earlier in this loop), advance now.
+            if curriculum.all_tasks_done():
                 if curriculum.is_last:
+                    log.info("mid-loop: final section complete — curriculum done")
                     if self._callbacks.on_curriculum_complete:
                         self._callbacks.on_curriculum_complete()
                     return
-                curriculum.idx += 1
+                prev_idx = curriculum.idx
+                curriculum.advance()
+                log.info("mid-loop advance: %d → %d", prev_idx, curriculum.idx)
                 if self._callbacks.on_section_advanced:
                     self._callbacks.on_section_advanced(curriculum)
-                episode_summary = self._condense_episode(messages, curriculum)
+                # _condense_episode runs the sync LLM SDK; hop to a thread so
+                # we don't block the event loop.  Same per-call timeout as the
+                # main LLM call (decision 6 of Plan B).
+                try:
+                    episode_summary = await asyncio.wait_for(
+                        asyncio.to_thread(self._condense_episode, list(messages), curriculum),
+                        timeout=_LLM_CALL_TIMEOUT,
+                    )
+                except (asyncio.TimeoutError, Exception) as exc:
+                    log.warning("episode condensation failed: %s", exc)
+                    episode_summary = ""
                 messages.clear()
+                self._turn_tracker.clear()
+                self._embedding_cache.clear()
                 if episode_summary:
                     messages.append({
                         "role": "user",
@@ -220,209 +279,157 @@ class TeacherAgent(Agent):
                             f"{episode_summary}"
                         ),
                     })
+                if not messages:
+                    messages.append({"role": "user", "content": "Please begin teaching."})
+                is_first_call = True
+                shared_turn_idx[0] = None
 
-            elif tool.name == "show_slide":
-                page_start = tool.input.get("page_start", 1)
-                page_end = tool.input.get("page_end", page_start)
-                caption = tool.input.get("caption", "")
-                if self._callbacks.on_show_slide:
-                    self._callbacks.on_show_slide(page_start, page_end, caption)
-
-            elif tool.name == "open_sketchpad":
-                prompt = tool.input.get("prompt", "Please draw:")
-                text_bg: str | None = tool.input.get("text_bg")
-                bg_page: int | None = tool.input.get("bg_page")
-                bg_image_url: str | None = tool.input.get("bg_image_url")
-                result_holder: list[str | None] = [None]
-                done_event = threading.Event()
-                if self._callbacks.on_open_sketchpad:
-                    self._callbacks.on_open_sketchpad(prompt, result_holder, done_event, text_bg, bg_page, bg_image_url)
-                done_event.wait()
-                messages.append(pending_assistant_msg)
-                if result_holder[0] is None:
-                    tool_content: list | str = "The student dismissed the drawing tool without submitting."
-                else:
-                    tool_content = [
-                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": result_holder[0]}},
-                        {"type": "text", "text": "The student has submitted their drawing. Please evaluate it and give feedback."},
-                    ]
-                messages.append({
-                    "role": "user",
-                    "content": [{"type": "tool_result", "tool_use_id": tool.id, "content": tool_content}],
-                })
-
-            elif tool.name == "take_photo":
-                prompt = tool.input.get("prompt", "Please take a photo.")
-                result_holder_p: list[str | None] = [None]
-                done_event_p = threading.Event()
-                if self._callbacks.on_take_photo:
-                    self._callbacks.on_take_photo(prompt, result_holder_p, done_event_p)
-                done_event_p.wait()
-                messages.append(pending_assistant_msg)
-                if result_holder_p[0] is None:
-                    photo_content: list | str = "The student dismissed the photo tool without taking a photo."
-                else:
-                    photo_content = [
-                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": result_holder_p[0]}},
-                        {"type": "text", "text": "The student has taken a photo. Please observe and respond."},
-                    ]
-                messages.append({
-                    "role": "user",
-                    "content": [{"type": "tool_result", "tool_use_id": tool.id, "content": photo_content}],
-                })
-
-            elif tool.name == "record_video":
-                prompt = tool.input.get("prompt", "Please record a short video.")
-                result_holder_v: list[list[str] | None] = [None]
-                done_event_v = threading.Event()
-                if self._callbacks.on_record_video:
-                    self._callbacks.on_record_video(prompt, result_holder_v, done_event_v)
-                done_event_v.wait()
-                frames: list[str] = result_holder_v[0] or []
-                frame_blocks = [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": frame}}
-                    for frame in frames
-                ]
-                frame_blocks.append({
-                    "type": "text",
-                    "text": (
-                        f"The student recorded a video. These are {len(frames)} evenly-spaced "
-                        "frames sampled from the recording. Please observe the sequence and respond."
-                    ),
-                })
-                messages.append(pending_assistant_msg)
-                messages.append({
-                    "role": "user",
-                    "content": [{"type": "tool_result", "tool_use_id": tool.id, "content": frame_blocks}],
-                })
-
-            elif tool.name == "open_code_editor":
-                prompt = tool.input.get("prompt", "Complete the coding challenge.")
-                language = tool.input.get("language", "python")
-                starter_code: str | None = tool.input.get("starter_code")
-                result_holder_ce: list[dict | None] = [None]
-                done_event_ce = threading.Event()
-                if self._callbacks.on_open_code_editor:
-                    self._callbacks.on_open_code_editor(prompt, language, starter_code, result_holder_ce, done_event_ce)
-                done_event_ce.wait()
-                r = result_holder_ce[0] or {}
-                content = (
-                    f"The student submitted the following {language} code:\n\n"
-                    f"```{language}\n{r.get('code', '')}\n```\n\n"
-                    f"Execution output:\n"
-                    f"stdout: {r.get('stdout', '') or '(none)'}\n"
-                    f"stderr: {r.get('stderr', '') or '(none)'}\n"
-                    f"exit code: {r.get('exit_code', -1)}"
-                )
-                messages.append(pending_assistant_msg)
-                messages.append({
-                    "role": "user",
-                    "content": [{"type": "tool_result", "tool_use_id": tool.id, "content": content}],
-                })
-
-            elif tool.name == "open_html_editor":
-                prompt = tool.input.get("prompt", "Complete the HTML/CSS challenge.")
-                starter_html: str | None = tool.input.get("starter_html")
-                starter_css: str | None = tool.input.get("starter_css")
-                result_holder_he: list[dict | None] = [None]
-                done_event_he = threading.Event()
-                if self._callbacks.on_open_html_editor:
-                    self._callbacks.on_open_html_editor(prompt, starter_html, starter_css, result_holder_he, done_event_he)
-                done_event_he.wait()
-                r = result_holder_he[0] or {}
-                content = (
-                    f"The student submitted the following HTML/CSS:\n\n"
-                    f"HTML:\n```html\n{r.get('html', '')}\n```\n\n"
-                    f"CSS:\n```css\n{r.get('css', '')}\n```"
-                )
-                messages.append(pending_assistant_msg)
-                messages.append({
-                    "role": "user",
-                    "content": [{"type": "tool_result", "tool_use_id": tool.id, "content": content}],
-                })
-
-            elif tool.name == "start_timer":
-                prompt = tool.input.get("prompt", "Complete the exercise.")
-                duration_seconds = int(tool.input.get("duration_seconds", 60))
-                result_holder_ti: list[dict | None] = [None]
-                done_event_ti = threading.Event()
-                if self._callbacks.on_start_timer:
-                    self._callbacks.on_start_timer(prompt, duration_seconds, result_holder_ti, done_event_ti)
-                done_event_ti.wait()
-                r = result_holder_ti[0] or {}
-                timed_out: bool = r.get("timed_out", True)
-                answer: str = (r.get("answer") or "").strip()
-                elapsed: int | None = r.get("elapsed_seconds")
-                if timed_out:
-                    content = (
-                        f"Time expired. The student's answer: {answer}"
-                        if answer else "Time expired. The student did not submit an answer."
-                    )
-                else:
-                    time_str = f"{elapsed}s" if elapsed is not None else "early"
-                    content = (
-                        f"The student submitted early ({time_str}). Answer: {answer}"
-                        if answer else f"The student submitted early ({time_str}) without writing an answer."
-                    )
-                messages.append(pending_assistant_msg)
-                messages.append({
-                    "role": "user",
-                    "content": [{"type": "tool_result", "tool_use_id": tool.id, "content": content}],
-                })
-
-            elif tool.name == "generate_visual_aid":
-                prompt = tool.input.get("prompt", "")
-                caption = tool.input.get("caption", "")
-                result_holder_img: list[str | None] = [None]
-                done_event_img = threading.Event()
-                if self._callbacks.on_generate_visual_aid:
-                    self._callbacks.on_generate_visual_aid(
-                        prompt, caption, tool.id, result_holder_img, done_event_img
-                    )
-                done_event_img.wait()
-                # result_holder_img[0] is a public image URL on success, None on failure
-                image_url = result_holder_img[0]
-                messages.append(pending_assistant_msg)
-                if image_url:
-                    content = "Image generated successfully and is now displayed to the student."
-                else:
-                    content = (
-                        "Image generation failed. Continue teaching without a visual aid. "
-                        "Let the student know briefly that the image could not be generated."
-                    )
-                messages.append({
-                    "role": "user",
-                    "content": [{"type": "tool_result", "tool_use_id": tool.id, "content": content}],
-                })
-
-            elif tool.name == "search_image":
-                query = tool.input.get("query", "")
-                caption = tool.input.get("caption", "")
-                result_holder_search: list[str | None] = [None]
-                done_event_search = threading.Event()
-                if self._callbacks.on_search_image:
-                    self._callbacks.on_search_image(
-                        query, caption, tool.id, result_holder_search, done_event_search
-                    )
-                done_event_search.wait()
-                image_url = result_holder_search[0]
-                messages.append(pending_assistant_msg)
-                if image_url:
-                    content = "Image found and displayed to the student."
-                else:
-                    content = (
-                        "Image search returned no results. Continue teaching without a visual. "
-                        "Let the student know briefly that no image was found."
-                    )
-                messages.append({
-                    "role": "user",
-                    "content": [{"type": "tool_result", "tool_use_id": tool.id, "content": content}],
-                })
-
-            elif tool.name == "mark_curriculum_complete":
-                if self._callbacks.on_curriculum_complete:
-                    self._callbacks.on_curriculum_complete()
+            if _loop_iter > _MAX_LOOP:
+                log.warning("run_turn: hit loop limit (%d) — ending turn", _MAX_LOOP)
+                if self._callbacks.on_turn_complete:
+                    self._callbacks.on_turn_complete(self.last_audio)
                 return
+            log.info("run_turn loop iter=%d section=%d messages=%d", _loop_iter, curriculum.idx, len(messages))
+
+            # LLM call: hop to a thread (sync SDK) and bound it with a hard
+            # per-call timeout so a hung provider can't strand the loop.
+            tools = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._do_single_llm_turn,
+                    curriculum,
+                    messages,
+                    agent_instructions,
+                    lesson_goal=lesson_goal,
+                    _tools=self._effective_tools,
+                    _suppress_turn_start=not is_first_call,
+                    _turn_idx_override=shared_turn_idx,
+                ),
+                timeout=_LLM_CALL_TIMEOUT,
+            )
+            is_first_call = False
+
+            if not tools:
+                log.info("run_turn: no tool — ending turn (iter=%d)", _loop_iter)
+                # Record the assistant's text from the message just appended
+                last_content = messages[-1].get("content", "") if messages else ""
+                if isinstance(last_content, list):
+                    last_content = " ".join(b.get("text", "") for b in last_content if isinstance(b, dict) and b.get("type") == "text")
+                self._turn_tracker.record_text(last_content)
+                if self._callbacks.on_turn_complete:
+                    self._callbacks.on_turn_complete(self.last_audio)
+                return
+
+            log.info(
+                "run_turn: %d tool(s) (iter=%d): %s",
+                len(tools), _loop_iter, [t.name for t in tools],
+            )
+
+            # Plan B multi-tool dispatch: iterate every tool_use in the
+            # response in declaration order, build a tool_result block for
+            # each, and append them all as ONE user message at the end.
+            # The Anthropic & OpenAI APIs require a tool_result for every
+            # tool_use in the assistant message — collecting them this way
+            # guarantees that invariant.
+            collected_results = await self._dispatch_tools(
+                tools, curriculum, shared_turn_idx,
+            )
+            if collected_results:
+                messages.append({"role": "user", "content": collected_results})
+            # If any tool was interactive, the next LLM call should start a
+            # fresh visible bubble (decision 1a).  _dispatch_tools resets
+            # shared_turn_idx for us when it dispatches an interactive tool;
+            # we just need to flag is_first_call so the turn_start event is
+            # emitted on the next LLM call too.
+            if any(t.name in _INTERACTIVE_TOOL_NAMES for t in tools):
+                is_first_call = True
+
+    async def _dispatch_tools(
+        self,
+        tools: list,
+        curriculum: Curriculum,
+        shared_turn_idx: list[int | None],
+    ) -> list[dict]:
+        """Dispatch every tool_use from one LLM response, collect tool_result
+        blocks, return them.  Caller appends as one user message.
+
+        Plan B: each interactive tool dispatch resets ``shared_turn_idx[0]``
+        to ``None`` so the next LLM text starts a fresh bubble.  Pure tools
+        (mark_task / search / progress / audio) leave the bubble alone.
+        """
+        collected: list[dict] = []
+        for tool in tools:
+            self._turn_tracker.record_tool(tool.name, tool.input or {})
+            block = await self._dispatch_one_tool(tool, curriculum, shared_turn_idx)
+            collected.append(block)
+        return collected
+
+    async def _dispatch_one_tool(
+        self,
+        tool,
+        curriculum: Curriculum,
+        shared_turn_idx: list[int | None],
+    ) -> dict:
+        """Dispatch a single tool via the registry and return its tool_result.
+
+        Plan B Commit 4: replaces the 330-line if/elif chain with a single
+        registry lookup.  Each spec's handler knows how to construct its
+        tool_result block — see ``backend/services/agents/tool_registry.py``.
+        """
+        spec = TOOL_REGISTRY.get(tool.name)
+        if spec is None:
+            log.warning("run_turn: unknown tool %s — surfacing as error", tool.name)
+            return {
+                "type": "tool_result",
+                "tool_use_id": tool.id,
+                "content": f"Unknown tool {tool.name}",
+                "is_error": True,
+            }
+
+        # Interactive tools end the visible bubble (Plan B decision 1a) so
+        # the next LLM text starts a fresh bubble.  Curriculum/pure tools
+        # leave the bubble alone.
+        if spec.kind == "interactive":
+            shared_turn_idx[0] = None
+
+        return await spec.handler(self, tool, curriculum)
+
+    @staticmethod
+    def build_resumed_tool_result(
+        tool_use_id: str,
+        tool_name: str,
+        tool_input: dict,
+        raw_result: dict | None,
+    ) -> dict:
+        """Plan B Commit 4: build a tool_result block for a previously
+        persisted interactive tool whose student submission has just arrived.
+
+        Used by the resume path: ws_session loaded the pending row, awaited
+        the future, and now needs to convert the raw client dict into the
+        same content block ``_dispatch_one_tool`` would have produced if
+        the original run_turn hadn't been interrupted.
+
+        Reuses the registry's ``build_result`` lambda so the resume path
+        and the live dispatch path produce identical content.  Falls back
+        to a generic error block if the tool name isn't in the registry
+        or its spec lacks a build_result (curriculum/pure tools — they
+        don't normally end up in pending_tool_invocations).
+        """
+        spec = TOOL_REGISTRY.get(tool_name)
+        if spec is None or spec.build_result is None:
+            log.warning(
+                "build_resumed_tool_result: %s has no build_result — using generic OK",
+                tool_name,
+            )
+            return {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": "OK" if raw_result else "Tool was dismissed.",
+            }
+        return {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": spec.build_result(raw_result, tool_input or {}),
+        }
 
     def clear_audio_turns(self) -> None:
         self._audio_turns.clear()
@@ -514,7 +521,9 @@ class TeacherAgent(Agent):
         _system: str | None = None,
         _tools: list | None = None,
         _call_type: str | None = None,
-    ):
+        _suppress_turn_start: bool = False,
+        _turn_idx_override: list[int | None] | None = None,
+    ) -> list:
         """
         Execute one LLM turn, pipeline TTS in parallel threads.
 
@@ -523,7 +532,12 @@ class TeacherAgent(Agent):
         flushes completed lines to the TTSPipeline in real time.
 
         Appends the assistant message to messages.
-        Returns the first tool_use block (as a SimpleNamespace or SDK object), or None.
+
+        Returns ALL tool_use blocks from the response, in declaration order
+        (the LLM may emit more than one in a single message).  Returns an
+        empty list if the model returned text only or if the provider call
+        errored.  Plan B run_turn iterates this list and dispatches each
+        tool sequentially.
         """
         if _system is not None:
             system = _system
@@ -544,9 +558,17 @@ class TeacherAgent(Agent):
             preprocess_fn=self.prepare_for_tts,
             tts_voice=self.tts_voice,
         )
-        turn_idx = len(self._audio_turns)
-        turn_chunks: list[np.ndarray] = []
-        self._audio_turns.append(turn_chunks)
+        # Reuse the same turn_idx across chained tool iterations so the client
+        # treats all LLM calls within one run_turn() as a single visible turn.
+        if _turn_idx_override is not None and _turn_idx_override[0] is not None:
+            turn_idx = _turn_idx_override[0]
+            turn_chunks = self._audio_turns[turn_idx]
+        else:
+            turn_idx = len(self._audio_turns)
+            turn_chunks = []
+            self._audio_turns.append(turn_chunks)
+            if _turn_idx_override is not None:
+                _turn_idx_override[0] = turn_idx
         tts._audio_chunks = turn_chunks  # share reference so turn_chunks gets populated
         tts.start_turn(turn_idx)
 
@@ -577,14 +599,25 @@ class TeacherAgent(Agent):
                 text_buf[0] = ""
 
         try:
-            if self._callbacks.on_turn_start:
+            if self._callbacks.on_turn_start and not _suppress_turn_start:
                 self._callbacks.on_turn_start()
+
+            llm_messages = self._memory_strategy(
+                messages,
+                turn_summaries=self._turn_tracker.recent(5),
+                embedding_cache=self._embedding_cache,
+            )
+            # Memory strategies may produce orphaned tool_use/tool_result blocks
+            # (e.g., RAG retrieves a tool_result without its preceding tool_use).
+            # Strip them so the provider doesn't reject the message list.
+            llm_messages = list(llm_messages)
+            _strip_dangling_tool_use(llm_messages)
 
             _llm_t0 = time.monotonic()
             result = self._provider.do_turn(
                 model=self._model,
                 system=system,
-                messages=messages,
+                messages=llm_messages,
                 tools=tools,
                 on_text_chunk=_on_text_chunk,
             )
@@ -599,12 +632,13 @@ class TeacherAgent(Agent):
 
             _usage = result.usage
             log.info(
-                "[llm] provider=%s model=%s call=%s tokens_in=%s tokens_out=%s elapsed=%.2fs",
+                "[llm] provider=%s model=%s call=%s tokens_in=%s tokens_out=%s cached=%s elapsed=%.2fs",
                 self._provider.name,
                 self._model,
                 call_type,
                 getattr(_usage, "input_tokens", "?"),
                 getattr(_usage, "output_tokens", "?"),
+                getattr(_usage, "cache_read_input_tokens", 0),
                 _llm_elapsed,
             )
 
@@ -628,7 +662,7 @@ class TeacherAgent(Agent):
             if self._callbacks.on_error:
                 self._callbacks.on_error(str(e))
             tts.shutdown()
-            return None
+            return []
 
         _tts_t0 = time.monotonic()
         audio_chunks = tts.finish()
@@ -643,4 +677,7 @@ class TeacherAgent(Agent):
         if self._callbacks.on_response_end:
             self._callbacks.on_response_end()
 
-        return result.tool_use
+        # Plan B: return ALL tool_use blocks (the model may emit more than one
+        # per response and the API requires a tool_result for each on the next
+        # call).  Empty list = end-turn / no tools.
+        return list(result.tool_uses) if result.tool_uses else []

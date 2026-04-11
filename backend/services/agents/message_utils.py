@@ -94,7 +94,24 @@ def _messages_to_openai(messages: list[dict]) -> list[dict]:
 
     This preserves tool-call chains and also forwards image-bearing tool results
     as follow-up user multimodal messages.
+
+    OpenAI requires every tool_call_id in an assistant message to have a matching
+    tool-role response.  Our agent loop only processes one tool per LLM turn, so
+    extra tool_use blocks may lack responses.  We collect all answered IDs first
+    and strip unanswered tool_calls to avoid 400 errors.
     """
+    # Pre-scan: collect all tool_use_ids that have a matching tool_result
+    _answered_ids: set[str] = set()
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                tid = block.get("tool_use_id")
+                if tid:
+                    _answered_ids.add(tid)
+
     out: list[dict] = []
     for msg in messages:
         role = msg.get("role", "user")
@@ -115,17 +132,25 @@ def _messages_to_openai(messages: list[dict]) -> list[dict]:
                 if not isinstance(block, dict):
                     continue
                 btype = block.get("type")
+                # Skip thinking/redacted_thinking blocks — OpenAI doesn't understand them
+                if btype in ("thinking", "redacted_thinking"):
+                    continue
                 if btype == "text":
                     txt = (block.get("text") or "").strip()
                     if txt:
                         text_parts.append(txt)
                 elif btype == "tool_use":
+                    tc_id = block.get("id") or ""
+                    # Only include tool_calls that have a matching tool_result;
+                    # orphaned calls cause OpenAI 400 errors.
+                    if tc_id and tc_id not in _answered_ids:
+                        continue
                     try:
                         args_json = json.dumps(block.get("input") or {})
                     except Exception:
                         args_json = "{}"
                     tool_calls.append({
-                        "id": block.get("id") or "",
+                        "id": tc_id,
                         "type": "function",
                         "function": {
                             "name": block.get("name") or "",

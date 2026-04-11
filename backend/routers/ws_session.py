@@ -196,14 +196,14 @@ async def ws_session(
     # For existing lessons, send the curriculum to the client immediately so it
     # can render the sidebar and curriculum state without waiting for decompose_complete.
     if sections:
+        assets_by_section = await models.get_section_assets_by_lesson(conn, lesson_id)
         await websocket.send_json({
             "event": "decompose_complete",
             "lesson_id": lesson_id,
-            "curriculum": {
-                "title": curriculum.title,
-                "sections": curriculum.sections,
-                "idx": curriculum.idx,
-            },
+            "curriculum": _build_curriculum_payload(
+                curriculum.title, curriculum.sections, curriculum.idx,
+                section_rows=sections, assets_by_section=assets_by_section,
+            ),
         })
 
     # Send current task checklist so the client can render progress on reconnect.
@@ -258,16 +258,18 @@ async def ws_session(
         openai_decompose_max_retries=settings.OPENAI_DECOMPOSE_MAX_RETRIES,
         openai_decompose_max_input_chars=settings.OPENAI_DECOMPOSE_MAX_INPUT_CHARS,
         pdf_path=pdf_full_path,
+        lesson_id=lesson_id,
         session_id=session_id,
         user_id=session.get("user_id", ""),
         image_provider=app_state.image_provider,
         image_style_prefix=settings.IMAGE_GEN_STYLE_PREFIX,
+        visual_aid_config=models.parse_visual_aid_config(lesson.get("visual_aid_config")),
         enrollment_id=enrollment_id,
         storage_dir=settings.STORAGE_DIR,
         messages=messages,
     )
 
-    # ── Distillation: wire live collection if user consented ───────────────
+    # ── Distillation: wire live collection if user consented & collection enabled
     _distillation_logger = None
     if settings.DISTILLATION_COLLECT:
         user_prefs = await models.get_user_preferences(conn, user_id)
@@ -292,6 +294,23 @@ async def ws_session(
     # Skip intro for resumed lessons (messages exist) or already-decomposed lessons (sections exist).
     if messages or sections:
         state.phase = "teaching"
+
+    # Plan B Commit 4: detect any persisted interactive-tool wait.  The
+    # actual resume task is started below (after `state` and the helper
+    # closures are wired up) so we can reuse `_save_state` / `_run_turn`.
+    pending_tool_row = await models.get_pending_tool(conn, enrollment_id)
+    if pending_tool_row is not None:
+        log.info(
+            "[resume] enrollment=%s has pending tool %s (inv=%s)",
+            enrollment_id,
+            pending_tool_row["tool_name"],
+            pending_tool_row["invocation_id"],
+        )
+        # Replay the original event payload so the client renders the UI
+        # immediately.  Also stash it on the session so reconnect handling
+        # can re-emit it again if the WS hiccups during resume.
+        agent_session._pending_tool_event = pending_tool_row["event_payload"]
+        await websocket.send_json(pending_tool_row["event_payload"])
 
     async def _auto_start() -> None:
         """Run the first intro turn (overview + goal question) for a fresh lesson.
@@ -411,14 +430,15 @@ async def ws_session(
                 )
             await models.upsert_sections(conn, lesson_id, curriculum.sections)
             await models.update_lesson(conn, lesson_id, title=curriculum.title)
+            section_rows = await models.get_sections(conn, lesson_id)
+            assets_by_section = await models.get_section_assets_by_lesson(conn, lesson_id)
             await registry.send(session_id, {
                 "event": "decompose_complete",
                 "lesson_id": lesson_id,
-                "curriculum": {
-                    "title": curriculum.title,
-                    "sections": curriculum.sections,
-                    "idx": 0,
-                },
+                "curriculum": _build_curriculum_payload(
+                    curriculum.title, curriculum.sections, 0,
+                    section_rows=section_rows, assets_by_section=assets_by_section,
+                ),
             })
         except Exception as exc:
             log.exception("[deferred-decompose] raised")
@@ -436,6 +456,7 @@ async def ws_session(
                 state.curriculum,
                 state.agent_instructions,
                 lesson_goal=state.lesson_goal,
+                turn_id=turn_id,
             )
             state.turn_status = "complete"
             await _save_state(conn, state)
@@ -451,6 +472,44 @@ async def ws_session(
     state.first_teaching_task_fn = lambda: asyncio.create_task(_first_teaching_turn())
     state.handle_intro_turn_fn = _handle_intro_turn
 
+    async def _resume_pending_turn() -> None:
+        """Plan B Commit 4: resume a previously suspended interactive tool.
+
+        Awaits the student's submission via ``agent_session.resume_pending_tool``
+        (which appends the resulting tool_result to messages and clears the
+        persisted row), then runs a normal teaching turn so the agent can
+        process the result and continue the conversation.
+
+        Reuses the original turn_id from the pending row so the client
+        treats the resumed exchange as part of the original turn (Plan B
+        decision 5).
+        """
+        original_turn_id = pending_tool_row["turn_id"]
+        state.last_turn_id = original_turn_id
+        state.turn_status = "running"
+        try:
+            await state.agent_session.resume_pending_tool(
+                invocation_id=pending_tool_row["invocation_id"],
+                tool_use_id=pending_tool_row["tool_use_id"],
+                tool_name=pending_tool_row["tool_name"],
+                turn_id=original_turn_id,
+            )
+            await state.agent_session.run_turn(
+                state.curriculum,
+                state.agent_instructions,
+                lesson_goal=state.lesson_goal,
+                turn_id=original_turn_id,
+            )
+            state.turn_status = "complete"
+            await _save_state(conn, state)
+            await websocket.send_json({"event": "turn_complete", "turn_id": original_turn_id})
+        except asyncio.CancelledError:
+            state.turn_status = "failed"
+        except Exception as exc:
+            log.exception("[resume] failed")
+            state.turn_status = "failed"
+            await websocket.send_json({"event": "error", "message": str(exc) or type(exc).__name__})
+
     try:
         receive_task = asyncio.create_task(
             _receive_loop(websocket, state, conn, loop, _auto_start)
@@ -459,13 +518,19 @@ async def ws_session(
             _send_loop(websocket, event_queue, state, _auto_start)
         )
 
+        # Plan B Commit 4: if we detected a pending tool above, kick off
+        # the resume task before the auto-start path.  The two are mutually
+        # exclusive — a pending tool means a previous turn was already
+        # in progress.
+        if pending_tool_row is not None:
+            state.agent_task = asyncio.create_task(_resume_pending_turn())
         # Auto-start is client-driven: the client sends 'start_lesson' after it has
         # dispatched its initial config (set_instructions, set_voice, etc.).
         # For fresh lessons, auto-start also fires from _send_loop after decompose_complete.
         # For lessons that already have sections but no conversation history, kick off
         # the first teaching turn immediately (decompose_complete was sent directly above,
         # not via the queue, so _send_loop won't trigger it).
-        if state.phase == "teaching" and not state.messages and state.first_teaching_task_fn:
+        elif state.phase == "teaching" and not state.messages and state.first_teaching_task_fn:
             state.agent_task = state.first_teaching_task_fn()
 
         done, pending = await asyncio.wait(
@@ -484,7 +549,7 @@ async def ws_session(
         # Cancel any running agent turn
         if state.agent_task and not state.agent_task.done():
             state.agent_task.cancel()
-        # Persist lesson state on disconnect
+        # Persist lesson state on disconnect (no WS events — connection closing)
         await _save_state(conn, state)
 
 
@@ -1075,6 +1140,7 @@ async def _dispatch_realtime_transcript_to_teacher(
             await state.agent_session.run_turn(
                 state.curriculum, state.agent_instructions,
                 lesson_goal=state.lesson_goal,
+                turn_id=turn_id,
             )
             state.turn_status = "complete"
             await _save_state(conn, state)
@@ -1473,6 +1539,7 @@ async def _handle_audio_input_chained(
                 state.curriculum,
                 state.agent_instructions,
                 lesson_goal=state.lesson_goal,
+                turn_id=turn_id,
             )
             log.info("[turn %s] complete elapsed=%.2fs", turn_id, time.monotonic() - _turn_t0)
             state.turn_status = "complete"
@@ -1529,6 +1596,7 @@ async def _handle_text_message(
             await state.agent_session.run_turn(
                 state.curriculum, state.agent_instructions,
                 lesson_goal=state.lesson_goal,
+                turn_id=turn_id,
             )
             state.turn_status = "complete"
             await _save_state(conn, state)
@@ -1651,6 +1719,7 @@ async def _handle_voice_message(
             await state.agent_session.run_turn(
                 state.curriculum, state.agent_instructions,
                 lesson_goal=state.lesson_goal,
+                turn_id=turn_id,
             )
             state.turn_status = "complete"
             await _save_state(conn, state)
@@ -1704,6 +1773,7 @@ async def _handle_image_input(
                 state.curriculum,
                 state.agent_instructions,
                 lesson_goal=state.lesson_goal,
+                turn_id=turn_id,
             )
             state.turn_status = "complete"
             await _save_state(conn, state)
@@ -1752,35 +1822,23 @@ async def _handle_reconnect(
 # ── persistence ────────────────────────────────────────────────────────────────
 
 async def _save_state(
-    conn: asyncpg.Connection, state: SessionState
+    conn: asyncpg.Connection, state: SessionState,
 ) -> None:
-    from ..db.connection import ANON_USER_ID
-    from ..services.points import (
-        award_daily_points_if_needed,
-        award_lesson_complete,
-        award_section_advance,
-    )
-
-    old_idx = state.saved_section_idx
+    """Persist enrollment state and messages. Points are awarded separately
+    by _on_section_advanced / _on_curriculum_complete in session.py so the
+    celebration animation fires at the right moment (mid-turn, not end-of-turn).
+    """
     new_idx = state.curriculum.idx
-    is_complete = state.curriculum.is_last and state.turn_status == "complete"
 
     await models.update_enrollment(
         conn,
         state.enrollment_id,
         current_section_idx=new_idx,
-        completed=int(is_complete),
+        completed=int(state.curriculum.is_last and state.turn_status == "complete"),
         task_progress=state.curriculum.task_progress_json(),
     )
     await models.upsert_messages(conn, state.enrollment_id, state.messages)
     state.saved_section_idx = new_idx
-
-    if state.user_id and state.user_id != ANON_USER_ID:
-        if new_idx > old_idx:
-            await award_section_advance(conn, state.user_id, state.enrollment_id, old_idx, new_idx)
-        if is_complete:
-            await award_lesson_complete(conn, state.user_id, state.enrollment_id)
-        await award_daily_points_if_needed(conn, state.user_id)
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -1908,3 +1966,37 @@ def _section_to_dict(row: dict) -> dict:
         "page_start": row.get("page_start"),
         "page_end": row.get("page_end"),
     }
+
+
+def _build_curriculum_payload(
+    title: str,
+    sections: list[dict],
+    idx: int,
+    section_rows: list[dict] | None = None,
+    assets_by_section: dict[str, list[dict]] | None = None,
+) -> dict:
+    """Build the curriculum dict sent to the client, optionally enriched with assets."""
+    enriched_sections = []
+    for i, sec in enumerate(sections):
+        entry = {
+            "title": sec.get("title", ""),
+            "content": sec.get("content", ""),
+            "page_start": sec.get("page_start"),
+            "page_end": sec.get("page_end"),
+        }
+        # Attach assets if we have the DB rows to look up section IDs
+        if section_rows and assets_by_section and i < len(section_rows):
+            section_id = section_rows[i].get("id", "")
+            raw_assets = assets_by_section.get(section_id, [])
+            entry["assets"] = [
+                {
+                    "type": a["asset_type"],
+                    "page_start": a.get("page_start"),
+                    "page_end": a.get("page_end"),
+                    "image_path": a.get("image_path"),
+                    "caption": a.get("caption"),
+                }
+                for a in raw_assets
+            ]
+        enriched_sections.append(entry)
+    return {"title": title, "sections": enriched_sections, "idx": idx}

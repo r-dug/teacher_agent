@@ -27,9 +27,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import asyncpg
 import pytest
 
-TEST_DATABASE_URL = os.getenv(
-    "TEST_DATABASE_URL", "postgresql://localhost/pdf_to_audio_test"
-)
+# Reuse connection helpers from the top-level conftest
+from tests.conftest import _resolve_connection_params
 
 _SCHEMA_SQL = (
     Path(__file__).parent.parent.parent / "backend" / "db" / "schema.sql"
@@ -58,22 +57,24 @@ def ws_test_client(tmp_path):
     - loop        : Mini event loop for running async DB helpers in test code.
 
     Patches applied for the duration of the fixture:
-      - backend.routers.ws_session.transcribe  → AsyncMock returning "hello teacher"
-      - backend.services.agents.teacher_agent.TeacherAgent.run_turn → fast sync mock
-      - app_state.stt_model                    → MagicMock
-      - app_state.kokoro_pipeline              → None
+      - backend.routers.ws_session.transcribe  -> AsyncMock returning "hello teacher"
+      - backend.services.agents.teacher_agent.TeacherAgent.run_turn -> fast sync mock
+      - app_state.stt_model                    -> MagicMock
+      - app_state.kokoro_pipeline              -> None
     """
     from starlette.testclient import TestClient
     from backend.main import app
     from backend.db import connection as db, models
     from backend import app_state as _app_state_mod
 
-    # ── setup loop: apply schema, truncate for clean state, keep setup conn ────
+    dsn, kwargs = _resolve_connection_params()
+
+    # -- setup loop: apply schema, truncate for clean state, keep setup conn --
 
     loop = asyncio.new_event_loop()
 
     async def _setup():
-        conn = await asyncpg.connect(TEST_DATABASE_URL)
+        conn = await asyncpg.connect(dsn, **kwargs)
         # Terminate any other connections that might block TRUNCATE
         await conn.execute("""
             SELECT pg_terminate_backend(pid)
@@ -82,8 +83,6 @@ def ws_test_client(tmp_path):
         """)
         # Ensure schema exists (idempotent)
         await conn.execute(_SCHEMA_SQL)
-        # Clean state
-        await conn.execute(_TRUNCATE_SQL)
         # Seed anonymous user and personas
         await conn.execute(
             "INSERT INTO users (id, display_name) VALUES ($1, $2) ON CONFLICT DO NOTHING",
@@ -94,10 +93,10 @@ def ws_test_client(tmp_path):
 
     conn = loop.run_until_complete(_setup())
 
-    # ── override db.get: fresh connection per request in the portal loop ───────
+    # -- override db.get: fresh connection per request in the portal loop ------
 
     async def _override_db():
-        c = await asyncpg.connect(TEST_DATABASE_URL)
+        c = await asyncpg.connect(dsn, **kwargs)
         try:
             yield c
         finally:
@@ -105,16 +104,19 @@ def ws_test_client(tmp_path):
 
     app.dependency_overrides[db.get] = _override_db
 
-    # ── mock heavyweight models ────────────────────────────────────────────────
+    # -- mock heavyweight models ----------------------------------------------
 
     original_stt = _app_state_mod.app_state.stt_model
     original_kokoro = _app_state_mod.app_state.kokoro_pipeline
     _app_state_mod.app_state.stt_model = MagicMock()
     _app_state_mod.app_state.kokoro_pipeline = None
 
-    # ── patch STT + teaching agent ─────────────────────────────────────────────
+    # -- patch STT + teaching agent -------------------------------------------
 
-    def _fake_run_turn(self, curriculum, messages, agent_instructions, lesson_goal=None):
+    async def _fake_run_turn(self, curriculum, messages, agent_instructions, lesson_goal=None, turn_id=""):
+        # Plan B: TeacherAgent.run_turn is now async-native, so the patch must
+        # be an async function too.  Tests that need a more elaborate fake
+        # turn override this in their own patch.
         messages.append({"role": "assistant", "content": "Let's begin!"})
 
     with patch(
@@ -128,7 +130,7 @@ def ws_test_client(tmp_path):
             client = TestClient(app, raise_server_exceptions=True)
             yield client, conn, loop
 
-    # ── teardown ───────────────────────────────────────────────────────────────
+    # -- teardown -------------------------------------------------------------
 
     app.dependency_overrides.clear()
     _app_state_mod.app_state.stt_model = original_stt

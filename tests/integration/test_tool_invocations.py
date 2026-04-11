@@ -1,5 +1,5 @@
 """
-Integration tests for tool-invocation events: show_slide and open_sketchpad.
+Integration tests for tool-invocation events: open_sketchpad and others.
 
 Each test overrides the backend.services.agents.teacher_agent.TeacherAgent.run_turn patch set
 by the ws_test_client fixture with a more specific mock that exercises a
@@ -12,7 +12,6 @@ for the duration of the test's WS connection.
 from __future__ import annotations
 
 import base64
-import threading
 
 import numpy as np
 import pytest
@@ -63,63 +62,6 @@ def _collect_until(ws, terminal_events: set[str], max_messages: int = 30) -> lis
     return events
 
 
-# ── show_slide ────────────────────────────────────────────────────────────────
-
-def test_show_slide_event_received(ws_test_client):
-    """
-    When the agent calls on_show_slide, the client receives a show_slide event
-    with the correct page number and caption.
-    """
-    def _fake_with_slide(self, curriculum, messages, agent_instructions, lesson_goal=None):
-        self._callbacks.on_show_slide(3, 3, "A test caption for page 3")
-        messages.append({"role": "assistant", "content": "Please look at the slide."})
-
-    client, conn, loop = ws_test_client
-    session_id = _setup_session(loop, conn)
-    lesson_id = _setup_lesson(loop, conn)
-
-    with patch("backend.services.agents.teacher_agent.TeacherAgent.run_turn", new=_fake_with_slide):
-        with client.websocket_connect(f"/ws/{session_id}?lesson_id={lesson_id}") as ws:
-            ws.send_json({
-                "event": "audio_input",
-                "data": _silent_audio_b64(),
-                "sample_rate": 16000,
-            })
-            events = _collect_until(ws, {"turn_complete", "error"})
-
-    slide_events = [e for e in events if e["event"] == "show_slide"]
-    assert len(slide_events) == 1
-    assert slide_events[0]["page_start"] == 3
-    assert slide_events[0]["caption"] == "A test caption for page 3"
-    assert any(e["event"] == "turn_complete" for e in events)
-    assert not any(e["event"] == "error" for e in events)
-
-
-def test_show_slide_does_not_block_turn_completion(ws_test_client):
-    """show_slide is fire-and-forget; the turn must still complete."""
-    def _fake_multi_slide(self, curriculum, messages, agent_instructions, lesson_goal=None):
-        self._callbacks.on_show_slide(1, 1, "First")
-        self._callbacks.on_show_slide(2, 2, "Second")
-        messages.append({"role": "assistant", "content": "Two slides shown."})
-
-    client, conn, loop = ws_test_client
-    session_id = _setup_session(loop, conn)
-    lesson_id = _setup_lesson(loop, conn)
-
-    with patch("backend.services.agents.teacher_agent.TeacherAgent.run_turn", new=_fake_multi_slide):
-        with client.websocket_connect(f"/ws/{session_id}?lesson_id={lesson_id}") as ws:
-            ws.send_json({
-                "event": "audio_input",
-                "data": _silent_audio_b64(),
-                "sample_rate": 16000,
-            })
-            events = _collect_until(ws, {"turn_complete", "error"})
-
-    slide_events = [e for e in events if e["event"] == "show_slide"]
-    assert len(slide_events) == 2
-    assert any(e["event"] == "turn_complete" for e in events)
-
-
 # ── open_sketchpad ─────────────────────────────────────────────────────────────
 
 def test_open_sketchpad_event_received(ws_test_client):
@@ -127,11 +69,16 @@ def test_open_sketchpad_event_received(ws_test_client):
     When the agent calls on_open_sketchpad, the client receives an
     open_sketchpad event with a prompt and an invocation_id.
     """
-    def _fake_with_sketchpad(self, curriculum, messages, agent_instructions, lesson_goal=None):
-        result_holder: list = [None]
-        done_event = threading.Event()
-        self._callbacks.on_open_sketchpad("Draw a triangle.", result_holder, done_event)
-        done_event.wait(timeout=5.0)
+    async def _fake_with_sketchpad(self, curriculum, messages, agent_instructions, lesson_goal=None, turn_id=""):
+        # Plan B Commit 4: all 13 client-interactive tools share one
+        # callback, ``on_open_interactive_tool``, which takes a fully-built
+        # event dict and returns the raw client result dict.
+        import uuid as _uuid
+        await self._callbacks.on_open_interactive_tool({
+            "event": "open_sketchpad",
+            "prompt": "Draw a triangle.",
+            "invocation_id": str(_uuid.uuid4()),
+        })
         messages.append({"role": "assistant", "content": "Drawing received."})
 
     client, conn, loop = ws_test_client
@@ -170,17 +117,20 @@ def test_open_sketchpad_event_received(ws_test_client):
 
 def test_open_sketchpad_drawing_reaches_agent(ws_test_client):
     """
-    The drawing payload sent in tool_result must arrive in result_holder
-    and be accessible to the agent.
+    The drawing payload sent in tool_result must arrive at the agent (now
+    via the awaited callback's return value rather than a result_holder).
     """
     received_drawings: list = []
 
-    def _fake_captures_drawing(self, curriculum, messages, agent_instructions, lesson_goal=None):
-        result_holder: list = [None]
-        done_event = threading.Event()
-        self._callbacks.on_open_sketchpad("Draw anything.", result_holder, done_event)
-        done_event.wait(timeout=5.0)
-        received_drawings.extend(result_holder)
+    async def _fake_captures_drawing(self, curriculum, messages, agent_instructions, lesson_goal=None, turn_id=""):
+        # Plan B Commit 4: unified interactive callback.
+        import uuid as _uuid
+        raw = await self._callbacks.on_open_interactive_tool({
+            "event": "open_sketchpad",
+            "prompt": "Draw anything.",
+            "invocation_id": str(_uuid.uuid4()),
+        })
+        received_drawings.append((raw or {}).get("drawing"))
         messages.append({"role": "assistant", "content": "Got drawing."})
 
     client, conn, loop = ws_test_client

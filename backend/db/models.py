@@ -135,7 +135,7 @@ async def list_courses(
 async def update_course(
     conn: asyncpg.Connection, course_id: str, **kwargs: Any
 ) -> None:
-    allowed = {"title", "description", "visibility"}
+    allowed = {"title", "description", "visibility", "visual_aid_config", "default_persona_id"}
     async with conn.transaction():
         for key, value in kwargs.items():
             if key not in allowed:
@@ -211,11 +211,12 @@ async def list_lessons(
 
 
 _LESSON_UPDATE_SQL: dict[str, str] = {
-    "title":       "UPDATE lessons SET title = $1,       updated_at = NOW() WHERE id = $2",
-    "description": "UPDATE lessons SET description = $1, updated_at = NOW() WHERE id = $2",
-    "course_id":   "UPDATE lessons SET course_id = $1,   updated_at = NOW() WHERE id = $2",
-    "pdf_path":    "UPDATE lessons SET pdf_path = $1,    updated_at = NOW() WHERE id = $2",
-    "visibility":  "UPDATE lessons SET visibility = $1,  updated_at = NOW() WHERE id = $2",
+    "title":             "UPDATE lessons SET title = $1,             updated_at = NOW() WHERE id = $2",
+    "description":       "UPDATE lessons SET description = $1,       updated_at = NOW() WHERE id = $2",
+    "course_id":         "UPDATE lessons SET course_id = $1,         updated_at = NOW() WHERE id = $2",
+    "pdf_path":          "UPDATE lessons SET pdf_path = $1,          updated_at = NOW() WHERE id = $2",
+    "visibility":        "UPDATE lessons SET visibility = $1,        updated_at = NOW() WHERE id = $2",
+    "visual_aid_config": "UPDATE lessons SET visual_aid_config = $1, updated_at = NOW() WHERE id = $2",
 }
 
 
@@ -278,7 +279,7 @@ async def get_enrollment_by_id(
     ))
 
 
-_ENROLLMENT_ALLOWED_COLS = {"current_section_idx", "completed", "lesson_goal", "task_progress"}
+_ENROLLMENT_ALLOWED_COLS = {"current_section_idx", "completed", "lesson_goal", "task_progress", "persona_id"}
 
 
 def parse_task_progress(raw: str | None) -> dict[str, list[dict]]:
@@ -289,6 +290,31 @@ def parse_task_progress(raw: str | None) -> dict[str, list[dict]]:
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return {}
+
+
+_DEFAULT_VISUAL_AID_CONFIG: dict = {
+    "pdf_pages": True,
+    "generated_images": {"enabled": False, "persistence": "persistent", "timing": "spontaneous"},
+    "web_images": {"enabled": False, "persistence": "ephemeral", "timing": "spontaneous"},
+}
+
+
+def parse_visual_aid_config(raw: str | None) -> dict:
+    """Deserialize visual_aid_config JSON, filling in defaults."""
+    if not raw or raw == "{}":
+        return dict(_DEFAULT_VISUAL_AID_CONFIG)
+    try:
+        cfg = json.loads(raw)
+        # Merge with defaults so missing keys get sensible values
+        result = dict(_DEFAULT_VISUAL_AID_CONFIG)
+        if "pdf_pages" in cfg:
+            result["pdf_pages"] = cfg["pdf_pages"]
+        for key in ("generated_images", "web_images"):
+            if key in cfg:
+                result[key] = {**_DEFAULT_VISUAL_AID_CONFIG[key], **cfg[key]}
+        return result
+    except (json.JSONDecodeError, TypeError):
+        return dict(_DEFAULT_VISUAL_AID_CONFIG)
 
 
 async def update_enrollment(
@@ -303,6 +329,21 @@ async def update_enrollment(
         f"UPDATE lesson_enrollments SET {assignments}, updated_at = NOW() WHERE id = ${len(values)}",
         *values,
     )
+
+
+async def reset_enrollment(conn: asyncpg.Connection, enrollment_id: str) -> None:
+    """Reset an enrollment to its initial state (retake)."""
+    async with conn.transaction():
+        await conn.execute(
+            "UPDATE lesson_enrollments "
+            "SET current_section_idx = 0, completed = 0, lesson_goal = NULL, "
+            "    task_progress = '{}', updated_at = NOW() "
+            "WHERE id = $1",
+            enrollment_id,
+        )
+        await conn.execute(
+            "DELETE FROM messages WHERE enrollment_id = $1", enrollment_id
+        )
 
 
 # ── sections ───────────────────────────────────────────────────────────────────
@@ -330,6 +371,8 @@ async def upsert_sections(
                 sec.get("page_start"),
                 sec.get("page_end"),
             )
+        # Auto-populate PDF page assets for each section's page range.
+        await populate_pdf_page_assets(conn, lesson_id)
 
 
 async def get_sections(
@@ -342,6 +385,121 @@ async def get_sections(
     for row in rows:
         row["key_concepts"] = json.loads(row.get("key_concepts", "[]"))
     return rows
+
+
+async def search_sections(
+    conn: asyncpg.Connection,
+    lesson_id: str,
+    query: str,
+    exclude_idx: int | None = None,
+    limit: int = 3,
+) -> list[dict]:
+    """Full-text search over lesson_sections.content for RAG retrieval."""
+    sql = """
+        SELECT idx, title, content,
+               ts_rank(to_tsvector('english', content), plainto_tsquery('english', $2)) AS rank
+        FROM lesson_sections
+        WHERE lesson_id = $1
+          AND to_tsvector('english', content) @@ plainto_tsquery('english', $2)
+    """
+    params: list = [lesson_id, query]
+    if exclude_idx is not None:
+        sql += " AND idx != $3"
+        params.append(exclude_idx)
+    sql += " ORDER BY rank DESC LIMIT $" + str(len(params) + 1)
+    params.append(limit)
+
+    rows = await conn.fetch(sql, *params)
+    results = []
+    for r in rows:
+        content = r["content"] or ""
+        # Truncate to ~500 chars for concise tool results
+        excerpt = content[:500] + ("..." if len(content) > 500 else "")
+        results.append({
+            "idx": r["idx"],
+            "title": r["title"] or f"Section {r['idx'] + 1}",
+            "excerpt": excerpt,
+        })
+    return results
+
+
+# ── section assets ─────────────────────────────────────────────────────────────
+
+async def create_section_asset(
+    conn: asyncpg.Connection,
+    section_id: str,
+    asset_type: str,
+    idx: int = 0,
+    page_start: int | None = None,
+    page_end: int | None = None,
+    image_path: str | None = None,
+    caption: str | None = None,
+) -> Row:
+    aid = new_id()
+    await conn.execute(
+        """INSERT INTO section_assets
+           (id, section_id, asset_type, idx, page_start, page_end, image_path, caption)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (section_id, idx) DO UPDATE SET
+             asset_type = excluded.asset_type,
+             page_start = excluded.page_start,
+             page_end   = excluded.page_end,
+             image_path = excluded.image_path,
+             caption    = excluded.caption""",
+        aid, section_id, asset_type, idx, page_start, page_end, image_path, caption,
+    )
+    return _row(await conn.fetchrow(  # type: ignore[return-value]
+        "SELECT * FROM section_assets WHERE section_id = $1 AND idx = $2",
+        section_id, idx,
+    ))
+
+
+async def get_section_assets_by_lesson(
+    conn: asyncpg.Connection,
+    lesson_id: str,
+) -> dict[str, list[Row]]:
+    """Return section assets grouped by section_id for all sections of a lesson."""
+    rows = _rows(await conn.fetch(
+        """SELECT sa.* FROM section_assets sa
+           JOIN lesson_sections ls ON ls.id = sa.section_id
+           WHERE ls.lesson_id = $1
+           ORDER BY ls.idx, sa.idx""",
+        lesson_id,
+    ))
+    grouped: dict[str, list[Row]] = {}
+    for r in rows:
+        grouped.setdefault(r["section_id"], []).append(r)
+    return grouped
+
+
+async def populate_pdf_page_assets(
+    conn: asyncpg.Connection,
+    lesson_id: str,
+) -> int:
+    """Auto-create section_assets of type 'pdf_pages' from each section's page range.
+
+    One asset per page in the section's [page_start, page_end] range.
+    Returns the number of assets created.
+    """
+    sections = await get_sections(conn, lesson_id)
+    count = 0
+    for sec in sections:
+        page_start = sec.get("page_start")
+        page_end = sec.get("page_end") or page_start
+        if page_start is None:
+            continue
+        for i, page in enumerate(range(page_start, page_end + 1)):
+            await create_section_asset(
+                conn,
+                section_id=sec["id"],
+                asset_type="pdf_pages",
+                idx=i,
+                page_start=page,
+                page_end=page,
+                caption=f"Page {page}",
+            )
+            count += 1
+    return count
 
 
 # ── messages ───────────────────────────────────────────────────────────────────
@@ -367,6 +525,24 @@ async def upsert_messages(
             "INSERT INTO messages (id, enrollment_id, idx, role, content) VALUES ($1, $2, $3, $4, $5)",
             records,
         )
+
+
+async def append_message(
+    conn: asyncpg.Connection,
+    enrollment_id: str,
+    role: str,
+    content,
+) -> None:
+    """Append a single message to the conversation. Assigns the next idx."""
+    content_json = json.dumps(content) if not isinstance(content, str) else content
+    next_idx = await conn.fetchval(
+        "SELECT COALESCE(MAX(idx), -1) + 1 FROM messages WHERE enrollment_id = $1",
+        enrollment_id,
+    )
+    await conn.execute(
+        "INSERT INTO messages (id, enrollment_id, idx, role, content) VALUES ($1, $2, $3, $4, $5)",
+        new_id(), enrollment_id, next_idx, role, content_json,
+    )
 
 
 async def get_messages(
@@ -679,7 +855,7 @@ async def get_personas(
 async def create_persona(
     conn: asyncpg.Connection,
     persona_id: str,
-    user_id: str,
+    user_id: str | None,
     name: str,
     instructions: str,
 ) -> Row:
@@ -698,6 +874,28 @@ async def delete_persona(
         "DELETE FROM personas WHERE id = $1 AND user_id = $2",
         persona_id, user_id,
     )
+    return status != "DELETE 0"
+
+
+async def list_all_personas(conn: asyncpg.Connection) -> list[Row]:
+    return _rows(await conn.fetch("SELECT * FROM personas ORDER BY created_at"))
+
+
+async def update_persona(
+    conn: asyncpg.Connection,
+    persona_id: str,
+    name: str,
+    instructions: str,
+) -> Row | None:
+    await conn.execute(
+        "UPDATE personas SET name = $1, instructions = $2 WHERE id = $3",
+        name, instructions, persona_id,
+    )
+    return _row(await conn.fetchrow("SELECT * FROM personas WHERE id = $1", persona_id))
+
+
+async def admin_delete_persona(conn: asyncpg.Connection, persona_id: str) -> bool:
+    status = await conn.execute("DELETE FROM personas WHERE id = $1", persona_id)
     return status != "DELETE 0"
 
 
@@ -836,4 +1034,73 @@ async def upsert_user_preferences(
            ON CONFLICT (user_id)
            DO UPDATE SET prefs_json = $2, updated_at = NOW()""",
         user_id, json.dumps(prefs),
+    )
+
+
+# ── pending interactive-tool invocations (Plan B resume support) ─────────────
+
+async def put_pending_tool(
+    conn: asyncpg.Connection,
+    enrollment_id: str,
+    invocation_id: str,
+    tool_name: str,
+    tool_use_id: str,
+    turn_id: str,
+    event_payload: dict,
+) -> None:
+    """Persist (or replace) the single pending interactive tool for an enrollment.
+
+    Called by the dispatcher right before it awaits the student's response.
+    Survives WS disconnect / server restart so a different session (or
+    different device) can resume the same exercise."""
+    await conn.execute(
+        """INSERT INTO pending_tool_invocations
+               (enrollment_id, invocation_id, tool_name, tool_use_id,
+                turn_id, event_payload, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW())
+           ON CONFLICT (enrollment_id) DO UPDATE SET
+               invocation_id = EXCLUDED.invocation_id,
+               tool_name     = EXCLUDED.tool_name,
+               tool_use_id   = EXCLUDED.tool_use_id,
+               turn_id       = EXCLUDED.turn_id,
+               event_payload = EXCLUDED.event_payload,
+               created_at    = NOW()""",
+        enrollment_id, invocation_id, tool_name, tool_use_id,
+        turn_id, json.dumps(event_payload),
+    )
+
+
+async def get_pending_tool(
+    conn: asyncpg.Connection, enrollment_id: str
+) -> Row | None:
+    """Look up the pending interactive tool for an enrollment, if any.
+
+    Returns a dict with keys: invocation_id, tool_name, tool_use_id, turn_id,
+    event_payload (already parsed from JSONB), created_at.  None if no pending
+    tool is recorded."""
+    row = await conn.fetchrow(
+        """SELECT invocation_id, tool_name, tool_use_id, turn_id,
+                  event_payload, created_at
+           FROM pending_tool_invocations
+           WHERE enrollment_id = $1""",
+        enrollment_id,
+    )
+    if row is None:
+        return None
+    out = dict(row)
+    payload = out.get("event_payload")
+    if isinstance(payload, str):
+        out["event_payload"] = json.loads(payload)
+    return out
+
+
+async def clear_pending_tool(
+    conn: asyncpg.Connection, enrollment_id: str
+) -> None:
+    """Delete the pending tool row for an enrollment.  Called when the student
+    submits or dismisses the tool, or when the agent successfully receives the
+    result and incorporates it into the conversation."""
+    await conn.execute(
+        "DELETE FROM pending_tool_invocations WHERE enrollment_id = $1",
+        enrollment_id,
     )

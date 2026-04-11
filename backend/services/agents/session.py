@@ -2,19 +2,21 @@
 AgentSession — per-WebSocket-session orchestrator.
 
 Wires the agent trio (TeacherAgent, LessonPlannerAgent, SearchAgent) to the
-WebSocket transport.  All agent work is synchronous and runs in a thread pool
-via asyncio.to_thread(); WS sends are scheduled back to the event loop using
-asyncio.run_coroutine_threadsafe().
+WebSocket transport.
 
-Sketchpad blocking pattern (see design doc):
-  1. Agent thread calls on_open_sketchpad callback.
-  2. Callback schedules a WS send (open_sketchpad event) on the event loop.
-  3. Callback stores a threading.Event + result_holder keyed by invocation_id.
-  4. run_turn() in teacher_agent.py calls done_event.wait() — blocks
-     the thread pool worker.
-  5. The async WS receive loop gets a tool_result message from the client and
-     calls handle_tool_result(), which fills result_holder and sets done_event.
-  6. Worker thread unblocks and continues.
+Concurrency model (Plan B, Commit 2):
+  - ``run_turn`` is async-native and runs on the event loop.
+  - The LLM streaming call (the only genuinely blocking SDK call) hops to
+    a worker thread via ``asyncio.to_thread`` inside ``_do_single_llm_turn``.
+    Streaming callbacks (text/audio chunks) fire from that thread and use
+    ``_fire`` to schedule WS sends back on the loop.
+  - Interactive tool callbacks are async coroutines.  They create a future
+    on the loop, register it in ``_tool_futures``, send the open_* event to
+    the client, and ``await`` the future for the student's submission.  No
+    threading primitives, no cross-thread blocking.
+  - On WS disconnect the run_turn task is cancelled, which propagates
+    ``CancelledError`` through every awaited future and unwinds cleanly.
+    ``cancel_pending_tools`` also cancels any registered futures explicitly.
 """
 
 from __future__ import annotations
@@ -83,10 +85,12 @@ class AgentSession:
         openai_decompose_max_retries: int | None = None,
         openai_decompose_max_input_chars: int = 120000,
         pdf_path: str | None = None,
+        lesson_id: str | None = None,
         session_id: str | None = None,
         user_id: str = "",
         image_provider=None,
         image_style_prefix: str = "",
+        visual_aid_config: dict | None = None,
         enrollment_id: str = "",
         storage_dir: Path | None = None,
         messages: list[dict] | None = None,
@@ -94,15 +98,28 @@ class AgentSession:
         self._send = send
         self._loop = loop
         self._pdf_path = pdf_path
+        self._lesson_id = lesson_id
         self._session_id = session_id
         self._user_id = user_id
         self._messages: list[dict] = list(messages) if messages else []
         self._ws_closed = threading.Event()
-        # Pending interactive tool invocations: inv_id → (done_event, result_holder)
-        self._tool_events: dict[str, tuple[threading.Event, list]] = {}
+        # Pending interactive tool invocations: inv_id → asyncio.Future.
+        # The future is created and registered when the dispatcher fires an
+        # interactive tool callback; resolved by handle_tool_result when the
+        # client posts a tool_result; cancelled by cancel_pending_tools on
+        # disconnect.  No threading primitives — run_turn is async-native and
+        # awaits the future on the event loop.  See Plan B (rev 2).
+        self._tool_futures: dict[str, asyncio.Future] = {}
         # The last open_* / start_timer event sent to the client, cleared on submit.
         # Used to re-send the tool UI after a WS reconnect.
         self._pending_tool_event: dict | None = None
+        # Plan B (decision 5): the agent's dispatcher calls
+        # on_dispatch_context(tool_use_id, turn_id) before each interactive
+        # tool dispatch.  We stash the values here so _await_interactive can
+        # persist them with the pending tool row, enabling resume across
+        # reconnect / device switch.
+        self._dispatch_tool_use_id: str = ""
+        self._dispatch_turn_id: str = ""
 
         # Image generation
         self._image_provider = image_provider
@@ -110,6 +127,7 @@ class AgentSession:
         self._enrollment_id = enrollment_id
         self._storage_dir = storage_dir or Path("./storage")
         self._current_section_idx: int = 0  # updated by _on_section_advanced
+        self._visual_aid_config: dict = visual_aid_config or {}
 
         if tts_provider is None and kokoro_pipeline is not None:
             from .tts import KokoroTTSProvider
@@ -191,16 +209,24 @@ class AgentSession:
             on_text_chunk=self._on_text_chunk,
             on_chunk_ready=self._on_chunk_ready,
             on_audio_chunk=self._on_audio_chunk,
-            on_show_slide=self._on_show_slide,
-            on_open_sketchpad=self._on_open_sketchpad,
-            on_take_photo=self._on_take_photo,
-            on_record_video=self._on_record_video,
-            on_open_code_editor=self._on_open_code_editor,
-            on_open_html_editor=self._on_open_html_editor,
-            on_start_timer=self._on_start_timer,
-            # on_generate_visual_aid starts as None (tool hidden until enabled by client)
-            on_generate_visual_aid=None,
+            # Plan B Commit 4: unified interactive-tool callback.  Per-tool
+            # event construction lives in tool_registry.py.
+            on_open_interactive_tool=self._on_open_interactive_tool,
+            on_search_content=self._on_search_content if self._lesson_id else None,
+            on_show_progress=self._on_show_progress,
+            on_play_audio_clip=self._on_play_audio_clip,
+            # Server-side image work — runs on the loop, not in the client.
+            on_generate_visual_aid=self._on_generate_visual_aid,
             on_search_image=self._on_search_image,
+            # Capability flags — gate which tools the LLM is offered.
+            image_gen_enabled=bool(
+                image_provider
+                and (visual_aid_config or {}).get("generated_images", {}).get("enabled")
+            ),
+            image_search_enabled=bool(
+                (visual_aid_config or {}).get("web_images", {}).get("enabled")
+            ),
+            on_dispatch_context=self._on_dispatch_context,
             on_token_usage=self._on_token_usage,
             on_task_complete=self._on_task_complete,
             on_section_advanced=self._on_section_advanced,
@@ -214,12 +240,14 @@ class AgentSession:
 
         # ── Assemble TeacherAgent ────────────────────────────────────────────
         tts_providers = [p for p in [tts_provider, fallback_tts_provider] if p is not None]
+        from ...config import settings as _settings
         self._teacher = TeacherAgent(
             llm_provider=llm_provider,
             callbacks=callbacks,
             tts_providers=tts_providers,
             tts_voice=tts_voice,
             model=_teach_model,
+            memory_strategy=_settings.MEMORY_STRATEGY,
         )
 
     def set_distillation_logger(self, logger) -> None:
@@ -243,38 +271,133 @@ class AgentSession:
         self._teacher.set_tts_voice(voice)
 
     def set_image_gen_enabled(self, enabled: bool) -> None:
-        """Wire or unwire the image generation callback.
+        """Toggle the image-generation capability flag at runtime.
 
-        When enabled=True the generate_visual_aid tool is added to the agent's
-        effective tool list.  When False the tool is removed and the agent won't
-        offer image generation.  Safe to call between turns.
+        When enabled=True the ``generate_visual_aid`` tool is added to the
+        agent's effective tool list (the LLM is told it can call it).  When
+        False the tool is removed and the agent won't offer it.  Safe to
+        call between turns.
+
+        Plan B Commit 4: gating moved from per-callback wiring to a flag
+        on AgentCallbacks because all interactive tools share one callback now.
         """
         if not self.image_gen_available:
             return  # no provider — always off
-        self._teacher._callbacks.on_generate_visual_aid = (
-            self._on_generate_visual_aid if enabled else None
-        )
+        self._teacher._callbacks.image_gen_enabled = bool(enabled)
 
     async def run_intro(self, curriculum: Curriculum, messages: list[dict], raw_text: str | None = None) -> str | None:
-        """Run the first intro turn in a thread pool. Returns captured goal or None."""
-        return await asyncio.to_thread(self._teacher.run_intro_turn, curriculum, messages, raw_text)
+        """Run the first intro turn (async-native).  Returns captured goal or None."""
+        return await self._teacher.run_intro_turn(curriculum, messages, raw_text)
 
     async def run_intro_turn(self, curriculum: Curriculum, messages: list[dict], raw_text: str | None = None) -> str | None:
-        """Run one intro turn in a thread pool. Returns captured goal or None."""
-        async with asyncio.timeout(120):
-            return await asyncio.to_thread(self._teacher.run_intro_turn, curriculum, messages, raw_text)
+        """Run one intro turn (async-native).  Returns captured goal or None.
+
+        Plan B: no session-level timeout.  The LLM call inside run_intro_turn
+        is wrapped individually so a hung provider doesn't strand the loop.
+        """
+        return await self._teacher.run_intro_turn(curriculum, messages, raw_text)
 
     async def run_turn(
         self,
         curriculum: Curriculum,
         agent_instructions: str | None,
         lesson_goal: str | None = None,
+        turn_id: str = "",
     ) -> None:
-        """Run one full agent turn (may chain tool calls) in a thread pool."""
-        async with asyncio.timeout(120):  # 2 minutes per turn
-            await asyncio.to_thread(
-                self._teacher.run_turn, curriculum, self._messages, agent_instructions, lesson_goal
-            )
+        """Run one full agent turn (may chain tool calls).
+
+        Plan B: ``run_turn`` is async-native and runs entirely on the event
+        loop except for the LLM streaming call (which still hops to a thread
+        because the SDK is sync).  No session-level wall-clock timeout —
+        interactive tools may legitimately suspend for hours while the
+        student takes their time.  Per-LLM-call timeout is enforced inside
+        the teacher.
+
+        ``turn_id`` is the WS-layer turn identifier; the agent passes it
+        through to the persisted pending_tool row so resume across
+        reconnect / device switch can correlate the original turn.
+        """
+        await self._teacher.run_turn(
+            curriculum, self._messages, agent_instructions, lesson_goal, turn_id=turn_id,
+        )
+
+    # ── Resume path (Plan B Commit 4) ──────────────────────────────────────
+
+    async def resume_pending_tool(
+        self,
+        invocation_id: str,
+        tool_use_id: str,
+        tool_name: str,
+        turn_id: str,
+    ) -> None:
+        """Wait for the student to submit (or dismiss) a previously
+        persisted interactive tool, then append the resulting tool_result
+        block to the message history.
+
+        Plan B Commit 4: this is the entry point ws_session uses on
+        reconnect after detecting a ``pending_tool_invocations`` row.  The
+        ws_session has already re-sent the open_* event to the client and
+        is waiting for the new submission to arrive via the normal
+        ``handle_tool_result`` path.  We register the future *here* so the
+        future exists when the student posts back.
+
+        Caller is responsible for invoking ``run_turn`` afterwards (with
+        the same turn_id) so the agent can process the tool_result and
+        continue the conversation.
+
+        On disconnect, the surrounding task is cancelled and the persisted
+        row stays in PG (uncleared) so a future reconnect can resume again.
+        """
+        # Recreate the in-memory future on this fresh session.  The
+        # corresponding pending_tool_invocations row is *already* in PG;
+        # we don't write it again.
+        future: asyncio.Future = self._loop.create_future()
+        self._tool_futures[invocation_id] = future
+        # _pending_tool_event is set by ws_session when it loads the row;
+        # don't overwrite it here.
+        self._dispatch_turn_id = turn_id  # for any subsequent dispatches
+
+        try:
+            raw = await future
+        finally:
+            self._tool_futures.pop(invocation_id, None)
+
+        # Find the matching tool_use block in the last assistant message
+        # to recover ``tool_input`` (e.g. show_quiz needs ``choices``).
+        tool_input = self._find_tool_input(tool_use_id) or {}
+
+        # Build the tool_result via the registry's build_result lambda so
+        # the resume path produces the same content as the live dispatch.
+        block = TeacherAgent.build_resumed_tool_result(
+            tool_use_id=tool_use_id,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            raw_result=raw,
+        )
+        self._messages.append({"role": "user", "content": [block]})
+
+        # Clear the persisted row now that we've consumed the result.
+        await self._clear_pending_tool_row()
+        self._pending_tool_event = None
+
+    def _find_tool_input(self, tool_use_id: str) -> dict | None:
+        """Walk back through messages to find the tool_use block whose id
+        matches *tool_use_id* and return its ``input`` dict.  Used by the
+        resume path to recover original args (choices, answers, etc.)."""
+        for msg in reversed(self._messages):
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "tool_use"
+                    and block.get("id") == tool_use_id
+                ):
+                    return block.get("input") or {}
+        return None
 
     async def decompose_pdf(
         self,
@@ -302,33 +425,33 @@ class AgentSession:
         return self._pending_tool_event
 
     def cancel_pending_tools(self) -> None:
-        """Unblock any agent thread waiting on an interactive tool (e.g. on WS cancel/reconnect)."""
-        for done_event, result_holder in self._tool_events.values():
-            result_holder[0] = None
-            done_event.set()
-        self._tool_events.clear()
+        """Cancel any in-flight interactive-tool futures.
+
+        Called on WS disconnect or explicit reconnect-cancel.  Each cancel
+        propagates ``CancelledError`` through the corresponding ``await`` in
+        ``run_turn``, which then unwinds cleanly — no leaked threads, no
+        leaked futures.
+        """
+        for future in list(self._tool_futures.values()):
+            if not future.done():
+                future.cancel()
+        self._tool_futures.clear()
         self._pending_tool_event = None
 
     def handle_tool_result(self, inv_id: str, result: dict) -> None:
         """
-        Called from the async WS receive loop when the client sends a tool_result.
-        Unblocks the agent thread that is waiting on done_event.
+        Called from the WS receive loop (event loop side) when the client
+        sends a tool_result.  Resolves the matching future, which awakens
+        the awaiter inside ``run_turn``.
+
+        We're already on the event loop here, so we can call
+        ``future.set_result`` directly — no ``call_soon_threadsafe`` needed.
         """
         self._pending_tool_event = None
-        entry = self._tool_events.pop(inv_id, None)
-        if entry is None:
+        future = self._tool_futures.pop(inv_id, None)
+        if future is None or future.done():
             return
-        done_event, result_holder = entry
-        if "code" in result:
-            value = result
-        elif "html" in result or "css" in result:
-            value = result
-        elif "timed_out" in result:
-            value = result
-        else:
-            value = result.get("drawing") or result.get("photo") or result.get("video_frames")
-        result_holder[0] = value
-        done_event.set()
+        future.set_result(result)
 
     # ── internal: fire-and-forget WS send from worker thread ──────────────────
 
@@ -419,170 +542,121 @@ class AgentSession:
             "chunk_idx": chunk_idx,
         }))
 
-    def _on_show_slide(self, page_start: int, page_end: int, caption: str) -> None:
-        self._fire(self._send({
-            "event": "show_slide",
-            "page_start": page_start,
-            "page_end": page_end,
-            "caption": caption,
-        }))
+    def _on_dispatch_context(self, tool_use_id: str, turn_id: str) -> None:
+        """Plan B: stash the current dispatch context so the next call to
+        ``_await_interactive`` can persist the pending tool row with the
+        right tool_use_id and turn_id.  Cleared inside _await_interactive's
+        finally block."""
+        self._dispatch_tool_use_id = tool_use_id
+        self._dispatch_turn_id = turn_id
 
-    def _on_open_sketchpad(
-        self,
-        prompt: str,
-        result_holder: list,
-        done_event: threading.Event,
-        text_bg: str | None = None,
-        bg_page: int | None = None,
-        bg_image_url: str | None = None,
-    ) -> None:
-        inv_id = str(uuid.uuid4())
-        self._tool_events[inv_id] = (done_event, result_holder)
+    async def _on_open_interactive_tool(self, event: dict) -> dict | None:
+        """Plan B Commit 4: unified interactive-tool entry point.
 
-        im_bg: str | None = None
-        # Priority: bg_image_url (web image) > bg_page (PDF page)
-        if bg_image_url:
-            im_bg = bg_image_url
-        elif bg_page is not None and self._pdf_path:
-            try:
-                import fitz
-                doc = fitz.open(self._pdf_path)
-                if 1 <= bg_page <= len(doc):
-                    page = doc[bg_page - 1]
-                    pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
-                    im_bg = "data:image/png;base64," + base64.b64encode(
-                        pix.tobytes("png")
-                    ).decode()
-                doc.close()
-            except Exception:
-                pass
-
-        event: dict = {"event": "open_sketchpad", "prompt": prompt, "invocation_id": inv_id}
-        if text_bg:
-            event["text_bg"] = text_bg
-        if im_bg:
-            event["im_bg"] = im_bg
-        self._pending_tool_event = event
-        self._fire(self._send(event))
-
-    def _on_take_photo(
-        self,
-        prompt: str,
-        result_holder: list,
-        done_event: threading.Event,
-    ) -> None:
-        inv_id = str(uuid.uuid4())
-        self._tool_events[inv_id] = (done_event, result_holder)
-        ev = {"event": "take_photo", "prompt": prompt, "invocation_id": inv_id}
-        self._pending_tool_event = ev
-        self._fire(self._send(ev))
-
-    def _on_record_video(
-        self,
-        prompt: str,
-        result_holder: list,
-        done_event: threading.Event,
-    ) -> None:
-        inv_id = str(uuid.uuid4())
-        self._tool_events[inv_id] = (done_event, result_holder)
-        ev = {"event": "record_video", "prompt": prompt, "invocation_id": inv_id}
-        self._pending_tool_event = ev
-        self._fire(self._send(ev))
-
-    def _on_open_code_editor(
-        self,
-        prompt: str,
-        language: str,
-        starter_code: str | None,
-        result_holder: list,
-        done_event: threading.Event,
-    ) -> None:
-        inv_id = str(uuid.uuid4())
-        self._tool_events[inv_id] = (done_event, result_holder)
-        event: dict = {
-            "event": "open_code_editor",
-            "prompt": prompt,
-            "language": language,
-            "invocation_id": inv_id,
-        }
-        if starter_code is not None:
-            event["starter_code"] = starter_code
-        self._pending_tool_event = event
-        self._fire(self._send(event))
-
-    def _on_open_html_editor(
-        self,
-        prompt: str,
-        starter_html: str | None,
-        starter_css: str | None,
-        result_holder: list,
-        done_event: threading.Event,
-    ) -> None:
-        inv_id = str(uuid.uuid4())
-        self._tool_events[inv_id] = (done_event, result_holder)
-        event: dict = {
-            "event": "open_html_editor",
-            "prompt": prompt,
-            "invocation_id": inv_id,
-        }
-        if starter_html is not None:
-            event["starter_html"] = starter_html
-        if starter_css is not None:
-            event["starter_css"] = starter_css
-        self._pending_tool_event = event
-        self._fire(self._send(event))
-
-    def _on_start_timer(
-        self,
-        prompt: str,
-        duration_seconds: int,
-        result_holder: list,
-        done_event: threading.Event,
-    ) -> None:
-        inv_id = str(uuid.uuid4())
-        self._tool_events[inv_id] = (done_event, result_holder)
-        ev = {
-            "event": "start_timer",
-            "prompt": prompt,
-            "duration_seconds": duration_seconds,
-            "invocation_id": inv_id,
-        }
-        self._pending_tool_event = ev
-        self._fire(self._send(ev))
-
-    def _on_generate_visual_aid(
-        self,
-        prompt: str,
-        caption: str,
-        tool_use_id: str,
-        result_holder: list,
-        done_event: threading.Event,
-    ) -> None:
-        """Called from the agent thread; schedules async image generation on the event loop.
-
-        Returns immediately — the caller (run_turn) blocks on done_event.wait().
+        The teacher's tool registry calls this with a fully-built event
+        dict (containing ``invocation_id``, the WS event name, and the
+        tool-specific payload).  We just delegate to ``_await_interactive``
+        which handles future registration, persistence, send, and await.
         """
-        asyncio.run_coroutine_threadsafe(
-            self._generate_and_send(prompt, caption, tool_use_id, result_holder, done_event),
-            self._loop,
-        )
+        return await self._await_interactive(event)
 
-    async def _generate_and_send(
+    async def _await_interactive(self, event: dict) -> dict | None:
+        """Generic helper: register a future for ``event['invocation_id']``,
+        persist the pending tool row to PG (so a different session/device
+        can resume), send the open_* event to the client, await the
+        student's submission.
+
+        Returns the raw client result dict, or None if cancelled / dismissed.
+        On WS death the surrounding task is cancelled, which propagates
+        through this await as ``CancelledError`` and is re-raised so the
+        agent's run_turn unwinds cleanly.  The persisted PG row is cleared
+        in either case (resolution or cancellation) inside the finally block.
+        """
+        inv_id = event["invocation_id"]
+        future: asyncio.Future = self._loop.create_future()
+        self._tool_futures[inv_id] = future
+        self._pending_tool_event = event
+
+        # Snapshot + clear the dispatch context the agent gave us.
+        tool_use_id = self._dispatch_tool_use_id
+        turn_id = self._dispatch_turn_id
+        self._dispatch_tool_use_id = ""
+        self._dispatch_turn_id = ""
+
+        # Persist to PG so a reconnecting WS / different device can resume.
+        # Best-effort: failures are logged but don't break the dispatch.
+        if self._enrollment_id and tool_use_id:
+            try:
+                from ..db import models as _models, connection as _db
+                async with _db.acquire() as conn:
+                    await _models.put_pending_tool(
+                        conn,
+                        enrollment_id=self._enrollment_id,
+                        invocation_id=inv_id,
+                        tool_name=event.get("event", "unknown"),
+                        tool_use_id=tool_use_id,
+                        turn_id=turn_id,
+                        event_payload=event,
+                    )
+            except Exception:
+                log.exception("[AgentSession] failed to persist pending tool")
+
+        try:
+            await self._send(event)
+        except Exception:
+            # Send failed (WS already closed?) — clean up before re-raising.
+            self._tool_futures.pop(inv_id, None)
+            self._pending_tool_event = None
+            await self._clear_pending_tool_row()
+            raise
+        try:
+            return await future
+        finally:
+            # Whether resolved, cancelled, or errored: drop our tracking.
+            self._tool_futures.pop(inv_id, None)
+            self._pending_tool_event = None
+            await self._clear_pending_tool_row()
+
+    async def _clear_pending_tool_row(self) -> None:
+        """Best-effort delete of this enrollment's pending_tool row.  Called
+        from _await_interactive's finally block; safe to call when no row
+        exists.  Failures are logged but never raised."""
+        if not self._enrollment_id:
+            return
+        try:
+            from ..db import models as _models, connection as _db
+            async with _db.acquire() as conn:
+                await _models.clear_pending_tool(conn, self._enrollment_id)
+        except Exception:
+            log.exception("[AgentSession] failed to clear pending tool")
+
+    # ── Server-side image work ────────────────────────────────────────────
+    # Plan B Commit 4: the 11 client-interactive _on_* methods (sketchpad,
+    # photo, video, code editor, html editor, timer, text input, quiz,
+    # fill-in-the-blank, flashcards, ordering) are gone — they all route
+    # through ``_on_open_interactive_tool`` now.  Only generate_visual_aid
+    # and search_image survive as dedicated methods because they do real
+    # server-side work (image generation, image search) instead of waiting
+    # on a client tool_result.
+    async def _on_generate_visual_aid(
         self,
         prompt: str,
         caption: str,
         tool_use_id: str,
-        result_holder: list,
-        done_event: threading.Event,
-    ) -> None:
-        """Async coroutine: generate an image, persist it, and send WS events."""
+    ) -> dict | None:
+        """Generate an image, persist it, send the show_image event.
+
+        Plan B: this is now a plain async coroutine that runs on the event
+        loop directly.  Returns ``{"image_url": str}`` on success or ``None``
+        on failure.  The agent's run_turn awaits it.
+        """
         try:
             await self._send({"event": "generating_image", "caption": caption})
 
             provider = self._image_provider
             if provider is None:
                 await self._send({"event": "generation_failed", "reason": "Image generation is not configured."})
-                return
+                return None
 
             styled_prompt = (self._image_style_prefix + prompt).strip()
 
@@ -592,12 +666,11 @@ class AgentSession:
                 log.exception("[AgentSession] image generation failed")
                 reason = str(exc) or type(exc).__name__
                 await self._send({"event": "generation_failed", "reason": reason})
-                return
+                return None
 
             # Persist the image under storage/enrollment_assets/<enrollment_id>/<asset_id>.png
             try:
                 from ...db import models, connection as _db
-                from ...config import settings
 
                 asset_dir = self._storage_dir / "enrollment_assets" / self._enrollment_id
                 asset_dir.mkdir(parents=True, exist_ok=True)
@@ -635,42 +708,28 @@ class AgentSession:
                     "caption": caption,
                     "prompt": prompt,
                 })
-                result_holder[0] = image_url
+                return {"image_url": image_url}
 
-            except Exception as exc:
+            except Exception:
                 log.exception("[AgentSession] failed to persist generated image")
                 await self._send({"event": "generation_failed", "reason": "Failed to save image."})
+                return None
 
-        except Exception as exc:
-            # Catch-all: ensures done_event is always set even if _send itself throws.
-            log.exception("[AgentSession] unexpected error in _generate_and_send")
+        except Exception:
+            log.exception("[AgentSession] unexpected error in _on_generate_visual_aid")
+            return None
 
-        finally:
-            done_event.set()
-
-    def _on_search_image(
+    async def _on_search_image(
         self,
         query: str,
         caption: str,
         tool_use_id: str,
-        result_holder: list,
-        done_event: threading.Event,
-    ) -> None:
-        """Called from the agent thread; schedules async image search on the event loop."""
-        asyncio.run_coroutine_threadsafe(
-            self._search_and_send(query, caption, tool_use_id, result_holder, done_event),
-            self._loop,
-        )
+    ) -> dict | None:
+        """Search for an image and send the show_image event.
 
-    async def _search_and_send(
-        self,
-        query: str,
-        caption: str,
-        tool_use_id: str,
-        result_holder: list,
-        done_event: threading.Event,
-    ) -> None:
-        """Async coroutine: search for an image and send it to the client."""
+        Plan B: plain async coroutine, returns ``{"image_url": str}`` or
+        ``None``.  The agent's run_turn awaits it.
+        """
         try:
             await self._send({"event": "generating_image", "caption": f"Searching: {caption}"})
 
@@ -680,12 +739,12 @@ class AgentSession:
             api_key = (settings.OPENAI_API_KEY or "").strip()
             if not api_key:
                 await self._send({"event": "generation_failed", "reason": "API key not configured."})
-                return
+                return None
 
             image_url = await asyncio.to_thread(search_image_sync, query, api_key)
             if not image_url:
                 await self._send({"event": "generation_failed", "reason": "No image found."})
-                return
+                return None
 
             await self._send({
                 "event": "show_image",
@@ -693,13 +752,61 @@ class AgentSession:
                 "caption": caption,
                 "prompt": query,
             })
-            result_holder[0] = image_url
+            return {"image_url": image_url}
 
         except Exception:
-            log.exception("[AgentSession] unexpected error in _search_and_send")
+            log.exception("[AgentSession] unexpected error in _on_search_image")
+            try:
+                await self._send({"event": "generation_failed", "reason": "Image search failed."})
+            except Exception:
+                pass  # WS may already be closed
+            return None
 
-        finally:
-            done_event.set()
+    # ── Non-blocking display tools ───────────────────────────────────────────
+    # These fire from the (async) run_turn dispatcher.  They schedule WS sends
+    # via create_task instead of _fire because we're already on the event loop.
+
+    def _on_show_progress(self, curriculum) -> None:
+        sections_data = []
+        for i, sec in enumerate(curriculum.sections):
+            sections_data.append({
+                "title": sec.get("title", f"Section {i + 1}"),
+                "idx": i,
+                "completed": i < curriculum.idx,
+            })
+        asyncio.create_task(self._send({
+            "event": "show_progress",
+            "sections": sections_data,
+            "current_idx": curriculum.idx,
+            "tasks": curriculum.current_tasks(),
+        }))
+
+    def _on_play_audio_clip(self, text: str, speed: float) -> None:
+        asyncio.create_task(self._send({
+            "event": "play_audio_clip",
+            "text": text,
+            "speed": speed,
+        }))
+
+    # ── RAG ────────────────────────────────────────────────────────────────────
+
+    async def _on_search_content(self, query: str, current_idx: int) -> str:
+        """Async RAG callback — runs the DB query directly on the event loop."""
+        try:
+            from ...db import connection as _db, models
+            async with _db.acquire() as conn:
+                results = await models.search_sections(
+                    conn, self._lesson_id, query, exclude_idx=current_idx, limit=3,
+                )
+            if not results:
+                return "No matching content found in other sections."
+            parts = []
+            for r in results:
+                parts.append(f"[Section {r['idx'] + 1}: {r['title']}]\n{r['excerpt']}")
+            return "\n\n".join(parts)
+        except Exception as exc:
+            log.warning("search_content failed: %s", exc)
+            return "Search failed — continue teaching with available context."
 
     def _on_token_usage(self, call_type: str, model: str, usage) -> None:
         app_state.token_tracker.record_api(
@@ -725,7 +832,9 @@ class AgentSession:
         )
 
     def _on_task_complete(self, curriculum: Curriculum) -> None:
-        self._fire(self._send({
+        # Fired from the (async) run_turn dispatcher — schedule the WS send
+        # via create_task instead of _fire (we're already on the event loop).
+        asyncio.create_task(self._send({
             "event": "task_progress",
             "section_idx": curriculum.idx,
             "tasks": curriculum.current_tasks(),
@@ -733,8 +842,9 @@ class AgentSession:
         }))
 
     def _on_section_advanced(self, curriculum: Curriculum) -> None:
+        old_idx = self._current_section_idx
         self._current_section_idx = curriculum.idx
-        self._fire(self._send({
+        asyncio.create_task(self._send({
             "event": "section_advanced",
             "curriculum": {
                 "title": curriculum.title,
@@ -745,9 +855,64 @@ class AgentSession:
             },
             "tasks": curriculum.current_tasks(),
         }))
+        # Persist and award points immediately so the celebration fires now,
+        # not after the whole turn finishes.
+        asyncio.create_task(self._persist_and_award(
+            curriculum.idx, curriculum.task_progress_json(),
+            old_idx=old_idx, is_complete=False,
+        ))
+
+    async def _persist_and_award(
+        self, idx: int, task_progress_json: str,
+        old_idx: int = 0, is_complete: bool = False,
+    ) -> None:
+        """Persist section index and award points immediately (called mid-turn)."""
+        try:
+            from ..db import models, connection as _db
+            from ..db.connection import ANON_USER_ID
+            from .points import award_section_advance, award_lesson_complete, award_daily_points_if_needed
+
+            async with _db.acquire() as conn:
+                await models.update_enrollment(
+                    conn, self._enrollment_id,
+                    current_section_idx=idx,
+                    task_progress=task_progress_json,
+                    completed=int(is_complete),
+                )
+
+                if self._user_id and self._user_id != ANON_USER_ID:
+                    points_earned = 0
+                    reason = ""
+                    if idx > old_idx:
+                        pts = await award_section_advance(conn, self._user_id, self._enrollment_id, old_idx, idx)
+                        points_earned += pts
+                        reason = "section_advance"
+                    if is_complete:
+                        pts = await award_lesson_complete(conn, self._user_id, self._enrollment_id)
+                        points_earned += pts
+                        reason = "lesson_complete"
+                    daily_pts = await award_daily_points_if_needed(conn, self._user_id)
+                    points_earned += daily_pts
+
+                    if points_earned > 0:
+                        user_points = await models.get_user_points(conn, self._user_id)
+                        total = int(user_points["total_points"]) if user_points else points_earned
+                        await self._send({
+                            "event": "points_awarded",
+                            "points": points_earned,
+                            "total": total,
+                            "reason": reason or "daily",
+                        })
+        except Exception:
+            log.exception("failed to persist section advance / award points")
 
     def _on_curriculum_complete(self) -> None:
-        self._fire(self._send({"event": "curriculum_complete"}))
+        # Fired from the (async) run_turn dispatcher — use create_task.
+        asyncio.create_task(self._send({"event": "curriculum_complete"}))
+        asyncio.create_task(self._persist_and_award(
+            self._current_section_idx, "{}",
+            old_idx=self._current_section_idx, is_complete=True,
+        ))
 
     def _on_turn_complete(self, last_audio: np.ndarray | None) -> None:
         # The canonical turn_complete (with turn_id) is sent by ws_session._run_turn

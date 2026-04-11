@@ -59,7 +59,7 @@ class OpenAILLMProvider(LLMProvider):
         if tools:
             kwargs["tools"] = [_tool_schema_to_openai(t) for t in tools]
 
-        log.info("OpenAILLMProvider.do_turn: opening stream (model=%s, messages=%d)", model, len(messages))
+        log.info("OpenAILLMProvider.do_turn: opening stream (model=%s, messages=%d, tools=%d)", model, len(messages), len(kwargs.get("tools", [])))
 
         full_text = ""
         tool_calls_raw: dict[int, dict] = {}  # index → accumulated tool call
@@ -100,7 +100,7 @@ class OpenAILLMProvider(LLMProvider):
         if full_text:
             content_blocks.append({"type": "text", "text": full_text})
 
-        tool_use: SimpleNamespace | None = None
+        tool_uses: list[SimpleNamespace] = []
         for tc in tool_calls_raw.values():
             try:
                 args = json.loads(tc["arguments"]) if tc["arguments"] else {}
@@ -112,13 +112,12 @@ class OpenAILLMProvider(LLMProvider):
                 "name": tc["name"],
                 "input": args,
             })
-            if tool_use is None:
-                tool_use = SimpleNamespace(
-                    type="tool_use",
-                    id=tc["id"],
-                    name=tc["name"],
-                    input=args,
-                )
+            tool_uses.append(SimpleNamespace(
+                type="tool_use",
+                id=tc["id"],
+                name=tc["name"],
+                input=args,
+            ))
 
         cached = 0
         if usage_raw and hasattr(usage_raw, "prompt_tokens_details") and usage_raw.prompt_tokens_details:
@@ -133,6 +132,6 @@ class OpenAILLMProvider(LLMProvider):
         return LLMTurnResult(
             content_blocks=content_blocks,
             content_text=full_text,
-            tool_use=tool_use,
             usage=usage_obj,
+            tool_uses=tool_uses,
         )

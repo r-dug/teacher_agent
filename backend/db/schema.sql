@@ -119,6 +119,9 @@ CREATE TABLE IF NOT EXISTS lesson_sections (
     UNIQUE (lesson_id, idx)
 );
 
+CREATE INDEX IF NOT EXISTS idx_lesson_sections_fts
+    ON lesson_sections USING GIN (to_tsvector('english', content));
+
 -- ── Section Assets ────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS section_assets (
@@ -402,5 +405,25 @@ CREATE TABLE IF NOT EXISTS user_preferences (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- ── Pending Tool Invocations (Plan B: persisted interactive tool waits) ──────
+-- One row per enrollment whose teaching loop is suspended on an interactive
+-- tool waiting for the student's response.  Survives WS disconnect, server
+-- restart, and device-switch.  PRIMARY KEY on enrollment_id enforces "at most
+-- one pending tool per enrollment" (the run_turn dispatcher awaits sequentially
+-- so this matches reality).
+CREATE TABLE IF NOT EXISTS pending_tool_invocations (
+    enrollment_id   TEXT PRIMARY KEY REFERENCES lesson_enrollments(id) ON DELETE CASCADE,
+    invocation_id   TEXT NOT NULL,
+    tool_name       TEXT NOT NULL,
+    tool_use_id     TEXT NOT NULL,
+    turn_id         TEXT NOT NULL,
+    event_payload   JSONB NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- ── Idempotent migrations ────────────────────────────────────────────────────
 ALTER TABLE lesson_enrollments ADD COLUMN IF NOT EXISTS task_progress TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE lessons ADD COLUMN IF NOT EXISTS visual_aid_config TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE courses ADD COLUMN IF NOT EXISTS visual_aid_config TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE courses ADD COLUMN IF NOT EXISTS default_persona_id TEXT REFERENCES personas(id) ON DELETE SET NULL;
+ALTER TABLE lesson_enrollments ADD COLUMN IF NOT EXISTS persona_id TEXT REFERENCES personas(id) ON DELETE SET NULL;

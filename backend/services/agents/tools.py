@@ -2,6 +2,17 @@
 
 from __future__ import annotations
 
+# Shared optional property added to every interactive tool.
+_OPTIONAL_TIMER = {
+    "duration_seconds": {
+        "type": "integer",
+        "description": (
+            "Optional time limit in seconds. A countdown timer is shown "
+            "and the exercise auto-submits when time expires."
+        ),
+    },
+}
+
 # ── intro goal-gathering tool ──────────────────────────────────────────────────
 
 CAPTURE_GOAL_TOOL = {
@@ -76,6 +87,28 @@ SEARCH_IMAGE_TOOL = {
     },
 }
 
+# ── RAG search tool ───────────────────────────────────────────────────────────
+
+SEARCH_CONTENT_TOOL = {
+    "name": "search_content",
+    "description": (
+        "Search other sections of the lesson for relevant content. Use when the student asks "
+        "about a topic outside the current section, references something covered earlier, "
+        "or when you need additional context to answer accurately. Returns excerpts from "
+        "matching sections."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Search query — use key terms from the student's question.",
+            },
+        },
+        "required": ["query"],
+    },
+}
+
 # ── teaching tools ─────────────────────────────────────────────────────────────
 
 GENERATE_VISUAL_AID_TOOL = {
@@ -111,65 +144,25 @@ GENERATE_VISUAL_AID_TOOL = {
 
 TEACHING_TOOLS = [
     {
-        "name": "advance_to_next_section",
-        "description": (
-            "Call this ONLY after the student has answered at least one comprehension question "
-            "and their answer demonstrates genuine understanding of the current section's key concepts. "
-            "Do NOT call this preemptively or before asking any questions."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "evidence": {
-                    "type": "string",
-                    "description": "What the student said that demonstrates they understood.",
-                }
-            },
-            "required": ["evidence"],
-        },
-    },
-    {
-        "name": "show_slide",
-        "description": (
-            "Display one or more pages from the PDF as a visual aid. "
-            "Use this when a diagram, figure, table, or layout on a page would help the student. "
-            "Use page_end to show a continuous range (e.g. a two-page spread or a sequence of diagrams). "
-            "Provide a brief caption summarising what to focus on. "
-            "The student can annotate any shown page and send it back to you."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "page_start": {
-                    "type": "integer",
-                    "description": "1-based first page to display.",
-                },
-                "page_end": {
-                    "type": "integer",
-                    "description": "1-based last page to display (inclusive). Omit or set equal to page_start for a single page.",
-                },
-                "caption": {
-                    "type": "string",
-                    "description": "One sentence describing what to focus on.",
-                },
-            },
-            "required": ["page_start", "caption"],
-        },
-    },
-    {
         "name": "open_sketchpad",
         "description": (
             "Open a drawing canvas for freehand input (characters, diagrams, notation). "
             "Returns the drawing as an image for evaluation. "
             "Optionally set a background: text_bg for reference characters to trace, "
-            "bg_page for a PDF page, or bg_image_url for a web image."
+            "or bg_image_url for a web image. "
+            "When testing recall, omit text_bg so the student draws from memory."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "Instruction shown above the canvas, e.g. 'Please write the character さ'.",
+                    "description": (
+                        "Instruction shown above the canvas. NEVER include the answer "
+                        "in this field when testing recall. "
+                        "Wrong: 'Write the character ち'. "
+                        "Right: 'Write the hiragana for the chi sound.'"
+                    ),
                 },
                 "text_bg": {
                     "type": "string",
@@ -177,10 +170,6 @@ TEACHING_TOOLS = [
                         "Optional reference text to display as a faint guide behind the canvas "
                         "(e.g. 'さ', 'あ', '猫'). The student traces or copies it."
                     ),
-                },
-                "bg_page": {
-                    "type": "integer",
-                    "description": "Optional 1-based PDF page number as a faint background.",
                 },
                 "bg_image_url": {
                     "type": "string",
@@ -190,6 +179,7 @@ TEACHING_TOOLS = [
                         "Use search_image first to find the URL, then pass it here."
                     ),
                 },
+                **_OPTIONAL_TIMER,
             },
             "required": ["prompt"],
         },
@@ -260,6 +250,7 @@ TEACHING_TOOLS = [
                         "Use for bug-fixing exercises or to provide a function scaffold."
                     ),
                 },
+                **_OPTIONAL_TIMER,
             },
             "required": ["prompt", "language"],
         },
@@ -287,6 +278,7 @@ TEACHING_TOOLS = [
                     "type": "string",
                     "description": "Optional CSS starter code.",
                 },
+                **_OPTIONAL_TIMER,
             },
             "required": ["prompt"],
         },
@@ -320,7 +312,7 @@ TEACHING_TOOLS = [
         "description": (
             "Mark a specific concept-check task as complete for the current section. "
             "Call this after the student demonstrates understanding of an individual key concept. "
-            "You MUST call this for each key concept before calling advance_to_next_section."
+            "You MUST call this for each key concept (and the quiz) to complete the section."
         ),
         "input_schema": {
             "type": "object",
@@ -338,21 +330,209 @@ TEACHING_TOOLS = [
         },
     },
     {
-        "name": "mark_curriculum_complete",
+        "name": "unmark_task",
         "description": (
-            "Call this ONLY after the student has demonstrated thorough understanding of ALL "
-            "sections, including the final section. Only valid after advance_to_next_section "
-            "has been called for all preceding sections."
+            "Reset a previously-completed task back to pending. "
+            "Call this when the student reveals confusion or gives an incorrect answer "
+            "about a concept that was previously marked complete — for example, "
+            "during the section quiz. The teaching loop continues so you can "
+            "re-teach and re-assess the concept."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "evidence": {
+                "task_idx": {
+                    "type": "integer",
+                    "description": "Zero-based index of the task to reset.",
+                },
+                "reason": {
                     "type": "string",
-                    "description": "Summary of demonstrated understanding across the curriculum.",
-                }
+                    "description": "Why the task is being unmarked (what the student got wrong).",
+                },
             },
-            "required": ["evidence"],
+            "required": ["task_idx", "reason"],
+        },
+    },
+    SEARCH_CONTENT_TOOL,
+    {
+        "name": "show_progress",
+        "description": (
+            "Display the student's progress through the curriculum — sections completed, "
+            "current section tasks, and overall status. Use when the student asks about "
+            "their progress or at natural transition points."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "play_audio_clip",
+        "description": (
+            "Play a specific text as a standalone audio clip for the student. Use when "
+            "pronunciation, intonation, or listening comprehension matters — e.g. a foreign "
+            "word, a phrase, or a sentence the student should hear clearly. The clip plays "
+            "separately from your normal speech."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The text to synthesize and play as audio.",
+                },
+                "speed": {
+                    "type": "number",
+                    "description": "Playback speed multiplier (0.5 = half speed, 1.0 = normal, 2.0 = double). Default 1.0.",
+                },
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "text_input",
+        "description": (
+            "Open a text input for the student to type a written answer. Use for free-response "
+            "questions where voice is insufficient — translations, formulas, written explanations, "
+            "or any time you need the student's answer in text form."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "The question or instruction shown above the text field.",
+                },
+                "placeholder": {
+                    "type": "string",
+                    "description": "Optional placeholder text in the input field.",
+                },
+                "multiline": {
+                    "type": "boolean",
+                    "description": "If true, show a multi-line textarea. Default false.",
+                },
+                **_OPTIONAL_TIMER,
+            },
+            "required": ["prompt"],
+        },
+    },
+    {
+        "name": "show_quiz",
+        "description": (
+            "Display a multiple-choice question. Use for comprehension checks where you want "
+            "the student to select from specific options. The student sees immediate feedback "
+            "(correct/incorrect) before the result is sent back to you."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "The question text.",
+                },
+                "choices": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string", "description": "Short label, e.g. 'A', 'B', 'C'."},
+                            "text": {"type": "string", "description": "The choice text."},
+                        },
+                        "required": ["label", "text"],
+                    },
+                    "description": "The answer choices (2-6 options).",
+                },
+                "correct_index": {
+                    "type": "integer",
+                    "description": "Zero-based index of the correct choice.",
+                },
+                **_OPTIONAL_TIMER,
+            },
+            "required": ["prompt", "choices", "correct_index"],
+        },
+    },
+    {
+        "name": "fill_in_the_blank",
+        "description": (
+            "Display a fill-in-the-blank exercise. The template uses ___ (three underscores) to "
+            "mark each blank. The student types answers into inline fields. Use for vocabulary "
+            "recall, grammar drills, or any exercise where specific words must be produced."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Instructions shown above the exercise.",
+                },
+                "template": {
+                    "type": "string",
+                    "description": "Text with ___ marking each blank. E.g. 'The capital of France is ___.'",
+                },
+                "answers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Correct answer for each blank, in order.",
+                },
+                **_OPTIONAL_TIMER,
+            },
+            "required": ["prompt", "template", "answers"],
+        },
+    },
+    {
+        "name": "show_flashcard_deck",
+        "description": (
+            "Present a deck of flashcards for review. Each card has a front (prompt) and back "
+            "(answer). The student flips each card, self-grades as 'Got it' or 'Missed it', "
+            "and submits results for all cards. Use for vocabulary review, term definitions, "
+            "or spaced-repetition drills."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Instructions shown above the deck.",
+                },
+                "cards": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "front": {"type": "string", "description": "The front of the card (question/term)."},
+                            "back": {"type": "string", "description": "The back of the card (answer/definition)."},
+                        },
+                        "required": ["front", "back"],
+                    },
+                    "description": "The flashcards (3-20 cards recommended).",
+                },
+                **_OPTIONAL_TIMER,
+            },
+            "required": ["prompt", "cards"],
+        },
+    },
+    {
+        "name": "ordering_exercise",
+        "description": (
+            "Present items that the student must put in the correct order by dragging. "
+            "Use for sequences, processes, timelines, ranked lists, or any concept where "
+            "ordering matters. Items are shuffled before display."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Instructions shown above the exercise.",
+                },
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Items in their CORRECT order. They will be shuffled for the student.",
+                },
+                **_OPTIONAL_TIMER,
+            },
+            "required": ["prompt", "items"],
         },
     },
 ]

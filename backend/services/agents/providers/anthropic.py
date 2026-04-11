@@ -39,9 +39,14 @@ class AnthropicLLMProvider(LLMProvider):
             messages=messages,
         )
         if tools:
-            stream_kwargs["tools"] = tools
+            # Cache the last tool definition — system + tools form a stable
+            # prefix that doesn't change between turns.
+            cached_tools = list(tools)
+            if cached_tools:
+                cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
+            stream_kwargs["tools"] = cached_tools
 
-        log.info("AnthropicLLMProvider.do_turn: opening stream (model=%s, messages=%d)", model, len(messages))
+        log.info("AnthropicLLMProvider.do_turn: opening stream (model=%s, messages=%d, tools=%d)", model, len(messages), len(tools))
 
         full_text = ""
         with self._client.messages.stream(**stream_kwargs) as stream:
@@ -53,15 +58,14 @@ class AnthropicLLMProvider(LLMProvider):
 
         content_blocks = [_block_to_api_dict(b) for b in final.content]
 
-        tool_use: SimpleNamespace | None = None
-        for block in final.content:
-            if getattr(block, "type", None) == "tool_use":
-                tool_use = block
-                break
+        tool_uses: list = [
+            block for block in final.content
+            if getattr(block, "type", None) == "tool_use"
+        ]
 
         return LLMTurnResult(
             content_blocks=content_blocks,
             content_text=full_text,
-            tool_use=tool_use,
             usage=final.usage,
+            tool_uses=tool_uses,
         )
