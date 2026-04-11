@@ -13,7 +13,7 @@ session.py (AgentSession)
     |       |--- tools.py      Tool schemas (advance, mark_task, sketchpad, etc.)
     |       |--- tts_pipeline.py   TTS with ordered fallback
     |
-    |--- planner_agent.py      PDF decomposition into curriculum
+    |--- decompose.py          PDF → curriculum (text + PDF-blob paths, parallel segments)
     |--- code_runner.py        Sandboxed code execution for student exercises
     |--- callbacks.py          Event hooks (section advanced, task complete, etc.)
     |--- curriculum.py         Curriculum dataclass with task checklist

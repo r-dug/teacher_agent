@@ -3,7 +3,8 @@ Declarative LLM model + chain configuration.
 
 Plan B follow-up A: replaces the branchy ``if provider == "openai"`` /
 ``if openai_key`` construction logic in ``AgentSession.__init__`` (and
-``LessonPlannerAgent.__init__``) with a single declarative tree.
+the now-deleted ``LessonPlannerAgent.__init__``) with a single
+declarative tree.
 
 A ``ModelSpec`` describes one model + the source-specific config needed
 to construct an SDK client for it.  A ``ChainSpec`` is a primary model

@@ -1213,6 +1213,15 @@ def _decompose_chapter_sync(
     chapter_title: str = "",
     next_chapter_title: str | None = None,
 ) -> list[dict[str, Any]]:
+    """Decompose one chapter into sections.
+
+    Plan B follow-up B3: provider-agnostic — delegates to the canonical
+    ``decompose`` module.  The ``decompose_provider`` /
+    ``decompose_model`` parameters are kept on the signature for
+    backwards compat with the job-store schema but are no longer
+    consulted; ``DECOMPOSE_CHAIN`` in ``model_chains.py`` is the source
+    of truth for which model runs.
+    """
     if decompose_mode == "text":
         return _decompose_chapter_text_sync(
             full_pdf_text=full_pdf_text or "",
@@ -1223,53 +1232,17 @@ def _decompose_chapter_sync(
             decompose_model=decompose_model,
         )
 
-    # Plan B follow-up A2: route through DECOMPOSE_CHAIN.  Both
-    # OpenAI and (broken-without-credits) Anthropic paths now use the
-    # same decompose helper.  The decompose_provider/decompose_model
-    # parameters are kept on the function signature for backwards compat
-    # but no longer consulted — DECOMPOSE_CHAIN is the source of truth.
-    #
-    # Note: this whole function will be replaced by B3's canonical
-    # decompose.py module in a follow-up commit.  For now we use the
-    # existing OpenAI path (which already extracts text and runs the
-    # decompose prompt) for both branches.  The Anthropic-PDF-blob
-    # path is dead code — we don't use it because (a) Anthropic credits
-    # are zero, and (b) the OpenAI text-extract path produces equivalent
-    # output.
-    sections = _decompose_chapter_openai_sync(
-        source_pdf_rel=source_pdf_rel,
-        page_start=page_start,
-        page_end=page_end,
-        total_pages=total_pages,
-        objectives_prompt=objectives_prompt,
-        decompose_model=decompose_model,
-    )
-
-    # Normalize page numbers to absolute textbook pages when model returns local segment pages.
-    span = page_end - page_start + 1
-    for sec in sections:
-        ps = sec.get("page_start")
-        pe = sec.get("page_end")
-        if isinstance(ps, int) and 1 <= ps <= span:
-            sec["page_start"] = ps + page_start - 1
-        if isinstance(pe, int) and 1 <= pe <= span:
-            sec["page_end"] = pe + page_start - 1
-    return sections
-
-
-def _decompose_chapter_openai_sync(
-    *,
-    source_pdf_rel: str,
-    page_start: int,
-    page_end: int,
-    total_pages: int,
-    objectives_prompt: str,
-    decompose_model: str,
-) -> list[dict[str, Any]]:
     import fitz
-    from ..agents.prompts.decompose import DECOMPOSE_PROMPT, DECOMPOSE_SYSTEM
+
+    from ..agents.decompose import decompose_from_text, decompose_segment
 
     full_pdf = settings.STORAGE_DIR / Path(source_pdf_rel)
+    max_input_chars = max(1000, int(settings.OPENAI_DECOMPOSE_MAX_INPUT_CHARS))
+
+    # Extract chapter pages.  If extraction is empty AND OCR is enabled,
+    # fall back to a vision-OCR pass and feed the result through the
+    # text-only decompose path.  Otherwise slice the chapter into a
+    # standalone PDF and let the canonical dispatcher handle it.
     doc = fitz.open(str(full_pdf))
     try:
         page_texts: list[str] = []
@@ -1277,11 +1250,11 @@ def _decompose_chapter_openai_sync(
             text = doc[idx].get_text().strip()
             if text:
                 page_texts.append(f"[Page {idx + 1}]\n{text}")
+        has_text = bool(page_texts)
 
-        combined_text = "\n\n".join(page_texts).strip()
-        if not combined_text and settings.OPENAI_DECOMPOSE_ENABLE_VISION_OCR:
+        if not has_text and settings.OPENAI_DECOMPOSE_ENABLE_VISION_OCR:
             log.info(
-                "OpenAI decomposition text extraction empty for pages %s-%s; attempting vision OCR fallback",
+                "Decomposition text extraction empty for pages %s-%s; attempting vision OCR fallback",
                 page_start,
                 page_end,
             )
@@ -1291,52 +1264,56 @@ def _decompose_chapter_openai_sync(
                 page_end=page_end,
                 model=decompose_model,
             )
-            combined_text = "\n\n".join(ocr_texts).strip()
+            ocr_combined = "\n\n".join(ocr_texts).strip()
+            if not ocr_combined:
+                raise ValueError(
+                    f"No extractable text found for pages {page_start}–{page_end}. "
+                    "OCR fallback also produced no text."
+                )
+            _title, sections = decompose_from_text(
+                text=ocr_combined,
+                seg_start=page_start - 1,
+                seg_end=page_end,
+                total_pages=total_pages,
+                student_goal=objectives_prompt,
+                max_input_chars=max_input_chars,
+            )
+        else:
+            if not has_text:
+                raise ValueError(
+                    f"No extractable text found for pages {page_start}–{page_end}. "
+                    "This chapter may be image-only or require OCR."
+                )
+            chunk = fitz.open()
+            chunk.insert_pdf(doc, from_page=page_start - 1, to_page=page_end - 1)
+            segment_bytes = chunk.tobytes()
+            chunk.close()
+            _title, sections = decompose_segment(
+                pdf_bytes=segment_bytes,
+                seg_start=page_start - 1,
+                seg_end=page_end,
+                total_pages=total_pages,
+                student_goal=objectives_prompt,
+                max_input_chars=max_input_chars,
+            )
     finally:
         doc.close()
 
-    if not combined_text:
-        raise ValueError(
-            f"No extractable text found for pages {page_start}–{page_end}. "
-            "This chapter may be image-only or require OCR."
-        )
-    combined_text = combined_text[: max(1000, int(settings.OPENAI_DECOMPOSE_MAX_INPUT_CHARS))]
-
-    chunk_note = (
-        f"\nNote: This is pages {page_start}–{page_end} of {total_pages}. "
-        "Extract sections only from these pages."
-    )
-    goal_note = (
-        f"\n\nSTUDENT GOAL: \"{objectives_prompt}\"\n"
-        "Use this to inform your decomposition:\n"
-        "- Break content most relevant to this goal into finer, more precise sections.\n"
-        "- Be especially careful with page_start/page_end for those sections.\n"
-        "- Prioritise key_concepts that directly serve this goal."
-        if objectives_prompt
-        else ""
-    )
-    user_message = (
-        DECOMPOSE_PROMPT
-        + chunk_note
-        + goal_note
-        + "\n\nSOURCE TEXT EXTRACT:\n"
-        + combined_text
-        + "\n\nReturn JSON only."
-    )
-    # Plan B follow-up A2: route through DECOMPOSE_CHAIN.
-    raw = _complete_via_chain(
-        chain_role="decompose",
-        system=DECOMPOSE_SYSTEM,
-        messages=[{"role": "user", "content": user_message}],
-        max_tokens=4000,
-    )
-    parsed = _extract_json_object(raw)
-    sections = _extract_sections_payload(parsed)
     if not isinstance(sections, list):
         raise ValueError(
-            "OpenAI decomposition response did not include a valid sections list. "
-            f"Top-level keys: {sorted(parsed.keys())[:12]}"
+            f"Decomposition response did not include a valid sections list for pages {page_start}–{page_end}."
         )
+
+    # Normalize page numbers to absolute textbook pages when the model
+    # returns local segment pages (1..span) instead of absolute pages.
+    span = page_end - page_start + 1
+    for sec in sections:
+        ps = sec.get("page_start")
+        pe = sec.get("page_end")
+        if isinstance(ps, int) and 1 <= ps <= span:
+            sec["page_start"] = ps + page_start - 1
+        if isinstance(pe, int) and 1 <= pe <= span:
+            sec["page_end"] = pe + page_start - 1
     return sections
 
 

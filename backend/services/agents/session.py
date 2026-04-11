@@ -1,8 +1,8 @@
 """
 AgentSession — per-WebSocket-session orchestrator.
 
-Wires the agent trio (TeacherAgent, LessonPlannerAgent, SearchAgent) to the
-WebSocket transport.
+Wires the teaching agent (TeacherAgent + decompose.py + SearchAgent) to
+the WebSocket transport.
 
 Concurrency model (Plan B, Commit 2):
   - ``run_turn`` is async-native and runs on the event loop.
@@ -37,7 +37,7 @@ from ..voice.config import KOKORO_SAMPLE_RATE, DEFAULT_KOKORO_VOICE
 from ...app_state import app_state
 from .callbacks import AgentCallbacks
 from .curriculum import Curriculum
-from .planner_agent import LessonPlannerAgent
+from .decompose import decompose_full_pdf
 from .search_agent import SearchAgent
 from .teacher_agent import TeacherAgent
 
@@ -46,9 +46,11 @@ class AgentSession:
     """
     Per-WebSocket-session orchestrator.
 
-    Holds a TeacherAgent (teaching loop), a LessonPlannerAgent (PDF
-    decomposition), and a SearchAgent (web search for planning), and bridges
-    their synchronous callbacks to async WebSocket sends.
+    Holds a TeacherAgent (teaching loop) and a SearchAgent (web search
+    for decomposition), and bridges their synchronous callbacks to async
+    WebSocket sends.  PDF decomposition is handled by the module-level
+    ``decompose.decompose_full_pdf`` function directly — see
+    ``decompose_pdf()`` below.
 
     Parameters
     ----------
@@ -126,23 +128,16 @@ class AgentSession:
         # Single source of truth: model_chains.py defines TEACH_CHAIN /
         # DECOMPOSE_CHAIN / etc.  build_chain() handles fallback wiring,
         # API key lookup from env vars, and source-specific construction.
-        # The legacy `teach_llm_provider`/`teach_llm_model`/`openai_*`
-        # constructor params are kept on the signature for backwards
-        # compat with callers but are no longer consulted.
-        from .model_chains import TEACH_CHAIN, DECOMPOSE_CHAIN
+        from .model_chains import DECOMPOSE_CHAIN, TEACH_CHAIN
         from .model_config import build_chain
 
         llm_provider = build_chain(TEACH_CHAIN)
-        decompose_provider = build_chain(DECOMPOSE_CHAIN)
-
-        search_agent = SearchAgent(on_token_usage=self._on_token_usage)
-
-        self._planner = LessonPlannerAgent(
-            llm_provider=decompose_provider,
-            openai_max_input_chars=max(1000, int(openai_decompose_max_input_chars)),
-            search_agent=search_agent,
-            on_token_usage=self._on_token_usage,
-        )
+        # Plan B follow-up B3: decomposition lives in decompose.py now.
+        # We store the provider + max_input_chars + search agent as
+        # per-session state and call decompose_full_pdf() in decompose_pdf().
+        self._decompose_provider = build_chain(DECOMPOSE_CHAIN)
+        self._decompose_max_input_chars = max(1000, int(openai_decompose_max_input_chars))
+        self._search_agent = SearchAgent(on_token_usage=self._on_token_usage)
 
         # ── Build callbacks ──────────────────────────────────────────────────
         callbacks = AgentCallbacks(
@@ -346,12 +341,25 @@ class AgentSession:
         on_progress: Callable[[str], None] | None = None,
         student_goal: str | None = None,
     ) -> Curriculum:
-        """Decompose a PDF into a Curriculum in a thread pool."""
+        """Decompose a PDF into a Curriculum in a thread pool.
+
+        Plan B follow-up B3: delegates to ``decompose.decompose_full_pdf``
+        (the canonical entry point shared with course_authoring's
+        background job path).
+        """
         cancel_event = threading.Event()
         try:
             async with asyncio.timeout(600):  # 10 minutes; parallel segments are much faster
                 return await asyncio.to_thread(
-                    self._planner.decompose, pdf_path, on_progress, student_goal, cancel_event
+                    decompose_full_pdf,
+                    pdf_path=pdf_path,
+                    llm_provider=self._decompose_provider,
+                    search_agent=self._search_agent,
+                    student_goal=student_goal,
+                    on_progress=on_progress,
+                    cancel_event=cancel_event,
+                    max_input_chars=self._decompose_max_input_chars,
+                    on_token_usage=self._on_token_usage,
                 )
         except TimeoutError:
             cancel_event.set()

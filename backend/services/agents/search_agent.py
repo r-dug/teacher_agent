@@ -30,7 +30,7 @@ class SearchAgent(Agent):
 
     Wraps OpenAI's Responses API ``web_search`` built-in tool to retrieve
     factual summaries from public sources.  Can be used standalone or as
-    a dependency of other agents (e.g. LessonPlannerAgent).
+    a dependency of other agents (e.g. the decompose pipeline).
 
     Plan B follow-up A2: model and config come from
     ``SEARCH_CHAIN.primary`` in ``model_chains.py``.  Use

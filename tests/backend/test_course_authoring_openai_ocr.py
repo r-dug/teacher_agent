@@ -1,12 +1,11 @@
-"""Tests for OpenAI decomposition OCR fallback on image-only pages."""
+"""Tests for chapter decomposition OCR fallback on image-only pages."""
 
 from __future__ import annotations
-
-import json
 
 import fitz
 import pytest
 
+import backend.services.agents.decompose as decompose_mod
 import backend.services.documents.course_authoring as course_authoring
 
 
@@ -20,7 +19,7 @@ def _write_image_only_pdf(path) -> None:
         doc.close()
 
 
-def test_openai_decompose_uses_ocr_fallback_when_no_text(tmp_path, monkeypatch):
+def test_decompose_chapter_uses_ocr_fallback_when_no_text(tmp_path, monkeypatch):
     rel = "u/course_sources/image_only.pdf"
     full = tmp_path / rel
     full.parent.mkdir(parents=True, exist_ok=True)
@@ -30,46 +29,47 @@ def test_openai_decompose_uses_ocr_fallback_when_no_text(tmp_path, monkeypatch):
     monkeypatch.setattr(course_authoring.settings, "OPENAI_DECOMPOSE_ENABLE_VISION_OCR", True)
 
     ocr_called = {"value": False}
+    from_text_called = {"value": False}
 
     def _fake_ocr(**_kwargs):
         ocr_called["value"] = True
         return ["[Page 1]\nScanned textbook content."]
 
-    def _fake_chat(**_kwargs):
-        return json.dumps(
+    def _fake_from_text(**kwargs):
+        from_text_called["value"] = True
+        # Verify the OCR'd text reached the decompose helper.
+        assert "Scanned textbook content." in kwargs["text"]
+        return None, [
             {
-                "sections": [
-                    {
-                        "title": "OCR Section",
-                        "content": "Scanned textbook content.",
-                        "key_concepts": ["kana"],
-                        "page_start": 1,
-                        "page_end": 1,
-                    }
-                ]
+                "title": "OCR Section",
+                "content": "Scanned textbook content.",
+                "key_concepts": ["kana"],
+                "page_start": 1,
+                "page_end": 1,
             }
-        )
+        ]
 
     monkeypatch.setattr(course_authoring, "_openai_ocr_page_texts_sync", _fake_ocr)
-    # Plan B follow-up A2: _openai_chat_text_sync was replaced by
-    # _complete_via_chain which routes through LLMProvider.complete().
-    monkeypatch.setattr(course_authoring, "_complete_via_chain", _fake_chat)
+    # B3: course_authoring delegates to decompose_from_text for OCR-extracted text.
+    monkeypatch.setattr(decompose_mod, "decompose_from_text", _fake_from_text)
 
-    sections = course_authoring._decompose_chapter_openai_sync(
+    sections = course_authoring._decompose_chapter_sync(
         source_pdf_rel=rel,
         page_start=1,
         page_end=1,
         total_pages=1,
         objectives_prompt="",
+        decompose_provider="openai",
         decompose_model="gpt-4o-mini",
     )
 
     assert ocr_called["value"] is True
+    assert from_text_called["value"] is True
     assert len(sections) == 1
     assert sections[0]["title"] == "OCR Section"
 
 
-def test_openai_decompose_raises_without_ocr_fallback(tmp_path, monkeypatch):
+def test_decompose_chapter_raises_without_ocr_fallback(tmp_path, monkeypatch):
     rel = "u/course_sources/image_only.pdf"
     full = tmp_path / rel
     full.parent.mkdir(parents=True, exist_ok=True)
@@ -79,12 +79,13 @@ def test_openai_decompose_raises_without_ocr_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr(course_authoring.settings, "OPENAI_DECOMPOSE_ENABLE_VISION_OCR", False)
 
     with pytest.raises(ValueError, match="No extractable text found"):
-        course_authoring._decompose_chapter_openai_sync(
+        course_authoring._decompose_chapter_sync(
             source_pdf_rel=rel,
             page_start=1,
             page_end=1,
             total_pages=1,
             objectives_prompt="",
+            decompose_provider="openai",
             decompose_model="gpt-4o-mini",
         )
 
