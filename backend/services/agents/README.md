@@ -120,7 +120,7 @@ The teaching prompt is rebuilt every LLM call with current section content, task
 
 ## Callbacks
 
-`TeachingCallbacks` (`callbacks.py`) groups all event hooks as optional callables. Key ones:
+`AgentCallbacks` (`callbacks.py`) groups all event hooks as optional callables. Key ones:
 
 | Callback | Fired When |
 |----------|------------|

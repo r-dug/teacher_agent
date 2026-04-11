@@ -1,10 +1,10 @@
 """AgentCallbacks — groups all event hooks passed to an LLM-powered agent.
 
-Plan B Commit 5 renames the old ``TeachingCallbacks`` to ``AgentCallbacks``;
-``TeachingCallbacks`` is preserved as an alias for backwards compatibility.
-The new name reflects that this dataclass is suitable for any LLM-powered
-agent (not just the teaching agent) — the same shape would serve a planner
-agent or any future agent that uses tools and emits streaming output.
+Plan B Commit 5 + F1 (post-Plan-B follow-up) renamed the old
+``TeachingCallbacks`` to ``AgentCallbacks`` everywhere.  The name reflects
+that this dataclass is suitable for any LLM-powered agent (not just the
+teaching agent) — the same shape would serve a planner agent or any
+future agent that uses tools and emits streaming output.
 
 Plan B (Commit 2+): interactive tool callbacks are async and the agent
 ``await``s them directly.  Internally each one creates a future registered
@@ -43,8 +43,7 @@ class AgentCallbacks:
     Pass an instance to TeacherAgent (or any future agent) instead of 20+
     individual keyword args.  Every field defaults to None (no-op).
 
-    Plan B Commit 5: renamed from ``TeachingCallbacks``.  The old name is
-    kept as an alias below for backwards compatibility.
+    Renamed from ``TeachingCallbacks`` in Plan B Commit 5 + F1.
     """
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
@@ -109,11 +108,3 @@ class AgentCallbacks:
     on_error: Callable[[str], None] | None = None
     # Distillation: (system_prompt, messages_snapshot, tools, model)
     on_turn_logged: Callable[[str, list[dict], list[dict], str], None] | None = None
-
-
-# Backwards-compat alias.  Plan B Commit 5 renamed the canonical class to
-# ``AgentCallbacks`` (since this dataclass is suitable for any LLM-powered
-# agent, not just the teaching agent), but every existing import in the
-# codebase still uses ``TeachingCallbacks``.  Keep the alias indefinitely;
-# call sites can migrate at their own pace.
-TeachingCallbacks = AgentCallbacks

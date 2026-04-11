@@ -27,7 +27,7 @@ from ...db.util import _strip_dangling_tool_use
 from ..voice.config import KOKORO_SAMPLE_RATE
 from ..voice.phonetics import ACCENT_PROFILES, DEFAULT_ACCENT, IPA_REFERENCE, replace_roman_numerals
 from .agent import Agent
-from .callbacks import TeachingCallbacks
+from .callbacks import AgentCallbacks
 from .config import DEFAULT_LLM_MODEL
 from .curriculum import Curriculum
 from .prompts.persona import CONDENSE_EPISODE_SYSTEM, GENERATE_INSTRUCTIONS_SYSTEM
@@ -59,7 +59,7 @@ class TeacherAgent(Agent):
     def __init__(
         self,
         llm_provider: LLMProvider,
-        callbacks: TeachingCallbacks,
+        callbacks: AgentCallbacks,
         tts_providers: list | None = None,
         tts_voice: str = "",
         model: str = DEFAULT_LLM_MODEL,

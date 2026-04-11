@@ -10,7 +10,7 @@ from collections.abc import Callable
 import numpy as np
 
 from ..voice.config import KOKORO_SAMPLE_RATE
-from .callbacks import TeachingCallbacks
+from .callbacks import AgentCallbacks
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ class TTSPipeline:
     def __init__(
         self,
         providers: list,
-        callbacks: TeachingCallbacks,
+        callbacks: AgentCallbacks,
         preprocess_fn: Callable[[str], str] | None = None,
         tts_voice: str = "",
     ) -> None:
@@ -42,7 +42,7 @@ class TTSPipeline:
             providers: Ordered list of TTS provider instances, each with a
                 .synthesize(text, voice) method.  Tried in sequence; once a
                 provider fails it is skipped for the rest of the turn.
-            callbacks: TeachingCallbacks with on_chunk_ready, on_audio_chunk, etc.
+            callbacks: AgentCallbacks with on_chunk_ready, on_audio_chunk, etc.
             preprocess_fn: If provided, called on text before synthesis when the
                 provider sets requires_preprocessing=True.
             tts_voice: Initial voice identifier passed to synthesize().

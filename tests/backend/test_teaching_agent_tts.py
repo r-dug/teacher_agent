@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from backend.services.agents.callbacks import TeachingCallbacks
+from backend.services.agents.callbacks import AgentCallbacks
 from backend.services.agents.curriculum import Curriculum
 from backend.services.agents.providers.base import LLMProvider, LLMTurnResult
 from backend.services.agents.teacher_agent import TeacherAgent
@@ -113,14 +113,14 @@ class _FakeLLMProvider(LLMProvider):
 def _make_agent(
     llm_provider=None,
     tts_providers: list | None = None,
-    callbacks: TeachingCallbacks | None = None,
+    callbacks: AgentCallbacks | None = None,
     preprocess_fn=None,
 ) -> TeacherAgent:
     """Construct a minimal TeacherAgent for testing."""
     if llm_provider is None:
         llm_provider = _FakeLLMProvider("hello")
 
-    cb = callbacks or TeachingCallbacks()
+    cb = callbacks or AgentCallbacks()
 
     agent = TeacherAgent(
         llm_provider=llm_provider,
@@ -156,7 +156,7 @@ def test_openai_failure_falls_back_to_kokoro_for_remaining_chunks():
     audio_chunks: list[np.ndarray] = []
     errors: list[str] = []
 
-    cb = TeachingCallbacks(
+    cb = AgentCallbacks(
         on_audio_chunk=lambda audio, _turn, _chunk: audio_chunks.append(audio),
         on_error=lambda message: errors.append(message),
     )
@@ -206,7 +206,7 @@ def test_tts_provider_returns_tool_use_and_records_usage():
         usage=usage,
     )
 
-    cb = TeachingCallbacks(
+    cb = AgentCallbacks(
         on_audio_chunk=lambda audio, _turn, _chunk: audio_chunks.append(audio),
         on_token_usage=lambda call_type, model, u: token_usage_calls.append((call_type, model, u)),
     )

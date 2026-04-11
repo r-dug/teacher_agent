@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from backend.services.agents.callbacks import TeachingCallbacks
+from backend.services.agents.callbacks import AgentCallbacks
 from backend.services.agents.curriculum import Curriculum
 from backend.services.agents.providers.base import LLMProvider, LLMTurnResult
 from backend.services.agents.teacher_agent import TeacherAgent
@@ -142,11 +142,11 @@ def _tool(name: str, tool_id: str = "t1", **kwargs) -> SimpleNamespace:
 
 def _make_agent(
     responses: list[tuple[str, SimpleNamespace | None]],
-    callbacks: TeachingCallbacks | None = None,
+    callbacks: AgentCallbacks | None = None,
 ) -> TeacherAgent:
     agent = TeacherAgent(
         llm_provider=_SequentialLLMProvider(responses),
-        callbacks=callbacks or TeachingCallbacks(),
+        callbacks=callbacks or AgentCallbacks(),
         tts_providers=[_NoopTTS()],
         model="test-model",
     )
@@ -185,7 +185,7 @@ class TestMarkTaskComplete:
         task_events: list[Curriculum] = []
         turn_complete = []
 
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_task_complete=lambda c: task_events.append(c),
             on_turn_complete=lambda audio: turn_complete.append(True),
         )
@@ -211,7 +211,7 @@ class TestMarkTaskComplete:
     async def test_quiz_auto_passes_pending_concepts(self):
         """Marking the quiz auto-passes any remaining pending concepts and advances."""
         advanced = []
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_task_complete=lambda c: None,
             on_section_advanced=lambda c: advanced.append(c.idx),
             on_turn_complete=lambda audio: None,
@@ -242,7 +242,7 @@ class TestMarkTaskComplete:
 
     async def test_already_passed_is_idempotent(self):
         """Marking an already-passed task succeeds idempotently and continues."""
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_task_complete=lambda c: None,
             on_turn_complete=lambda audio: None,
         )
@@ -272,7 +272,7 @@ class TestUnmarkTask:
     async def test_resets_passed_task(self):
         """unmark_task resets a passed concept back to pending."""
         task_events: list[Curriculum] = []
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_task_complete=lambda c: task_events.append(c),
             on_turn_complete=lambda audio: None,
         )
@@ -301,7 +301,7 @@ class TestAutoAdvance:
     async def test_advances_when_all_tasks_done(self):
         """If all tasks are done at the start of run_turn, auto-advance."""
         advanced: list[int] = []
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_section_advanced=lambda c: advanced.append(c.idx),
             on_turn_complete=lambda audio: None,
         )
@@ -324,7 +324,7 @@ class TestAutoAdvance:
     async def test_curriculum_complete_on_last_section(self):
         """Auto-advance on the final section fires on_curriculum_complete."""
         completed = []
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_curriculum_complete=lambda: completed.append(True),
         )
         cur = _make_curriculum(num_concepts=1, num_sections=1)
@@ -343,7 +343,7 @@ class TestAutoAdvance:
     async def test_no_advance_when_tasks_pending(self):
         """If tasks are still pending, no auto-advance occurs."""
         advanced: list[int] = []
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_section_advanced=lambda c: advanced.append(c.idx),
             on_turn_complete=lambda audio: None,
         )
@@ -375,7 +375,7 @@ class TestAutoAdvance:
                 ("Student is quick learner.", None),  # condensation response
                 ("Welcome to section two.", None),    # teaching response
             ],
-            callbacks=TeachingCallbacks(
+            callbacks=AgentCallbacks(
                 on_section_advanced=lambda c: None,
                 on_turn_complete=lambda audio: None,
             ),
@@ -411,7 +411,7 @@ class TestInteractiveTools:
         We register a fake async callback that ignores its argument and
         returns ``callback_result`` regardless of which tool was invoked.
         """
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_turn_complete=lambda audio: None,
             on_open_interactive_tool=_make_async_callback(callback_result),
             image_gen_enabled=True,
@@ -585,7 +585,7 @@ class TestNonBlockingTools:
         async def _fake_search(query: str, section_idx: int) -> str:
             return f"Found: {query} in section {section_idx}"
 
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_search_content=_fake_search,
             on_turn_complete=lambda audio: None,
         )
@@ -620,7 +620,7 @@ class TestNonBlockingTools:
 
     async def test_search_content_no_results(self):
         """search_content returns fallback when nothing found."""
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_search_content=_make_async_search(""),
             on_turn_complete=lambda audio: None,
         )
@@ -653,7 +653,7 @@ class TestNonBlockingTools:
     async def test_play_audio_clip_continues_loop(self):
         """play_audio_clip is non-blocking and loops back for more."""
         played = []
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_play_audio_clip=lambda text, speed: played.append(text),
             on_turn_complete=lambda audio: None,
         )
@@ -676,7 +676,7 @@ class TestNonBlockingTools:
     async def test_show_progress_fires_callback(self):
         """show_progress fires the callback (non-blocking display)."""
         progress_shown = []
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_show_progress=lambda c: progress_shown.append(True),
             on_turn_complete=lambda audio: None,
         )
@@ -711,7 +711,7 @@ class TestMultiToolDispatch:
         progress_shown: list = []
         task_events: list = []
 
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_show_progress=lambda c: progress_shown.append(True),
             on_task_complete=lambda c: task_events.append(c),
             on_turn_complete=lambda audio: None,
@@ -758,7 +758,7 @@ class TestMultiToolDispatch:
         """search_content followed by show_quiz in one LLM response: pure
         tool runs immediately, interactive tool awaits the student, both
         tool_results appear in one user message."""
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_search_content=_make_async_search("Found relevant content."),
             on_open_interactive_tool=_make_async_routed_callback({
                 "show_quiz": {"selected_index": 0, "correct": True},
@@ -825,7 +825,7 @@ class TestMultiToolDispatch:
             # An infinite future — only cancellation will unblock this.
             await _asyncio.Event().wait()
 
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_open_interactive_tool=_hangs_forever,
             on_turn_complete=lambda audio: None,
         )
@@ -855,7 +855,7 @@ class TestMultiToolDispatch:
     async def test_two_interactive_tools_in_one_response(self):
         """Two interactive tools in one response: both dispatched
         sequentially, both tool_results in one user message."""
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_open_interactive_tool=_make_async_routed_callback({
                 "text_input": {"answer": "first"},
                 "show_quiz": {"selected_index": 1, "correct": False},
@@ -905,7 +905,7 @@ class TestEdgeCases:
     async def test_no_tool_ends_turn(self):
         """LLM returns text only — turn ends immediately."""
         turn_complete = []
-        cb = TeachingCallbacks(on_turn_complete=lambda audio: turn_complete.append(True))
+        cb = AgentCallbacks(on_turn_complete=lambda audio: turn_complete.append(True))
 
         agent = _make_agent(
             responses=[("Let me explain this concept.", None)],
@@ -937,7 +937,7 @@ class TestEdgeCases:
 
         task_events = []
         advanced = []
-        cb = TeachingCallbacks(
+        cb = AgentCallbacks(
             on_task_complete=lambda c: task_events.append(True),
             on_section_advanced=lambda c: advanced.append(c.idx),
             on_turn_complete=lambda audio: None,
@@ -965,7 +965,7 @@ class TestEdgeCases:
         """run_turn adds a default user message if messages list is empty."""
         agent = _make_agent(
             responses=[("Hello, let's begin.", None)],
-            callbacks=TeachingCallbacks(on_turn_complete=lambda audio: None),
+            callbacks=AgentCallbacks(on_turn_complete=lambda audio: None),
         )
 
         cur = _make_curriculum()

@@ -35,7 +35,7 @@ import numpy as np
 
 from ..voice.config import KOKORO_SAMPLE_RATE, DEFAULT_KOKORO_VOICE
 from ...app_state import app_state
-from .callbacks import TeachingCallbacks
+from .callbacks import AgentCallbacks
 from .config import DEFAULT_LLM_MODEL
 from .curriculum import Curriculum
 from .planner_agent import LessonPlannerAgent
@@ -204,7 +204,7 @@ class AgentSession:
         )
 
         # ── Build callbacks ──────────────────────────────────────────────────
-        callbacks = TeachingCallbacks(
+        callbacks = AgentCallbacks(
             on_turn_start=self._on_turn_start,
             on_text_chunk=self._on_text_chunk,
             on_chunk_ready=self._on_chunk_ready,
