@@ -692,6 +692,11 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
       tts_format: persona?.tts_format ?? '',
       tts_prep_prompt: persona?.tts_prep_prompt ?? '',
     })
+    // When the persona specifies a voice, sync the voice dropdown so
+    // the set_voice effect doesn't immediately override it.
+    if (persona?.tts_voice) {
+      setSelectedVoiceId(persona.tts_voice)
+    }
     if (!lessonStartedRef.current) {
       lessonStartedRef.current = true
       send({ event: 'start_lesson' })
