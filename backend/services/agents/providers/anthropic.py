@@ -52,6 +52,7 @@ class AnthropicLLMProvider(LLMProvider):
         messages: list[dict],
         tools: list[dict],
         on_text_chunk: Callable[[str], None] | None = None,
+        cache_key: str | None = None,  # noqa: ARG002 — no Anthropic equivalent; positional cache_control is used instead
     ) -> LLMTurnResult:
         effective_model = (model or "").strip() or self._model
         stream_kwargs: dict = dict(
@@ -100,6 +101,7 @@ class AnthropicLLMProvider(LLMProvider):
         system: str,
         messages: list[dict],
         max_tokens: int = 1024,
+        cache_key: str | None = None,  # noqa: ARG002 — no Anthropic equivalent
     ) -> tuple[str, object]:
         """Plan B follow-up A2: non-streaming text completion.
 

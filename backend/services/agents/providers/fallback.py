@@ -46,6 +46,7 @@ class FallbackLLMProvider(LLMProvider):
         messages: list[dict],
         tools: list[dict],
         on_text_chunk: Callable[[str], None] | None = None,
+        cache_key: str | None = None,
     ) -> LLMTurnResult:
         errors: list[str] = []
         last_exc: Exception | None = None
@@ -57,7 +58,9 @@ class FallbackLLMProvider(LLMProvider):
                     pmodel,
                 )
             try:
-                return provider.do_turn(pmodel, system, messages, tools, on_text_chunk)
+                return provider.do_turn(
+                    pmodel, system, messages, tools, on_text_chunk, cache_key=cache_key,
+                )
             except Exception as exc:
                 log.warning(
                     "[FallbackLLMProvider] %s (model=%s) failed: %s",
@@ -78,6 +81,7 @@ class FallbackLLMProvider(LLMProvider):
         system: str,
         messages: list[dict],
         max_tokens: int = 1024,
+        cache_key: str | None = None,
     ) -> tuple[str, object]:
         """Try each provider's ``complete()`` in sequence."""
         errors: list[str] = []
@@ -90,7 +94,9 @@ class FallbackLLMProvider(LLMProvider):
                     pmodel,
                 )
             try:
-                return provider.complete(system, messages, max_tokens=max_tokens)
+                return provider.complete(
+                    system, messages, max_tokens=max_tokens, cache_key=cache_key,
+                )
             except Exception as exc:
                 log.warning(
                     "[FallbackLLMProvider] complete: %s (model=%s) failed: %s",

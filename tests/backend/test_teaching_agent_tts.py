@@ -91,10 +91,10 @@ class _FakeLLMProvider(LLMProvider):
     def model(self) -> str:
         return "fake-model"
 
-    def complete(self, system, messages, max_tokens=1024):
+    def complete(self, system, messages, max_tokens=1024, cache_key=None):
         return (self._content_text, self._usage)
 
-    def do_turn(self, model, system, messages, tools, on_text_chunk=None):
+    def do_turn(self, model, system, messages, tools, on_text_chunk=None, cache_key=None):
         # Simulate streaming by calling on_text_chunk per chunk
         if on_text_chunk:
             for chunk in self._content_text.split("\n"):

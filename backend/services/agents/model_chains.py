@@ -27,6 +27,12 @@ from .model_config import ChainSpec, ModelSpec
 # ─────────────────────────────────────────────────────────────────────────────
 
 # OpenAI flagship model — vision, tools, prefix caching, 128K context.
+#
+# Cache Plan C2: ``cache_retention="24h"`` opts into the Responses API
+# extended-retention tier.  Same price as the default 5-10 min window;
+# the longer TTL matters for teaching sessions where a student might
+# pause for 10-30 min between turns (phone call, bathroom break, etc.)
+# without the cached prefix being evicted.
 GPT_4O = ModelSpec(
     name="gpt-4o",
     source="openai",
@@ -39,6 +45,7 @@ GPT_4O = ModelSpec(
         "api_key_env": "OPENAI_API_KEY",
         "timeout_s": 30.0,
         "max_retries": 1,
+        "cache_retention": "24h",
     },
 )
 

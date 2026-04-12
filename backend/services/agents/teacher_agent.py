@@ -106,6 +106,7 @@ class TeacherAgent(Agent):
         model: str = DEFAULT_LLM_MODEL,
         accent: str = DEFAULT_ACCENT,
         memory_strategy: str = "turn_summaries",
+        cache_key: str | None = None,
     ) -> None:
         super().__init__(model)
         self._provider = llm_provider
@@ -113,6 +114,11 @@ class TeacherAgent(Agent):
         self.tts_providers: list = list(tts_providers) if tts_providers else []
         self.tts_voice = tts_voice
         self.accent = accent
+        # Cache Plan C2: stable per-session cache key, forwarded to the
+        # OpenAI Responses API as ``prompt_cache_key``.  Ignored by the
+        # Anthropic provider (no equivalent in the stable API).  Callers
+        # usually pass something like ``f"enrollment-{enrollment_id}"``.
+        self._cache_key = cache_key
         self._memory_strategy_name = memory_strategy
         self._memory_strategy = MEMORY_STRATEGIES.get(memory_strategy, strategy_turn_summaries)
         self._turn_tracker = TurnSummaryTracker()
@@ -700,6 +706,7 @@ class TeacherAgent(Agent):
                 messages=llm_messages,
                 tools=tools,
                 on_text_chunk=_on_text_chunk,
+                cache_key=self._cache_key,
             )
             _llm_elapsed = time.monotonic() - _llm_t0
 

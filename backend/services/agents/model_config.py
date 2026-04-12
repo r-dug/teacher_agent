@@ -149,12 +149,20 @@ def _build_one(spec: ModelSpec) -> "LLMProvider":
                 f"OpenAILLMProvider for model {spec.name!r} requires "
                 f"environment variable {api_key_env!r} to be set."
             )
+        # Cache Plan C2: pass ``cache_retention`` only when the spec
+        # declares the model supports prefix caching.  Defensive —
+        # keeps the provider from sending a parameter the backend might
+        # reject on older or cache-incompatible models.
+        cache_retention = (
+            cfg.get("cache_retention") if spec.supports_prefix_cache else None
+        )
         return OpenAILLMProvider(
             model=spec.name,
             api_key=api_key,
             timeout_seconds=float(cfg.get("timeout_s", 30.0)),
             max_retries=int(cfg.get("max_retries", 1)),
             base_url=cfg.get("base_url"),
+            cache_retention=cache_retention,
         )
 
     if spec.source in ("ollama", "vllm"):
@@ -168,6 +176,8 @@ def _build_one(spec: ModelSpec) -> "LLMProvider":
                 f"{spec.source} provider for model {spec.name!r} requires "
                 f"source_config['base_url'] to be set."
             )
+        # Local OpenAI-compatible endpoints typically don't implement the
+        # Responses API caching controls, so skip cache_retention for them.
         return OpenAILLMProvider(
             model=spec.name,
             api_key=cfg.get("api_key", "not-required"),

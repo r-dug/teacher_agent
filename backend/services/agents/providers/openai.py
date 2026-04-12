@@ -52,6 +52,7 @@ class OpenAILLMProvider(LLMProvider):
         timeout_seconds: float = 60.0,
         max_retries: int = 2,
         base_url: str | None = None,
+        cache_retention: str | None = None,
     ) -> None:
         if not (model or "").strip():
             raise ValueError("OpenAILLMProvider requires a non-empty model.")
@@ -67,6 +68,11 @@ class OpenAILLMProvider(LLMProvider):
         self._client = openai.OpenAI(**kwargs)
         self._base_url = base_url
         self._model = model
+        # Cache Plan C2: per-instance retention policy.  None = SDK
+        # default (``in_memory``, 5-10 min TTL).  ``"24h"`` opts into
+        # the extended retention tier (same price).  Stored as the
+        # string the Responses API accepts directly.
+        self._cache_retention = cache_retention
 
     @property
     def name(self) -> str:
@@ -83,6 +89,7 @@ class OpenAILLMProvider(LLMProvider):
         messages: list[dict],
         tools: list[dict],
         on_text_chunk: Callable[[str], None] | None = None,
+        cache_key: str | None = None,
     ) -> LLMTurnResult:
         effective_model = (model or "").strip() or self._model
 
@@ -108,6 +115,11 @@ class OpenAILLMProvider(LLMProvider):
         }
         if translated_tools:
             kwargs["tools"] = translated_tools
+        # Cache Plan C2: wire the Responses API caching controls.
+        if cache_key:
+            kwargs["prompt_cache_key"] = cache_key
+        if self._cache_retention:
+            kwargs["prompt_cache_retention"] = self._cache_retention
 
         log.info(
             "OpenAILLMProvider.do_turn: opening Responses stream "
@@ -250,6 +262,7 @@ class OpenAILLMProvider(LLMProvider):
         system: str,
         messages: list[dict],
         max_tokens: int = 1024,
+        cache_key: str | None = None,
     ) -> tuple[str, object]:
         """Plan B follow-up A2: non-streaming text completion via Responses API.
 
@@ -258,13 +271,19 @@ class OpenAILLMProvider(LLMProvider):
         helper in course_authoring.py).  Returns ``(text, usage)``.
         """
         input_items = _messages_to_openai_responses(messages)
-        response = self._client.responses.create(
-            model=self._model,
-            instructions=system,
-            input=input_items,
-            max_output_tokens=max_tokens,
-            stream=False,
-        )
+        create_kwargs: dict = {
+            "model": self._model,
+            "instructions": system,
+            "input": input_items,
+            "max_output_tokens": max_tokens,
+            "stream": False,
+        }
+        # Cache Plan C2: wire the Responses API caching controls.
+        if cache_key:
+            create_kwargs["prompt_cache_key"] = cache_key
+        if self._cache_retention:
+            create_kwargs["prompt_cache_retention"] = self._cache_retention
+        response = self._client.responses.create(**create_kwargs)
 
         # Responses API exposes a convenient `output_text` property that
         # concatenates all output text items.

@@ -89,11 +89,11 @@ class _SequentialLLMProvider(LLMProvider):
     def model(self) -> str:
         return "fake-model"
 
-    def complete(self, system, messages, max_tokens=1024):
+    def complete(self, system, messages, max_tokens=1024, cache_key=None):
         # Tests don't currently exercise complete() — return a stub.
         return ("OK.", _DEFAULT_USAGE)
 
-    def do_turn(self, model, system, messages, tools, on_text_chunk=None):
+    def do_turn(self, model, system, messages, tools, on_text_chunk=None, cache_key=None):
         self._call_count += 1
         if self._queue:
             text, raw_tool = self._queue.pop(0)

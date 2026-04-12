@@ -177,6 +177,13 @@ class AgentSession:
         # ── Assemble TeacherAgent ────────────────────────────────────────────
         tts_providers = [p for p in [tts_provider, fallback_tts_provider] if p is not None]
         from ...config import settings as _settings
+        # Cache Plan C2: stable per-enrollment cache key for the OpenAI
+        # Responses API ``prompt_cache_key``.  One key per enrollment so
+        # two students on the same lesson don't clobber each other's
+        # cache routing.  When enrollment_id is unset (anonymous/test
+        # paths) we fall back to ``None`` and the provider just uses
+        # the prefix hash alone.
+        _cache_key = f"enrollment-{enrollment_id}" if enrollment_id else None
         self._teacher = TeacherAgent(
             llm_provider=llm_provider,
             callbacks=callbacks,
@@ -184,6 +191,7 @@ class AgentSession:
             tts_voice=tts_voice,
             model=llm_provider.model,
             memory_strategy=_settings.MEMORY_STRATEGY,
+            cache_key=_cache_key,
         )
 
     def set_distillation_logger(self, logger) -> None:

@@ -53,6 +53,7 @@ class LLMProvider(ABC):
         messages: list[dict],
         tools: list[dict],
         on_text_chunk: Callable[[str], None] | None = None,
+        cache_key: str | None = None,
     ) -> LLMTurnResult:
         """Execute one streaming LLM turn and return a normalised result.
 
@@ -65,6 +66,13 @@ class LLMProvider(ABC):
                 provider-specific built-in tools (e.g. ``{"type":
                 "web_search"}`` for OpenAI Responses API).
             on_text_chunk: Optional callback fired per streamed text delta.
+            cache_key: Optional stable per-session key.  OpenAI translates
+                this to ``prompt_cache_key`` on the Responses API call,
+                which improves cache hit routing when many requests share
+                a long prefix.  Anthropic currently has no equivalent in
+                the stable Messages API and silently ignores this param
+                — its ``cache_control`` breakpoints are positional, not
+                key-based.
 
         Returns:
             LLMTurnResult with all content blocks normalised to plain dicts.
@@ -77,6 +85,7 @@ class LLMProvider(ABC):
         system: str,
         messages: list[dict],
         max_tokens: int = 1024,
+        cache_key: str | None = None,
     ) -> tuple[str, object]:
         """Execute one non-streaming text-only completion.
 
@@ -94,6 +103,8 @@ class LLMProvider(ABC):
             max_tokens: Maximum output tokens (named ``max_tokens`` for
                 Anthropic compatibility; OpenAI maps it to
                 ``max_output_tokens``).
+            cache_key: Optional stable per-session key.  See ``do_turn``
+                for semantics.
 
         Returns:
             (text, usage) — the assistant's text response, plus a usage
