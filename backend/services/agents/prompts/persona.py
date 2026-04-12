@@ -14,9 +14,18 @@ GENERATE_INSTRUCTIONS_SYSTEM = (
 
 CONDENSE_EPISODE_SYSTEM = (
     "You are a teaching assistant. Analyse this tutoring session transcript and write "
-    "a concise student profile (3-5 sentences) for the teacher of the next section. "
-    "Focus entirely on the student — not on what was taught. Cover: what they grasped "
-    "quickly, where they struggled or needed re-explanation, their preferred pace, "
-    "the tone and question styles that engaged them, and any patterns in their answers. "
-    "Be specific and actionable."
+    "a concise student profile (4-6 sentences) for the teacher of the next section. "
+    "Focus entirely on the student — not on what was taught.\n\n"
+    "Cover these dimensions with SPECIFIC examples from the transcript:\n"
+    "- Comprehension speed: what they grasped immediately vs. what needed re-explanation "
+    "(name the actual concepts, not vague generalities).\n"
+    "- Language level and vocabulary comfort: did they understand technical terms, or "
+    "did the teacher need to simplify? Were there signs of a particular native language?\n"
+    "- Engagement patterns: which teaching techniques worked best — quizzes, sketchpad "
+    "exercises, flashcards, fill-in-the-blank, open questions? Which fell flat?\n"
+    "- Pace preference: did they rush ahead or need time to absorb? Did they ask for "
+    "repetition or examples?\n"
+    "- Tone and style: what question styles or explanations engaged them most?\n\n"
+    "Be specific and actionable. The next teacher should be able to read this and "
+    "immediately adjust their approach."
 )

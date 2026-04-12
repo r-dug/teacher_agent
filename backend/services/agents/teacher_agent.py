@@ -841,6 +841,7 @@ class TeacherAgent(Agent):
                         copy.deepcopy(messages),
                         tools,
                         self._model,
+                        voice_instructions=self._tts_instructions,
                     )
                 except Exception:
                     log.debug("on_turn_logged callback failed", exc_info=True)

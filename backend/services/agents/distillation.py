@@ -39,6 +39,7 @@ def make_turn_logger(
         messages: list[dict],
         tools: list[dict],
         model: str,
+        voice_instructions: str | None = None,
     ) -> None:
         try:
             oai_messages = _messages_to_openai(messages)
@@ -50,6 +51,8 @@ def make_turn_logger(
                 "messages": [{"role": "system", "content": system_prompt}] + oai_messages,
                 "tools": OPENAI_TOOLS,
             }
+            if voice_instructions:
+                record["voice_instructions"] = voice_instructions
 
             OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
             path = OUTPUT_DIR / "live_turns.jsonl"
