@@ -6,13 +6,21 @@
 # OpenAI `/v1/audio/speech` PCM output is 24 kHz mono.
 OPENAI_TTS_SAMPLE_RATE = 24000
 
-# Representative voice IDs for gpt-4o-mini-tts.
+# Built-in voice IDs for gpt-4o-mini-tts / tts-1 / tts-1-hd.
+# Source: https://platform.openai.com/docs/guides/text-to-speech
+# OpenAI has no programmatic endpoint to list voices — this is
+# hand-maintained from the docs.  Last verified 2026-04-12.
 OPENAI_TTS_VOICES: dict[str, str] = {
     "alloy": "en",
     "ash": "en",
     "ballad": "en",
+    "cedar": "en",
     "coral": "en",
     "echo": "en",
+    "fable": "en",
+    "marin": "en",
+    "nova": "en",
+    "onyx": "en",
     "sage": "en",
     "shimmer": "en",
     "verse": "en",
