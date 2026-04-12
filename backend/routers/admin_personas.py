@@ -16,7 +16,7 @@ router = APIRouter(prefix="/admin/personas", tags=["admin-personas"])
 
 Conn = Annotated[asyncpg.Connection, Depends(db.get)]
 
-_MAX_PERSONA_INSTRUCTIONS = 1_000
+_MAX_PERSONA_INSTRUCTIONS = 5_000
 _MAX_VOICE_INSTRUCTIONS = 500
 
 

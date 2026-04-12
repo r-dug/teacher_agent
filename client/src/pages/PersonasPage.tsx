@@ -13,6 +13,26 @@ function slug(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
 }
 
+const TEMPLATE_VARIABLES = [
+  { name: '{{identity}}', desc: 'Default teacher identity line' },
+  { name: '{{goal}}', desc: 'Student lesson goal block' },
+  { name: '{{constraints}}', desc: 'Voice format, conciseness, no-answer-leaking rules' },
+  { name: '{{grounding}}', desc: 'Teach-from-section, search_content guidance' },
+  { name: '{{progress}}', desc: '"Section N of M. Already covered: ..."' },
+  { name: '{{section}}', desc: 'Full section content with title + page range' },
+  { name: '{{section_title}}', desc: 'Just the section title' },
+  { name: '{{section_content}}', desc: 'Just the section body text' },
+  { name: '{{page_range}}', desc: '"(pages N-M)" or empty' },
+  { name: '{{concepts}}', desc: 'KEY CONCEPTS TO VERIFY list' },
+  { name: '{{approach}}', desc: 'TEACH/MARK/QUIZ loop instructions' },
+  { name: '{{tools}}', desc: 'Tool-principles block (sketchpad, quiz, etc.)' },
+  { name: '{{title}}', desc: 'Lesson title' },
+  { name: '{{covered}}', desc: 'Covered section titles' },
+]
+
+const MAX_INSTRUCTIONS = 5000
+const MAX_VOICE = 500
+
 export function PersonasPage({ sessionId, isAdmin }: PersonasPageProps) {
   const navigate = useNavigate()
   const [personas, setPersonas] = useState<Persona[]>([])
@@ -28,11 +48,14 @@ export function PersonasPage({ sessionId, isAdmin }: PersonasPageProps) {
   const [formInstructions, setFormInstructions] = useState('')
   const [formVoiceInstructions, setFormVoiceInstructions] = useState('')
   const [saving, setSaving] = useState(false)
+  const [showVarRef, setShowVarRef] = useState(false)
 
   // Course assignment saving
   const [savingCourseId, setSavingCourseId] = useState<string | null>(null)
 
   const headers = { 'X-Session-Id': sessionId }
+
+  const isTemplate = formInstructions.includes('{{') && formInstructions.includes('}}')
 
   const loadData = useCallback(async () => {
     setLoading(true)
@@ -67,6 +90,7 @@ export function PersonasPage({ sessionId, isAdmin }: PersonasPageProps) {
     setFormName('')
     setFormInstructions('')
     setFormVoiceInstructions('')
+    setShowVarRef(false)
   }
 
   function openEdit(p: Persona) {
@@ -75,6 +99,7 @@ export function PersonasPage({ sessionId, isAdmin }: PersonasPageProps) {
     setFormName(p.name)
     setFormInstructions(p.instructions)
     setFormVoiceInstructions(p.voice_instructions || '')
+    setShowVarRef(false)
   }
 
   function closeForm() {
@@ -92,7 +117,12 @@ export function PersonasPage({ sessionId, isAdmin }: PersonasPageProps) {
         const resp = await fetch('/api/admin/personas', {
           method: 'POST',
           headers: { ...headers, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: slug(formName), name: formName.trim(), instructions: formInstructions.trim(), voice_instructions: formVoiceInstructions.trim() }),
+          body: JSON.stringify({
+            id: slug(formName),
+            name: formName.trim(),
+            instructions: formInstructions.trim(),
+            voice_instructions: formVoiceInstructions.trim(),
+          }),
         })
         if (!resp.ok) {
           const d = await resp.json().catch(() => ({}))
@@ -103,7 +133,11 @@ export function PersonasPage({ sessionId, isAdmin }: PersonasPageProps) {
         const resp = await fetch(`/api/admin/personas/${editId}`, {
           method: 'PATCH',
           headers: { ...headers, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: formName.trim(), instructions: formInstructions.trim(), voice_instructions: formVoiceInstructions.trim() }),
+          body: JSON.stringify({
+            name: formName.trim(),
+            instructions: formInstructions.trim(),
+            voice_instructions: formVoiceInstructions.trim(),
+          }),
         })
         if (!resp.ok) {
           const d = await resp.json().catch(() => ({}))
@@ -168,6 +202,10 @@ export function PersonasPage({ sessionId, isAdmin }: PersonasPageProps) {
     return 'User'
   }
 
+  function hasTemplate(p: Persona): boolean {
+    return p.instructions.includes('{{') && p.instructions.includes('}}')
+  }
+
   if (!isAdmin) return null
 
   return (
@@ -209,41 +247,97 @@ export function PersonasPage({ sessionId, isAdmin }: PersonasPageProps) {
 
         {/* Create / Edit Form */}
         {formMode !== 'closed' && (
-          <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--muted)/0.3)] p-4 space-y-3">
+          <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--muted)/0.3)] p-4 space-y-4">
             <h3 className="text-sm font-medium">
               {formMode === 'create' ? 'Create Persona' : `Edit: ${editId}`}
             </h3>
+
+            {/* Name */}
             <div>
               <label className="block text-xs text-[hsl(var(--muted-foreground))] mb-1">Name</label>
               <input
                 className="w-full rounded border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-2 py-1.5 text-sm"
                 value={formName}
                 onChange={(e) => setFormName(e.target.value)}
-                placeholder="e.g. Socratic"
+                placeholder="e.g. Socratic, Tsumugi, NYC Tutor"
               />
             </div>
+
+            {/* System Prompt / Instructions */}
             <div>
-              <label className="block text-xs text-[hsl(var(--muted-foreground))] mb-1">
-                Teaching Instructions <span className="text-[hsl(var(--muted-foreground))]">({formInstructions.length}/1000)</span>
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs text-[hsl(var(--muted-foreground))]">
+                  System Prompt
+                  <span className="ml-1.5 text-[hsl(var(--muted-foreground))]">({formInstructions.length}/{MAX_INSTRUCTIONS})</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  {isTemplate && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[hsl(var(--primary)/0.15)] text-[hsl(var(--primary))]">
+                      Template mode
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setShowVarRef(!showVarRef)}
+                    className="text-[10px] px-1.5 py-0.5 rounded border border-[hsl(var(--border))] text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))] transition-colors"
+                  >
+                    {showVarRef ? 'Hide' : 'Show'} variables
+                  </button>
+                </div>
+              </div>
+
+              {/* Variable reference panel */}
+              {showVarRef && (
+                <div className="mb-2 rounded border border-[hsl(var(--border))] bg-[hsl(var(--background))] p-3 text-xs space-y-1.5">
+                  <p className="text-[hsl(var(--muted-foreground))]">
+                    Use <code className="text-[hsl(var(--primary))]">{'{{variable}}'}</code> placeholders to build a full system prompt template.
+                    Without placeholders, the text is used as a personality description injected into the default template.
+                  </p>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 mt-2">
+                    {TEMPLATE_VARIABLES.map((v) => (
+                      <div key={v.name} className="flex gap-2">
+                        <code
+                          className="text-[hsl(var(--primary))] cursor-pointer hover:underline shrink-0"
+                          title="Click to insert"
+                          onClick={() => setFormInstructions((prev) => prev + v.name)}
+                        >
+                          {v.name}
+                        </code>
+                        <span className="text-[hsl(var(--muted-foreground))] truncate">{v.desc}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <textarea
-                className="w-full rounded border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-2 py-1.5 text-sm min-h-[80px] resize-y"
+                className="w-full rounded border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-2 py-1.5 text-sm min-h-[180px] resize-y font-mono"
                 value={formInstructions}
-                onChange={(e) => setFormInstructions(e.target.value.slice(0, 1000))}
-                placeholder="Describe how the teaching agent should behave..."
+                onChange={(e) => setFormInstructions(e.target.value.slice(0, MAX_INSTRUCTIONS))}
+                placeholder={
+                  'Simple mode:\n'
+                  + 'You are Tsumugi, a brilliant but condescending tutor...\n\n'
+                  + 'Template mode (use {{variables}}):\n'
+                  + 'You are a custom teacher.\n{{constraints}}\n{{section}}\n{{approach}}\n{{tools}}'
+                }
               />
             </div>
+
+            {/* Voice Instructions */}
             <div>
               <label className="block text-xs text-[hsl(var(--muted-foreground))] mb-1">
-                Voice Instructions <span className="text-[hsl(var(--muted-foreground))]">({formVoiceInstructions.length}/500)</span>
+                Voice Instructions
+                <span className="ml-1.5 text-[hsl(var(--muted-foreground))]">({formVoiceInstructions.length}/{MAX_VOICE})</span>
               </label>
               <textarea
                 className="w-full rounded border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-2 py-1.5 text-sm min-h-[60px] resize-y"
                 value={formVoiceInstructions}
-                onChange={(e) => setFormVoiceInstructions(e.target.value.slice(0, 500))}
-                placeholder="Speaking style for TTS (e.g. &quot;Speak warmly, slow pace, native Japanese accent on vocabulary&quot;)"
+                onChange={(e) => setFormVoiceInstructions(e.target.value.slice(0, MAX_VOICE))}
+                placeholder='Speaking style for TTS (e.g. "Speak warmly, slow pace, native Japanese accent on vocabulary")'
               />
             </div>
+
+            {/* Actions */}
             <div className="flex gap-2">
               <Button size="sm" onClick={() => void handleSave()} disabled={saving || !formName.trim() || !formInstructions.trim()}>
                 {saving ? 'Saving...' : formMode === 'create' ? 'Create' : 'Save'}
@@ -263,8 +357,8 @@ export function PersonasPage({ sessionId, isAdmin }: PersonasPageProps) {
               <thead>
                 <tr className="border-b border-[hsl(var(--border))] bg-[hsl(var(--muted))]">
                   <th className="px-3 py-2 text-left font-medium text-[hsl(var(--muted-foreground))]">Name</th>
-                  <th className="px-3 py-2 text-left font-medium text-[hsl(var(--muted-foreground))]">Teaching Instructions</th>
-                  <th className="px-3 py-2 text-left font-medium text-[hsl(var(--muted-foreground))]">Voice Instructions</th>
+                  <th className="px-3 py-2 text-left font-medium text-[hsl(var(--muted-foreground))]">System Prompt</th>
+                  <th className="px-3 py-2 text-left font-medium text-[hsl(var(--muted-foreground))]">Voice</th>
                   <th className="px-3 py-2 text-left font-medium text-[hsl(var(--muted-foreground))]">Type</th>
                   <th className="px-3 py-2 text-right font-medium text-[hsl(var(--muted-foreground))]">Actions</th>
                 </tr>
@@ -286,13 +380,20 @@ export function PersonasPage({ sessionId, isAdmin }: PersonasPageProps) {
                 )}
                 {!loading && personas.map((p) => (
                   <tr key={p.id} className="border-b border-[hsl(var(--border))] last:border-0">
-                    <td className="px-3 py-2 font-medium">{p.name}</td>
+                    <td className="px-3 py-2 font-medium whitespace-nowrap">
+                      {p.name}
+                      {hasTemplate(p) && (
+                        <span className="ml-1.5 text-[10px] px-1 py-0.5 rounded bg-[hsl(var(--primary)/0.12)] text-[hsl(var(--primary))]">
+                          tmpl
+                        </span>
+                      )}
+                    </td>
                     <td className="px-3 py-2 max-w-xs">
                       <span className="text-[hsl(var(--muted-foreground))] line-clamp-2 text-xs">
                         {p.instructions}
                       </span>
                     </td>
-                    <td className="px-3 py-2 max-w-xs">
+                    <td className="px-3 py-2 max-w-[10rem]">
                       <span className="text-[hsl(var(--muted-foreground))] line-clamp-2 text-xs">
                         {p.voice_instructions || <span className="italic">none</span>}
                       </span>
