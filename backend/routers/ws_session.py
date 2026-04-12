@@ -593,6 +593,11 @@ async def _receive_loop(
             if voice:
                 state.agent_session.set_tts_voice(voice)
 
+        elif event == "set_voice_instructions":
+            state.agent_session.set_tts_instructions(
+                msg.get("instructions") or None,
+            )
+
         elif event == "set_voice_arch":
             requested_arch = _normalize_voice_arch(msg.get("voice_arch"))
             if requested_arch is None:

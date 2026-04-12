@@ -24,7 +24,7 @@ class _PrimaryFailingProvider:
         self.calls = 0
         self.inputs: list[str] = []
 
-    def synthesize(self, text: str, voice: str) -> TTSSynthesisResult:
+    def synthesize(self, text: str, voice: str, instructions: str | None = None) -> TTSSynthesisResult:
         self.calls += 1
         self.inputs.append(text)
         raise RuntimeError("openai unavailable")
@@ -37,7 +37,7 @@ class _FallbackProvider:
         self.calls = 0
         self.inputs: list[str] = []
 
-    def synthesize(self, text: str, voice: str) -> TTSSynthesisResult:
+    def synthesize(self, text: str, voice: str, instructions: str | None = None) -> TTSSynthesisResult:
         self.calls += 1
         self.inputs.append(text)
         return TTSSynthesisResult(
@@ -57,7 +57,7 @@ class _GoodTTSProvider:
         self.calls = 0
         self.inputs: list[str] = []
 
-    def synthesize(self, text: str, voice: str) -> TTSSynthesisResult:
+    def synthesize(self, text: str, voice: str, instructions: str | None = None) -> TTSSynthesisResult:
         self.calls += 1
         self.inputs.append(text)
         return TTSSynthesisResult(

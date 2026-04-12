@@ -71,7 +71,8 @@ class KokoroTTSProvider:
             return voice
         return self.default_voice
 
-    def synthesize(self, text: str, voice: str | None = None) -> TTSSynthesisResult:
+    def synthesize(self, text: str, voice: str | None = None, instructions: str | None = None) -> TTSSynthesisResult:
+        # Kokoro is a local model — no instructions parameter support.
         if self._pipeline is None:
             raise RuntimeError("Kokoro pipeline is not loaded.")
 
@@ -135,16 +136,22 @@ class OpenAITTSProvider:
             return voice
         return self.default_voice
 
-    def synthesize(self, text: str, voice: str | None = None) -> TTSSynthesisResult:
+    def synthesize(self, text: str, voice: str | None = None, instructions: str | None = None) -> TTSSynthesisResult:
         resolved_voice = self.resolve_voice(voice)
         t0 = time.monotonic()
 
-        response = self._client.audio.speech.create(
-            model=self.model,
-            voice=resolved_voice,
-            input=text,
-            response_format=self.response_format,
-        )
+        create_kwargs: dict = {
+            "model": self.model,
+            "voice": resolved_voice,
+            "input": text,
+            "response_format": self.response_format,
+        }
+        # The `instructions` parameter controls speaking style (tone,
+        # pace, emotion) and is only supported on gpt-4o-mini-tts.
+        # tts-1 / tts-1-hd silently ignore it.
+        if instructions:
+            create_kwargs["instructions"] = instructions
+        response = self._client.audio.speech.create(**create_kwargs)
         audio_bytes = response.read()
 
         audio, sample_rate = _decode_openai_audio(audio_bytes, self.response_format)

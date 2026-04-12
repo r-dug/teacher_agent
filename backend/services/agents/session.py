@@ -214,6 +214,10 @@ class AgentSession:
         """Update the TTS voice used by the teacher agent."""
         self._teacher.set_tts_voice(voice)
 
+    def set_tts_instructions(self, instructions: str | None) -> None:
+        """Update the TTS speaking-style instructions (gpt-4o-mini-tts)."""
+        self._teacher.set_tts_instructions(instructions)
+
     def set_image_gen_enabled(self, enabled: bool) -> None:
         """Toggle the image-generation capability flag at runtime.
 

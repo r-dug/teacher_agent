@@ -36,21 +36,28 @@ class TTSPipeline:
         callbacks: AgentCallbacks,
         preprocess_fn: Callable[[str], str] | None = None,
         tts_voice: str = "",
+        tts_instructions: str | None = None,
     ) -> None:
         """
         Args:
             providers: Ordered list of TTS provider instances, each with a
-                .synthesize(text, voice) method.  Tried in sequence; once a
-                provider fails it is skipped for the rest of the turn.
+                .synthesize(text, voice, instructions) method.  Tried in
+                sequence; once a provider fails it is skipped for the rest
+                of the turn.
             callbacks: AgentCallbacks with on_chunk_ready, on_audio_chunk, etc.
             preprocess_fn: If provided, called on text before synthesis when the
                 provider sets requires_preprocessing=True.
             tts_voice: Initial voice identifier passed to synthesize().
+            tts_instructions: Optional speaking-style instructions for
+                gpt-4o-mini-tts (tone, pace, emotion).  Passed to
+                synthesize() on providers that support it; ignored by
+                providers that don't (e.g. Kokoro).
         """
         self._providers = list(providers)
         self._callbacks = callbacks
         self._preprocess_fn = preprocess_fn
         self.tts_voice = tts_voice
+        self.tts_instructions = tts_instructions
 
         # Per-turn state — initialised by start_turn()
         self._tts_queue: queue.Queue | None = None
@@ -131,7 +138,10 @@ class TTSPipeline:
                 provider = self._providers[idx]
                 try:
                     speakable = self._prepare_text(provider, text)
-                    result = provider.synthesize(speakable, self.tts_voice)
+                    result = provider.synthesize(
+                        speakable, self.tts_voice,
+                        instructions=self.tts_instructions,
+                    )
                     break
                 except Exception as exc:
                     provider_idx = idx + 1

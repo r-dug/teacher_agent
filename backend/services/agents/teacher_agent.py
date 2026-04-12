@@ -103,6 +103,7 @@ class TeacherAgent(Agent):
         callbacks: AgentCallbacks,
         tts_providers: list | None = None,
         tts_voice: str = "",
+        tts_instructions: str | None = None,
         model: str = DEFAULT_LLM_MODEL,
         accent: str = DEFAULT_ACCENT,
         memory_strategy: str = "turn_summaries",
@@ -113,6 +114,11 @@ class TeacherAgent(Agent):
         self._callbacks = callbacks
         self.tts_providers: list = list(tts_providers) if tts_providers else []
         self.tts_voice = tts_voice
+        # Voice instructions for gpt-4o-mini-tts: controls speaking style
+        # (tone, pace, emotion, accent).  Set per-session via the WS
+        # ``set_voice_instructions`` event or from the persona's
+        # ``voice_instructions`` field in the DB.
+        self._tts_instructions = tts_instructions
         self.accent = accent
         # Cache Plan C2: stable per-session cache key, forwarded to the
         # OpenAI Responses API as ``prompt_cache_key``.  Ignored by the
@@ -199,6 +205,9 @@ class TeacherAgent(Agent):
 
     def set_tts_voice(self, voice: str) -> None:
         self.tts_voice = voice
+
+    def set_tts_instructions(self, instructions: str | None) -> None:
+        self._tts_instructions = instructions or None
 
     def cache_stats(self) -> dict:
         """Cache Plan C3 + pricing consolidation: cumulative cache telemetry.
@@ -711,6 +720,7 @@ class TeacherAgent(Agent):
             callbacks=self._callbacks,
             preprocess_fn=self.prepare_for_tts,
             tts_voice=self.tts_voice,
+            tts_instructions=self._tts_instructions,
         )
         # Reuse the same turn_idx across chained tool iterations so the client
         # treats all LLM calls within one run_turn() as a single visible turn.
