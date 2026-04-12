@@ -218,6 +218,15 @@ class AgentSession:
         """Update the TTS speaking-style instructions (gpt-4o-mini-tts)."""
         self._teacher.set_tts_instructions(instructions)
 
+    def set_tts_speed(self, speed: float) -> None:
+        self._teacher.set_tts_speed(speed)
+
+    def set_tts_format(self, fmt: str) -> None:
+        self._teacher.set_tts_format(fmt)
+
+    def set_tts_prep_prompt(self, prompt: str | None) -> None:
+        self._teacher.set_tts_prep_prompt(prompt)
+
     def set_image_gen_enabled(self, enabled: bool) -> None:
         """Toggle the image-generation capability flag at runtime.
 

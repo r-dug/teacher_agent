@@ -123,6 +123,9 @@ class TeacherAgent(Agent):
         # ``set_voice_instructions`` event or from the persona's
         # ``voice_instructions`` field in the DB.
         self._tts_instructions = tts_instructions
+        self._tts_speed: float | None = None
+        self._tts_format: str | None = None
+        self._tts_prep_prompt: str | None = None
         self.accent = accent
         # Cache Plan C2: stable per-session cache key, forwarded to the
         # OpenAI Responses API as ``prompt_cache_key``.  Ignored by the
@@ -212,6 +215,15 @@ class TeacherAgent(Agent):
 
     def set_tts_instructions(self, instructions: str | None) -> None:
         self._tts_instructions = instructions or None
+
+    def set_tts_speed(self, speed: float) -> None:
+        self._tts_speed = speed
+
+    def set_tts_format(self, fmt: str) -> None:
+        self._tts_format = fmt or None
+
+    def set_tts_prep_prompt(self, prompt: str | None) -> None:
+        self._tts_prep_prompt = prompt or None
 
     def cache_stats(self) -> dict:
         """Cache Plan C3 + pricing consolidation: cumulative cache telemetry.
@@ -623,6 +635,29 @@ class TeacherAgent(Agent):
             self._callbacks.on_token_usage("generate_instructions", provider.model, usage)
         return text
 
+    def _custom_tts_prep(self, text: str, prep_prompt: str) -> str:
+        """Run a custom per-persona TTS preprocessing pass.
+
+        Uses the persona's ``tts_prep_prompt`` as the system prompt for
+        a small LLM call that transforms the text before TTS synthesis.
+        """
+        text = re.sub(r"\*+", "", text)
+        try:
+            from .model_chains import TTS_PREP_CHAIN
+            from .model_config import build_chain
+
+            provider = build_chain(TTS_PREP_CHAIN)
+            result, usage = provider.complete(
+                system=prep_prompt,
+                messages=[{"role": "user", "content": text}],
+                max_tokens=2048,
+            )
+            if self._callbacks.on_token_usage:
+                self._callbacks.on_token_usage("tts_prep", provider.model, usage)
+            return result or text
+        except Exception:
+            return text
+
     def prepare_for_tts(self, text: str) -> str:
         """Annotate text with IPA for Kokoro TTS.
 
@@ -793,12 +828,23 @@ class TeacherAgent(Agent):
         call_type = _call_type or ("intro_turn" if _tools == [] else "teach_turn")
 
         # Build TTSPipeline for this turn.
+        # Preprocessing is enabled when the persona has a custom prep
+        # prompt OR when the provider requires it (e.g. Kokoro IPA).
+        # The custom prep prompt overrides the default IPA annotator.
+        _prep_fn = self.prepare_for_tts
+        if self._tts_prep_prompt:
+            _custom_prompt = self._tts_prep_prompt
+            def _prep_fn(text: str) -> str:
+                return self._custom_tts_prep(text, _custom_prompt)
         tts = TTSPipeline(
             providers=self.tts_providers,
             callbacks=self._callbacks,
-            preprocess_fn=self.prepare_for_tts,
+            preprocess_fn=_prep_fn,
             tts_voice=self.tts_voice,
             tts_instructions=self._tts_instructions,
+            tts_speed=self._tts_speed,
+            tts_format=self._tts_format,
+            preprocess_enabled=bool(self._tts_prep_prompt),
         )
         # Reuse the same turn_idx across chained tool iterations so the client
         # treats all LLM calls within one run_turn() as a single visible turn.

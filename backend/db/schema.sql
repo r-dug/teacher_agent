@@ -62,6 +62,10 @@ CREATE TABLE IF NOT EXISTS personas (
     name               TEXT NOT NULL,
     instructions       TEXT NOT NULL,
     voice_instructions TEXT NOT NULL DEFAULT '',
+    tts_voice          TEXT NOT NULL DEFAULT '',
+    tts_speed          REAL NOT NULL DEFAULT 1.0,
+    tts_format         TEXT NOT NULL DEFAULT '',
+    tts_prep_prompt    TEXT NOT NULL DEFAULT '',
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

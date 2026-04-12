@@ -869,10 +869,18 @@ async def create_persona(
     name: str,
     instructions: str,
     voice_instructions: str = "",
+    tts_voice: str = "",
+    tts_speed: float = 1.0,
+    tts_format: str = "",
+    tts_prep_prompt: str = "",
 ) -> Row:
     await conn.execute(
-        "INSERT INTO personas (id, user_id, name, instructions, voice_instructions) VALUES ($1, $2, $3, $4, $5)",
+        """INSERT INTO personas
+           (id, user_id, name, instructions, voice_instructions,
+            tts_voice, tts_speed, tts_format, tts_prep_prompt)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
         persona_id, user_id, name, instructions, voice_instructions,
+        tts_voice, tts_speed, tts_format, tts_prep_prompt,
     )
     return _row(await conn.fetchrow("SELECT * FROM personas WHERE id = $1", persona_id))  # type: ignore[return-value]
 
@@ -898,10 +906,17 @@ async def update_persona(
     name: str,
     instructions: str,
     voice_instructions: str = "",
+    tts_voice: str = "",
+    tts_speed: float = 1.0,
+    tts_format: str = "",
+    tts_prep_prompt: str = "",
 ) -> Row | None:
     await conn.execute(
-        "UPDATE personas SET name = $1, instructions = $2, voice_instructions = $3 WHERE id = $4",
-        name, instructions, voice_instructions, persona_id,
+        """UPDATE personas SET name = $1, instructions = $2, voice_instructions = $3,
+           tts_voice = $4, tts_speed = $5, tts_format = $6, tts_prep_prompt = $7
+           WHERE id = $8""",
+        name, instructions, voice_instructions,
+        tts_voice, tts_speed, tts_format, tts_prep_prompt, persona_id,
     )
     return _row(await conn.fetchrow("SELECT * FROM personas WHERE id = $1", persona_id))
 

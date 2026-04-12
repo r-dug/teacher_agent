@@ -56,7 +56,7 @@ export type ClientEvent =
       student_order?: number[]
     } }
   | { event: 'run_code'; invocation_id: string; code: string; runtime: string }
-  | { event: 'set_instructions'; instructions: string; voice_instructions?: string }
+  | { event: 'set_instructions'; instructions: string; voice_instructions?: string; tts_voice?: string; tts_speed?: number; tts_format?: string; tts_prep_prompt?: string }
   | { event: 'set_voice'; voice: string }
   | { event: 'set_voice_arch'; voice_arch: string }
   | { event: 'set_stt_provider'; provider: string }
@@ -182,6 +182,10 @@ export interface Persona {
   name: string
   instructions: string
   voice_instructions: string
+  tts_voice: string
+  tts_speed: number
+  tts_format: string
+  tts_prep_prompt: string
   user_id: string | null
 }
 

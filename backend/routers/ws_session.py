@@ -582,12 +582,24 @@ async def _receive_loop(
 
         elif event == "set_instructions":
             state.agent_instructions = msg.get("instructions") or None
-            # Voice instructions can ride alongside persona instructions
-            # so the client can set both in a single WS event (typical
-            # when a persona is selected from the admin panel).
+            # All persona TTS fields ride alongside instructions so
+            # the client can set everything in a single WS event when
+            # a persona is selected from the admin panel.
             voice_instr = msg.get("voice_instructions")
             if voice_instr is not None:
                 state.agent_session.set_tts_instructions(voice_instr or None)
+            tts_voice = msg.get("tts_voice")
+            if tts_voice:
+                state.agent_session.set_tts_voice(tts_voice)
+            tts_speed = msg.get("tts_speed")
+            if tts_speed is not None and tts_speed != 1.0:
+                state.agent_session.set_tts_speed(float(tts_speed))
+            tts_format = msg.get("tts_format")
+            if tts_format:
+                state.agent_session.set_tts_format(tts_format)
+            tts_prep = msg.get("tts_prep_prompt")
+            if tts_prep is not None:
+                state.agent_session.set_tts_prep_prompt(tts_prep or None)
             if state.realtime_stream_connected:
                 try:
                     await _send_realtime_session_update(state)

@@ -37,6 +37,9 @@ class TTSPipeline:
         preprocess_fn: Callable[[str], str] | None = None,
         tts_voice: str = "",
         tts_instructions: str | None = None,
+        tts_speed: float | None = None,
+        tts_format: str | None = None,
+        preprocess_enabled: bool = False,
     ) -> None:
         """
         Args:
@@ -45,19 +48,24 @@ class TTSPipeline:
                 sequence; once a provider fails it is skipped for the rest
                 of the turn.
             callbacks: AgentCallbacks with on_chunk_ready, on_audio_chunk, etc.
-            preprocess_fn: If provided, called on text before synthesis when the
-                provider sets requires_preprocessing=True.
+            preprocess_fn: If provided, called on text before synthesis.
             tts_voice: Initial voice identifier passed to synthesize().
             tts_instructions: Optional speaking-style instructions for
-                gpt-4o-mini-tts (tone, pace, emotion).  Passed to
-                synthesize() on providers that support it; ignored by
-                providers that don't (e.g. Kokoro).
+                gpt-4o-mini-tts (tone, pace, emotion).
+            tts_speed: Optional speech speed override (0.25–4.0).
+            tts_format: Optional audio format override (opus, mp3, wav, etc.).
+            preprocess_enabled: When True, preprocess_fn runs on every chunk
+                regardless of provider.  When False, only runs if the
+                provider sets requires_preprocessing=True (Kokoro IPA).
         """
         self._providers = list(providers)
         self._callbacks = callbacks
         self._preprocess_fn = preprocess_fn
         self.tts_voice = tts_voice
         self.tts_instructions = tts_instructions
+        self.tts_speed = tts_speed
+        self.tts_format = tts_format
+        self._preprocess_enabled = preprocess_enabled
 
         # Per-turn state — initialised by start_turn()
         self._tts_queue: queue.Queue | None = None
@@ -115,7 +123,8 @@ class TTSPipeline:
     # ── internal workers ────────────────────────────────────────────────────────
 
     def _prepare_text(self, provider, text: str) -> str:
-        if getattr(provider, "requires_preprocessing", False) and self._preprocess_fn:
+        should_prep = self._preprocess_enabled or getattr(provider, "requires_preprocessing", False)
+        if should_prep and self._preprocess_fn:
             return self._preprocess_fn(text)
         return text
 
@@ -138,9 +147,15 @@ class TTSPipeline:
                 provider = self._providers[idx]
                 try:
                     speakable = self._prepare_text(provider, text)
+                    synth_kwargs: dict = {}
+                    if self.tts_instructions:
+                        synth_kwargs["instructions"] = self.tts_instructions
+                    if self.tts_speed is not None:
+                        synth_kwargs["speed"] = self.tts_speed
+                    if self.tts_format:
+                        synth_kwargs["response_format"] = self.tts_format
                     result = provider.synthesize(
-                        speakable, self.tts_voice,
-                        instructions=self.tts_instructions,
+                        speakable, self.tts_voice, **synth_kwargs,
                     )
                     break
                 except Exception as exc:

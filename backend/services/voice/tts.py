@@ -71,8 +71,8 @@ class KokoroTTSProvider:
             return voice
         return self.default_voice
 
-    def synthesize(self, text: str, voice: str | None = None, instructions: str | None = None) -> TTSSynthesisResult:
-        # Kokoro is a local model — no instructions parameter support.
+    def synthesize(self, text: str, voice: str | None = None, **kwargs) -> TTSSynthesisResult:
+        # Kokoro is a local model — instructions/speed/format kwargs ignored.
         if self._pipeline is None:
             raise RuntimeError("Kokoro pipeline is not loaded.")
 
@@ -136,25 +136,32 @@ class OpenAITTSProvider:
             return voice
         return self.default_voice
 
-    def synthesize(self, text: str, voice: str | None = None, instructions: str | None = None) -> TTSSynthesisResult:
+    def synthesize(
+        self,
+        text: str,
+        voice: str | None = None,
+        instructions: str | None = None,
+        speed: float | None = None,
+        response_format: str | None = None,
+    ) -> TTSSynthesisResult:
         resolved_voice = self.resolve_voice(voice)
+        effective_format = response_format or self.response_format
         t0 = time.monotonic()
 
         create_kwargs: dict = {
             "model": self.model,
             "voice": resolved_voice,
             "input": text,
-            "response_format": self.response_format,
+            "response_format": effective_format,
         }
-        # The `instructions` parameter controls speaking style (tone,
-        # pace, emotion) and is only supported on gpt-4o-mini-tts.
-        # tts-1 / tts-1-hd silently ignore it.
         if instructions:
             create_kwargs["instructions"] = instructions
+        if speed is not None:
+            create_kwargs["speed"] = speed
         response = self._client.audio.speech.create(**create_kwargs)
         audio_bytes = response.read()
 
-        audio, sample_rate = _decode_openai_audio(audio_bytes, self.response_format)
+        audio, sample_rate = _decode_openai_audio(audio_bytes, effective_format)
         synthesis_ms = int((time.monotonic() - t0) * 1000)
         audio_seconds = len(audio) / max(1, sample_rate)
         estimated_cost = (audio_seconds / 60.0) * self.cost_per_minute_usd

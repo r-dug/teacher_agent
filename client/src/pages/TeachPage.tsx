@@ -683,7 +683,15 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
   useEffect(() => {
     if (wsStatus !== 'connected' || !personasReady) return
     const persona = personas.find((p) => p.id === selectedPersonaId)
-    send({ event: 'set_instructions', instructions: persona?.instructions ?? '', voice_instructions: persona?.voice_instructions ?? '' })
+    send({
+      event: 'set_instructions',
+      instructions: persona?.instructions ?? '',
+      voice_instructions: persona?.voice_instructions ?? '',
+      tts_voice: persona?.tts_voice ?? '',
+      tts_speed: persona?.tts_speed ?? 1.0,
+      tts_format: persona?.tts_format ?? '',
+      tts_prep_prompt: persona?.tts_prep_prompt ?? '',
+    })
     if (!lessonStartedRef.current) {
       lessonStartedRef.current = true
       send({ event: 'start_lesson' })

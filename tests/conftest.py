@@ -92,6 +92,12 @@ def _apply_schema():
             ALTER TABLE personas
             ADD COLUMN IF NOT EXISTS voice_instructions TEXT NOT NULL DEFAULT '';
         """)
+        cur.execute("""
+            ALTER TABLE personas ADD COLUMN IF NOT EXISTS tts_voice TEXT NOT NULL DEFAULT '';
+            ALTER TABLE personas ADD COLUMN IF NOT EXISTS tts_speed REAL NOT NULL DEFAULT 1.0;
+            ALTER TABLE personas ADD COLUMN IF NOT EXISTS tts_format TEXT NOT NULL DEFAULT '';
+            ALTER TABLE personas ADD COLUMN IF NOT EXISTS tts_prep_prompt TEXT NOT NULL DEFAULT '';
+        """)
     conn.close()
 
 

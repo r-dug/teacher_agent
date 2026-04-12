@@ -47,6 +47,10 @@ export function PersonasPage({ sessionId, isAdmin }: PersonasPageProps) {
   const [formName, setFormName] = useState('')
   const [formInstructions, setFormInstructions] = useState('')
   const [formVoiceInstructions, setFormVoiceInstructions] = useState('')
+  const [formTtsVoice, setFormTtsVoice] = useState('')
+  const [formTtsSpeed, setFormTtsSpeed] = useState(1.0)
+  const [formTtsFormat, setFormTtsFormat] = useState('')
+  const [formTtsPrepPrompt, setFormTtsPrepPrompt] = useState('')
   const [saving, setSaving] = useState(false)
   const [showVarRef, setShowVarRef] = useState(false)
 
@@ -90,6 +94,10 @@ export function PersonasPage({ sessionId, isAdmin }: PersonasPageProps) {
     setFormName('')
     setFormInstructions('')
     setFormVoiceInstructions('')
+    setFormTtsVoice('')
+    setFormTtsSpeed(1.0)
+    setFormTtsFormat('')
+    setFormTtsPrepPrompt('')
     setShowVarRef(false)
   }
 
@@ -99,6 +107,10 @@ export function PersonasPage({ sessionId, isAdmin }: PersonasPageProps) {
     setFormName(p.name)
     setFormInstructions(p.instructions)
     setFormVoiceInstructions(p.voice_instructions || '')
+    setFormTtsVoice(p.tts_voice || '')
+    setFormTtsSpeed(p.tts_speed ?? 1.0)
+    setFormTtsFormat(p.tts_format || '')
+    setFormTtsPrepPrompt(p.tts_prep_prompt || '')
     setShowVarRef(false)
   }
 
@@ -122,6 +134,10 @@ export function PersonasPage({ sessionId, isAdmin }: PersonasPageProps) {
             name: formName.trim(),
             instructions: formInstructions.trim(),
             voice_instructions: formVoiceInstructions.trim(),
+            tts_voice: formTtsVoice,
+            tts_speed: formTtsSpeed,
+            tts_format: formTtsFormat,
+            tts_prep_prompt: formTtsPrepPrompt.trim(),
           }),
         })
         if (!resp.ok) {
@@ -137,6 +153,10 @@ export function PersonasPage({ sessionId, isAdmin }: PersonasPageProps) {
             name: formName.trim(),
             instructions: formInstructions.trim(),
             voice_instructions: formVoiceInstructions.trim(),
+            tts_voice: formTtsVoice,
+            tts_speed: formTtsSpeed,
+            tts_format: formTtsFormat,
+            tts_prep_prompt: formTtsPrepPrompt.trim(),
           }),
         })
         if (!resp.ok) {
@@ -334,6 +354,65 @@ export function PersonasPage({ sessionId, isAdmin }: PersonasPageProps) {
                 value={formVoiceInstructions}
                 onChange={(e) => setFormVoiceInstructions(e.target.value.slice(0, MAX_VOICE))}
                 placeholder='Speaking style for TTS (e.g. "Speak warmly, slow pace, native Japanese accent on vocabulary")'
+              />
+            </div>
+
+            {/* TTS Parameters */}
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs text-[hsl(var(--muted-foreground))] mb-1">Voice</label>
+                <select
+                  className="w-full rounded border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-2 py-1.5 text-sm"
+                  value={formTtsVoice}
+                  onChange={(e) => setFormTtsVoice(e.target.value)}
+                >
+                  <option value="">Default</option>
+                  {['alloy','ash','ballad','cedar','coral','echo','fable','marin','nova','onyx','sage','shimmer','verse'].map(v => (
+                    <option key={v} value={v}>{v}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-[hsl(var(--muted-foreground))] mb-1">Speed ({formTtsSpeed.toFixed(2)})</label>
+                <input
+                  type="range"
+                  min="0.25"
+                  max="4.0"
+                  step="0.01"
+                  className="w-full"
+                  value={formTtsSpeed}
+                  onChange={(e) => setFormTtsSpeed(parseFloat(e.target.value))}
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[hsl(var(--muted-foreground))] mb-1">Format</label>
+                <select
+                  className="w-full rounded border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-2 py-1.5 text-sm"
+                  value={formTtsFormat}
+                  onChange={(e) => setFormTtsFormat(e.target.value)}
+                >
+                  <option value="">Default</option>
+                  <option value="opus">Opus</option>
+                  <option value="mp3">MP3</option>
+                  <option value="wav">WAV</option>
+                  <option value="aac">AAC</option>
+                  <option value="flac">FLAC</option>
+                  <option value="pcm16">PCM16</option>
+                </select>
+              </div>
+            </div>
+
+            {/* TTS Preprocessing */}
+            <div>
+              <label className="block text-xs text-[hsl(var(--muted-foreground))] mb-1">
+                Text Preprocessing Prompt
+                <span className="ml-1.5 text-[hsl(var(--muted-foreground))]">(optional — runs a small LLM pass on text before TTS)</span>
+              </label>
+              <textarea
+                className="w-full rounded border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-2 py-1.5 text-sm min-h-[60px] resize-y font-mono"
+                value={formTtsPrepPrompt}
+                onChange={(e) => setFormTtsPrepPrompt(e.target.value.slice(0, 2000))}
+                placeholder='Leave empty to skip preprocessing. Example: "Add phonetic hyphens to Japanese loanwords and spell out abbreviations for clearer TTS pronunciation."'
               />
             </div>
 
