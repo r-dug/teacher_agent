@@ -11,7 +11,6 @@
  *  └────────────────────────────────────┴──────────────────┘
  *
  * Overlays (conditional):
- *  - SlideViewer (when show_slide received)
  *  - Sketchpad (when open_sketchpad received)
  */
 
@@ -22,8 +21,8 @@ import { ArrowLeft, X, Menu, Loader2, VolumeX } from 'lucide-react'
 import { StatusBar } from '@/components/StatusBar'
 import { ConversationView, type Turn, type Figure } from '@/components/ConversationView'
 import { CurriculumPanel } from '@/components/CurriculumPanel'
-import { SlideViewer } from '@/components/SlideViewer'
 import { ImageViewer } from '@/components/ImageViewer'
+import { Celebration } from '@/components/Celebration'
 import { ZoomableImage } from '@/components/ZoomableImage'
 import { Sketchpad, type SketchpadPrefs } from '@/components/Sketchpad'
 import { CameraCapture } from '@/components/CameraCapture'
@@ -31,6 +30,12 @@ import { VideoCapture } from '@/components/VideoCapture'
 import { CodeEditor, type CodeOutput } from '@/components/CodeEditor'
 import { HtmlCssEditor } from '@/components/HtmlCssEditor'
 import { TimerExercise } from '@/components/TimerExercise'
+import { ProgressView } from '@/components/ProgressView'
+import { TextInputTool } from '@/components/TextInputTool'
+import { Quiz } from '@/components/Quiz'
+import { FillInTheBlank } from '@/components/FillInTheBlank'
+import { FlashcardDeck } from '@/components/FlashcardDeck'
+import { OrderingExercise } from '@/components/OrderingExercise'
 import { InputBar } from '@/components/InputBar'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
@@ -69,12 +74,6 @@ interface SketchpadState {
   imBg?: string
 }
 
-interface SlideState {
-  pageStart: number
-  pageEnd: number
-  caption?: string
-}
-
 export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = '' }: TeachPageProps) {
   const { lessonId = '' } = useParams<{ lessonId: string }>()
   const navigate = useNavigate()
@@ -85,7 +84,7 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
   const [curriculum, setCurriculum] = useState<CurriculumData | null>(null)
   const [currState, setCurrState] = useState<CurriculumState | null>(null)
   const [currComplete, setCurrComplete] = useState(false)
-  const [slide, setSlide] = useState<SlideState | null>(null)
+  const [celebration, setCelebration] = useState<{ points: number; reason: string } | null>(null)
   const [generatedImage, setGeneratedImage] = useState<{ imageUrl: string; caption: string } | null>(null)
   const [generatingImage, setGeneratingImage] = useState(false)
   const [sketchpad, setSketchpad] = useState<SketchpadState | null>(null)
@@ -97,6 +96,12 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
   const [htmlEditor, setHtmlEditor] = useState<{ prompt: string; starterHtml?: string; starterCss?: string; invocationId: string } | null>(null)
   const [drawingView, setDrawingView] = useState<{ dataUrl: string; prompt: string } | null>(null)
   const [timerExercise, setTimerExercise] = useState<{ prompt: string; invocationId: string; durationSeconds: number } | null>(null)
+  const [progressView, setProgressView] = useState<{ sections: Array<{ title: string; idx: number; completed: boolean }>; currentIdx: number; tasks: Array<{ concept: string; status: string }> } | null>(null)
+  const [textInput, setTextInput] = useState<{ prompt: string; placeholder?: string; multiline?: boolean; invocationId: string } | null>(null)
+  const [quiz, setQuiz] = useState<{ prompt: string; choices: Array<{ label: string; text: string }>; correctIndex: number; invocationId: string } | null>(null)
+  const [fillBlank, setFillBlank] = useState<{ prompt: string; template: string; answers: string[]; invocationId: string } | null>(null)
+  const [flashcards, setFlashcards] = useState<{ prompt: string; cards: Array<{ front: string; back: string }>; invocationId: string } | null>(null)
+  const [ordering, setOrdering] = useState<{ prompt: string; items: string[]; correctOrder: number[]; invocationId: string } | null>(null)
   const [imageGenAvailable, setImageGenAvailable] = useState(false)
   const [imageGenEnabled, setImageGenEnabled] = useState(false)
   const [lessonTitle, setLessonTitle] = useState<string>('')
@@ -138,6 +143,7 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
   const [personas, setPersonas] = useState<Persona[]>([])
   const [selectedPersonaId, setSelectedPersonaId] = useState<string>('')
   const [personasReady, setPersonasReady] = useState(false)
+  const personaInitRef = useRef(false)
   const lessonStartedRef = useRef(false)
 
   useEffect(() => {
@@ -149,10 +155,47 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
 
   useEffect(() => {
     if (!lessonId) return
-    fetch(`/api/lessons/${lessonId}`, { headers: { 'X-Session-Id': sessionId } })
+    const h = { 'X-Session-Id': sessionId }
+    fetch(`/api/lessons/${lessonId}`, { headers: h })
       .then((r) => r.ok ? r.json() : null)
-      .then((data) => { if (data?.title) setLessonTitle(data.title) })
+      .then(async (data) => {
+        if (!data) return
+        if (data.title) setLessonTitle(data.title)
+        // Resolve persona: enrollment > course default > "default"
+        if (!personaInitRef.current) {
+          personaInitRef.current = true
+          if (data.persona_id) {
+            setSelectedPersonaId(data.persona_id)
+          } else if (data.course_id) {
+            try {
+              const cResp = await fetch(`/api/courses/${data.course_id}`, { headers: h })
+              if (cResp.ok) {
+                const course = await cResp.json()
+                if (course.default_persona_id) {
+                  setSelectedPersonaId(course.default_persona_id)
+                  return
+                }
+              }
+            } catch { /* non-fatal */ }
+            setSelectedPersonaId('default')
+          } else {
+            setSelectedPersonaId('default')
+          }
+        }
+      })
       .catch(() => {/* non-fatal */})
+  }, [lessonId, sessionId])
+
+  // Persist persona selection to enrollment
+  const handlePersonaChange = useCallback((personaId: string) => {
+    setSelectedPersonaId(personaId)
+    if (lessonId) {
+      fetch(`/api/lessons/${lessonId}/enrollment/persona`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'X-Session-Id': sessionId },
+        body: JSON.stringify({ persona_id: personaId || null }),
+      }).catch(() => {/* non-fatal */})
+    }
   }, [lessonId, sessionId])
 
   // ── voices ───────────────────────────────────────────────────────────────
@@ -380,7 +423,30 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
               }
             }
           }
-          if (idx >= 0) next[idx] = { ...(next[idx] as Turn), complete: true }
+          if (idx >= 0) {
+            const t = next[idx] as Turn
+            // Safety net: if the LLM repeated itself after a tool call,
+            // the text may be the same block pasted twice. Strip the duplicate.
+            let text = t.text ?? ''
+            const len = text.length
+            if (len >= 60) {
+              // Try halves first (exact repeat of full text)
+              const half = len >> 1
+              if (text.slice(0, half) === text.slice(half)) {
+                text = text.slice(0, half)
+              } else {
+                // Try detecting a repeated block that doesn't split evenly:
+                // search for the first char sequence (min 30 chars) that
+                // appears again later and runs to the end.
+                const probe = text.slice(0, 40)
+                const secondOccurrence = text.indexOf(probe, 30)
+                if (secondOccurrence > 0 && text.slice(0, len - secondOccurrence) === text.slice(secondOccurrence)) {
+                  text = text.slice(0, secondOccurrence)
+                }
+              }
+            }
+            next[idx] = { ...t, text, complete: true }
+          }
           return next
         })
         setAgentBusy(false)
@@ -391,20 +457,6 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
         setAgentBusy(false)
         setTtsPlaying(false)
         setStatusMsg('Turn interrupted — tap mic to retry')
-        break
-
-      case 'show_slide':
-        setSlide({ pageStart: ev.page_start, pageEnd: ev.page_end, caption: ev.caption })
-        setTurns((prev) => {
-          const next = [...prev]
-          let idx = next.length - 1
-          while (idx >= 0 && next[idx]!.role !== 'assistant') idx--
-          if (idx >= 0) {
-            const t = next[idx] as Turn
-            next[idx] = { ...t, figures: [...(t.figures ?? []), { type: 'slide', page: ev.page_start, caption: ev.caption, lessonId }] }
-          }
-          return next
-        })
         break
 
       case 'open_sketchpad':
@@ -436,6 +488,36 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
 
       case 'start_timer':
         setTimerExercise({ prompt: ev.prompt, invocationId: ev.invocation_id, durationSeconds: ev.duration_seconds })
+        break
+
+      case 'show_progress':
+        setProgressView({ sections: ev.sections, currentIdx: ev.current_idx, tasks: ev.tasks })
+        break
+
+      case 'play_audio_clip':
+        // Audio clip is synthesized by backend TTS and arrives as audio_chunk events.
+        // No UI needed — just a brief status indicator.
+        setStatusMsg('Playing audio clip...')
+        break
+
+      case 'text_input':
+        setTextInput({ prompt: ev.prompt, placeholder: ev.placeholder, multiline: ev.multiline, invocationId: ev.invocation_id })
+        break
+
+      case 'show_quiz':
+        setQuiz({ prompt: ev.prompt, choices: ev.choices, correctIndex: ev.correct_index, invocationId: ev.invocation_id })
+        break
+
+      case 'fill_in_the_blank':
+        setFillBlank({ prompt: ev.prompt, template: ev.template, answers: ev.answers, invocationId: ev.invocation_id })
+        break
+
+      case 'show_flashcard_deck':
+        setFlashcards({ prompt: ev.prompt, cards: ev.cards, invocationId: ev.invocation_id })
+        break
+
+      case 'ordering_exercise':
+        setOrdering({ prompt: ev.prompt, items: ev.items, correctOrder: ev.correct_order, invocationId: ev.invocation_id })
         break
 
       case 'generating_image':
@@ -509,6 +591,10 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
         setStatusMsg('Curriculum complete!')
         break
 
+      case 'points_awarded':
+        setCelebration({ points: ev.points, reason: ev.reason })
+        break
+
       case 'decompose_start':
         setDecomposing(true)
         break
@@ -532,8 +618,6 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
           text: t.text,
           complete: true,
           figures: t.figures?.map((fig) => {
-            if (fig.type === 'slide')
-              return { type: 'slide' as const, page: fig.page, caption: fig.caption, lessonId: lessonId! }
             if (fig.type === 'generated_image')
               return { type: 'generated_image' as const, imageUrl: fig.image_url, caption: fig.caption, prompt: fig.prompt }
             return { type: 'drawing' as const, dataUrl: `data:image/png;base64,${fig.data}`, prompt: fig.prompt }
@@ -599,7 +683,7 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
   useEffect(() => {
     if (wsStatus !== 'connected' || !personasReady) return
     const persona = personas.find((p) => p.id === selectedPersonaId)
-    send({ event: 'set_instructions', instructions: persona?.instructions ?? '' })
+    send({ event: 'set_instructions', instructions: persona?.instructions ?? '', voice_instructions: persona?.voice_instructions ?? '' })
     if (!lessonStartedRef.current) {
       lessonStartedRef.current = true
       send({ event: 'start_lesson' })
@@ -650,7 +734,7 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
     send({ event: 'transcribe_only', data: b64, sample_rate: sampleRate })
   }, [send])
 
-  // ── Recorder for SlideViewer mic (sends raw PCM via audio_input) ─────────
+  // ── Recorder (sends raw PCM via audio_input) ─────────
   const { isRecording, isSpeaking, start: startRec, stop: stopRec } = useRecorder({
     onUtterance: useCallback((data: string, sampleRate: number) => {
       send({ event: 'audio_input', data, sample_rate: sampleRate })
@@ -782,6 +866,32 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
     setTimerExercise(null)
   }
 
+  // ── new tool submit handlers ────────────────────────────────────────────
+  function handleTextInputSubmit(invocationId: string, answer: string) {
+    send({ event: 'tool_result', invocation_id: invocationId, result: { answer } })
+    setTextInput(null)
+  }
+
+  function handleQuizSubmit(invocationId: string, selectedIndex: number, correct: boolean) {
+    send({ event: 'tool_result', invocation_id: invocationId, result: { selected_index: selectedIndex, correct } })
+    setQuiz(null)
+  }
+
+  function handleFillBlankSubmit(invocationId: string, studentAnswers: string[], correct: boolean[]) {
+    send({ event: 'tool_result', invocation_id: invocationId, result: { student_answers: studentAnswers, correct } })
+    setFillBlank(null)
+  }
+
+  function handleFlashcardSubmit(invocationId: string, results: Array<{ card_index: number; self_grade: 'correct' | 'incorrect' }>) {
+    send({ event: 'tool_result', invocation_id: invocationId, result: { results } })
+    setFlashcards(null)
+  }
+
+  function handleOrderingSubmit(invocationId: string, studentOrder: number[], correct: boolean) {
+    send({ event: 'tool_result', invocation_id: invocationId, result: { student_order: studentOrder, correct } })
+    setOrdering(null)
+  }
+
   // ── video submit ──────────────────────────────────────────────────────────
   function handleVideoSubmit(invocationId: string, frames: string[]) {
     const prompt = videoCapture?.prompt ?? ''
@@ -799,20 +909,8 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
   }
 
   // ── figure click ─────────────────────────────────────────────────────────
-  function handleAnnotate(compositeB64: string) {
-    send({ event: 'image_input', data: compositeB64 })
-    setTurns((prev) => [...prev, {
-      role: 'user' as const,
-      text: '',
-      complete: true,
-      figures: [{ type: 'drawing' as const, dataUrl: `data:image/png;base64,${compositeB64}`, prompt: 'Annotated slide' }],
-    }])
-  }
-
   function handleFigureClick(fig: Figure) {
-    if (fig.type === 'slide') {
-      setSlide({ pageStart: fig.page, pageEnd: fig.page, caption: fig.caption })
-    } else if (fig.type === 'generated_image') {
+    if (fig.type === 'generated_image') {
       setGeneratedImage({ imageUrl: fig.imageUrl, caption: fig.caption })
     } else {
       setDrawingView({ dataUrl: fig.dataUrl, prompt: fig.prompt })
@@ -831,7 +929,7 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
     complete: currComplete,
     personas,
     selectedPersonaId,
-    onPersonaChange: setSelectedPersonaId,
+    onPersonaChange: handlePersonaChange,
     voices,
     selectedVoiceId,
     onVoiceChange: setSelectedVoiceId,
@@ -848,10 +946,6 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
     selectedSttModelId,
     onSttModelChange: setSelectedSttModelId,
     isAdmin,
-    onViewPage: (pageStart: number, pageEnd: number) => {
-      setSlide({ pageStart, pageEnd })
-      setMobileSidebarOpen(false)
-    },
     imageGenAvailable,
     imageGenEnabled,
     onImageGenChange: handleImageGenChange,
@@ -992,19 +1086,11 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
       )}
 
       {/* Overlays */}
-      {slide && (
-        <SlideViewer
-          lessonId={lessonId}
-          sessionId={sessionId}
-          pageStart={slide.pageStart}
-          pageEnd={slide.pageEnd}
-          caption={slide.caption}
-          onClose={() => setSlide(null)}
-          isRecording={recordIsActive}
-          isSpeaking={recordIsSpeaking}
-          recordDisabled={wsStatus !== 'connected' || (!realtimeMode && agentBusy && !recordIsActive)}
-          onRecord={toggleRecord}
-          onAnnotate={handleAnnotate}
+      {celebration && (
+        <Celebration
+          points={celebration.points}
+          reason={celebration.reason}
+          onDone={() => setCelebration(null)}
         />
       )}
       {generatedImage && (
@@ -1076,6 +1162,63 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
           durationSeconds={timerExercise.durationSeconds}
           onSubmit={handleTimerSubmit}
           onCancel={handleTimerCancel}
+        />
+      )}
+      {progressView && (
+        <ProgressView
+          sections={progressView.sections}
+          currentIdx={progressView.currentIdx}
+          tasks={progressView.tasks}
+          onClose={() => setProgressView(null)}
+        />
+      )}
+      {textInput && (
+        <TextInputTool
+          prompt={textInput.prompt}
+          placeholder={textInput.placeholder}
+          multiline={textInput.multiline}
+          invocationId={textInput.invocationId}
+          onSubmit={handleTextInputSubmit}
+          onCancel={() => { send({ event: 'tool_result', invocation_id: textInput.invocationId, result: {} }); setTextInput(null) }}
+        />
+      )}
+      {quiz && (
+        <Quiz
+          prompt={quiz.prompt}
+          choices={quiz.choices}
+          correctIndex={quiz.correctIndex}
+          invocationId={quiz.invocationId}
+          onSubmit={handleQuizSubmit}
+          onCancel={() => { send({ event: 'tool_result', invocation_id: quiz.invocationId, result: {} }); setQuiz(null) }}
+        />
+      )}
+      {fillBlank && (
+        <FillInTheBlank
+          prompt={fillBlank.prompt}
+          template={fillBlank.template}
+          answers={fillBlank.answers}
+          invocationId={fillBlank.invocationId}
+          onSubmit={handleFillBlankSubmit}
+          onCancel={() => { send({ event: 'tool_result', invocation_id: fillBlank.invocationId, result: {} }); setFillBlank(null) }}
+        />
+      )}
+      {flashcards && (
+        <FlashcardDeck
+          prompt={flashcards.prompt}
+          cards={flashcards.cards}
+          invocationId={flashcards.invocationId}
+          onSubmit={handleFlashcardSubmit}
+          onCancel={() => { send({ event: 'tool_result', invocation_id: flashcards.invocationId, result: {} }); setFlashcards(null) }}
+        />
+      )}
+      {ordering && (
+        <OrderingExercise
+          prompt={ordering.prompt}
+          items={ordering.items}
+          correctOrder={ordering.correctOrder}
+          invocationId={ordering.invocationId}
+          onSubmit={handleOrderingSubmit}
+          onCancel={() => { send({ event: 'tool_result', invocation_id: ordering.invocationId, result: {} }); setOrdering(null) }}
         />
       )}
 

@@ -11,11 +11,20 @@ export interface CurriculumState {
   total: number
 }
 
+export interface SectionAsset {
+  type: 'pdf_pages' | 'ai_image'
+  page_start?: number | null
+  page_end?: number | null
+  image_path?: string | null
+  caption?: string | null
+}
+
 export interface CurriculumSection {
   title: string | null
   content: string
   page_start?: number
   page_end?: number
+  assets?: SectionAsset[]
 }
 
 export interface CurriculumData {
@@ -37,6 +46,14 @@ export type ClientEvent =
       html?: string; css?: string
       // timer
       timed_out?: boolean; answer?: string; elapsed_seconds?: number
+      // quiz
+      selected_index?: number; correct?: boolean | boolean[]
+      // fill in the blank
+      student_answers?: string[]
+      // flashcard deck
+      results?: Array<{ card_index: number; self_grade: 'correct' | 'incorrect' }>
+      // ordering exercise
+      student_order?: number[]
     } }
   | { event: 'run_code'; invocation_id: string; code: string; runtime: string }
   | { event: 'set_instructions'; instructions: string }
@@ -69,13 +86,19 @@ export type ServerEvent =
   | { event: 'turn_complete'; turn_id: string }
   | { event: 'turn_interrupted' }
   | { event: 'turn_start' }
-  | { event: 'show_slide'; page_start: number; page_end: number; caption: string }
-  | { event: 'open_sketchpad'; prompt: string; invocation_id: string; text_bg?: string; im_bg?: string }
+  | { event: 'open_sketchpad'; prompt: string; invocation_id: string; text_bg?: string; im_bg?: string; duration_seconds?: number }
   | { event: 'take_photo'; prompt: string; invocation_id: string }
   | { event: 'record_video'; prompt: string; invocation_id: string }
-  | { event: 'open_code_editor'; prompt: string; language: string; starter_code?: string; invocation_id: string }
-  | { event: 'open_html_editor'; prompt: string; starter_html?: string; starter_css?: string; invocation_id: string }
+  | { event: 'open_code_editor'; prompt: string; language: string; starter_code?: string; invocation_id: string; duration_seconds?: number }
+  | { event: 'open_html_editor'; prompt: string; starter_html?: string; starter_css?: string; invocation_id: string; duration_seconds?: number }
   | { event: 'start_timer'; prompt: string; duration_seconds: number; invocation_id: string }
+  | { event: 'show_progress'; sections: Array<{ title: string; idx: number; completed: boolean }>; current_idx: number; tasks: Array<{ concept: string; status: string }> }
+  | { event: 'play_audio_clip'; text: string; speed: number }
+  | { event: 'text_input'; prompt: string; placeholder?: string; multiline?: boolean; invocation_id: string; duration_seconds?: number }
+  | { event: 'show_quiz'; prompt: string; choices: Array<{ label: string; text: string }>; correct_index: number; invocation_id: string; duration_seconds?: number }
+  | { event: 'fill_in_the_blank'; prompt: string; template: string; answers: string[]; invocation_id: string; duration_seconds?: number }
+  | { event: 'show_flashcard_deck'; prompt: string; cards: Array<{ front: string; back: string }>; invocation_id: string; duration_seconds?: number }
+  | { event: 'ordering_exercise'; prompt: string; items: string[]; correct_order: number[]; invocation_id: string; duration_seconds?: number }
   | { event: 'capabilities'; image_gen_available: boolean }
   | { event: 'generating_image'; caption: string }
   | { event: 'show_image'; image_url: string; caption: string; prompt: string }
@@ -86,13 +109,13 @@ export type ServerEvent =
   | { event: 'code_error'; invocation_id: string; message: string }
   | { event: 'section_advanced'; curriculum: CurriculumState }
   | { event: 'curriculum_complete' }
+  | { event: 'points_awarded'; points: number; total: number; reason: string }
   | { event: 'decompose_start' }
   | { event: 'decompose_complete'; lesson_id: string; curriculum: CurriculumData }
   | { event: 'history'; turns: Array<{
       role: 'user' | 'assistant'
       text: string
       figures?: Array<
-        | { type: 'slide'; page: number; caption: string }
         | { type: 'drawing'; data: string; prompt: string }
         | { type: 'generated_image'; image_url: string; caption: string; prompt: string }
       >
@@ -106,11 +129,25 @@ export type ServerEvent =
 
 // ── REST shapes ────────────────────────────────────────────────────────────
 
+export interface VisualAidSourceConfig {
+  enabled: boolean
+  persistence: 'persistent' | 'ephemeral'
+  timing: 'prefetched' | 'spontaneous'
+}
+
+export interface VisualAidConfig {
+  pdf_pages?: boolean
+  generated_images?: VisualAidSourceConfig
+  web_images?: VisualAidSourceConfig
+}
+
 export interface Course {
   id: string
   user_id: string
   title: string
   description: string | null
+  visual_aid_config?: VisualAidConfig
+  default_persona_id?: string | null
   created_at: string
   updated_at: string
 }
@@ -121,9 +158,11 @@ export interface Lesson {
   title: string
   description: string | null
   pdf_path: string | null
+  visual_aid_config?: VisualAidConfig
   current_section_idx: number
   completed: boolean
   section_count: number
+  persona_id?: string | null
   created_at: string
   updated_at: string
 }
@@ -142,6 +181,7 @@ export interface Persona {
   id: string
   name: string
   instructions: string
+  voice_instructions: string
   user_id: string | null
 }
 
