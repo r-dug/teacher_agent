@@ -30,7 +30,11 @@ from .agent import Agent
 from .callbacks import AgentCallbacks
 from .config import DEFAULT_LLM_MODEL
 from .curriculum import Curriculum
-from .prompts.persona import CONDENSE_EPISODE_SYSTEM, GENERATE_INSTRUCTIONS_SYSTEM
+from .prompts.persona import (
+    CONDENSE_EPISODE_SYSTEM,
+    GENERATE_INSTRUCTIONS_SYSTEM,
+    REFINE_VOICE_INSTRUCTIONS_SYSTEM,
+)
 from .prompts.teaching import (
     make_intro_prompt,
     make_task_status_reminder,
@@ -402,17 +406,37 @@ class TeacherAgent(Agent):
                 log.info("mid-loop advance: %d → %d", prev_idx, curriculum.idx)
                 if self._callbacks.on_section_advanced:
                     self._callbacks.on_section_advanced(curriculum)
-                # _condense_episode runs the sync LLM SDK; hop to a thread so
-                # we don't block the event loop.  Same per-call timeout as the
-                # main LLM call (decision 6 of Plan B).
-                try:
-                    episode_summary = await asyncio.wait_for(
-                        asyncio.to_thread(self._condense_episode, list(messages), curriculum),
-                        timeout=_LLM_CALL_TIMEOUT,
-                    )
-                except (asyncio.TimeoutError, Exception) as exc:
-                    log.warning("episode condensation failed: %s", exc)
-                    episode_summary = ""
+                # _condense_episode and _refine_voice_instructions both run
+                # sync LLM SDK calls; hop to threads and run in parallel so
+                # voice refinement doesn't add latency to section transitions.
+                _msgs_snapshot = list(messages)
+
+                async def _run_condensation():
+                    try:
+                        return await asyncio.wait_for(
+                            asyncio.to_thread(self._condense_episode, _msgs_snapshot, curriculum),
+                            timeout=_LLM_CALL_TIMEOUT,
+                        )
+                    except (asyncio.TimeoutError, Exception) as exc:
+                        log.warning("episode condensation failed: %s", exc)
+                        return ""
+
+                async def _run_voice_refinement():
+                    try:
+                        return await asyncio.wait_for(
+                            asyncio.to_thread(self._refine_voice_instructions, _msgs_snapshot, curriculum),
+                            timeout=_LLM_CALL_TIMEOUT,
+                        )
+                    except (asyncio.TimeoutError, Exception) as exc:
+                        log.warning("voice instruction refinement failed: %s", exc)
+                        return ""
+
+                episode_summary, refined_voice = await asyncio.gather(
+                    _run_condensation(), _run_voice_refinement(),
+                )
+                if refined_voice:
+                    self._tts_instructions = refined_voice
+                    log.info("[voice-refinement] updated: %s", refined_voice[:80])
                 messages.clear()
                 self._turn_tracker.clear()
                 self._embedding_cache.clear()
@@ -665,6 +689,62 @@ class TeacherAgent(Agent):
         )
         if self._callbacks.on_token_usage:
             self._callbacks.on_token_usage("episode_condensation", self._model, result.usage)
+        return result.content_text.strip()
+
+    def _refine_voice_instructions(self, messages: list[dict], curriculum: Curriculum) -> str:
+        """Suggest refined TTS voice instructions based on the completed section.
+
+        Runs alongside ``_condense_episode`` at section transitions.
+        Observes the teaching transcript and produces 1-3 sentence
+        speaking-style instructions for gpt-4o-mini-tts.  If the
+        session already has voice instructions (from the persona or
+        from a prior refinement), those are included in the prompt so
+        the LLM can refine rather than start from scratch.
+        """
+        completed_section = curriculum.sections[curriculum.idx - 1]
+
+        transcript_parts: list[str] = []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                if content.strip():
+                    transcript_parts.append(f"{role.upper()}: {content.strip()}")
+            elif isinstance(content, list):
+                texts = [
+                    b.get("text", "") for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ]
+                combined = " ".join(t for t in texts if t).strip()
+                if combined:
+                    transcript_parts.append(f"{role.upper()}: {combined}")
+
+        if not transcript_parts:
+            return ""
+
+        current_instructions_block = ""
+        if self._tts_instructions:
+            current_instructions_block = (
+                f"\n\nCurrent voice instructions:\n\"{self._tts_instructions}\"\n"
+                "Refine these based on how this session went."
+            )
+
+        result = self._provider.do_turn(
+            model=self._model,
+            system=REFINE_VOICE_INSTRUCTIONS_SYSTEM,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Completed section: \"{completed_section.get('title', 'Unknown')}\"\n"
+                    f"{current_instructions_block}\n\n"
+                    f"Transcript:\n{chr(10).join(transcript_parts[-40:])}\n\n"
+                    "Write the voice instructions."
+                ),
+            }],
+            tools=[],
+        )
+        if self._callbacks.on_token_usage:
+            self._callbacks.on_token_usage("voice_refinement", self._model, result.usage)
         return result.content_text.strip()
 
     def _do_single_llm_turn(

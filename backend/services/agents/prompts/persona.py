@@ -1,4 +1,4 @@
-"""System prompts for persona generation and episode condensation."""
+"""System prompts for persona generation, episode condensation, and voice refinement."""
 
 from __future__ import annotations
 
@@ -28,4 +28,28 @@ CONDENSE_EPISODE_SYSTEM = (
     "- Tone and style: what question styles or explanations engaged them most?\n\n"
     "Be specific and actionable. The next teacher should be able to read this and "
     "immediately adjust their approach."
+)
+
+REFINE_VOICE_INSTRUCTIONS_SYSTEM = (
+    "You are a voice-design specialist for an AI tutor's text-to-speech output. "
+    "Analyse the tutoring session transcript below and write speaking-style "
+    "instructions for the TTS model (OpenAI gpt-4o-mini-tts).\n\n"
+    "These instructions control HOW the voice sounds — not WHAT it says. "
+    "Think about:\n"
+    "- Pace: should the voice slow down for this student, or is a brisk pace fine?\n"
+    "- Warmth vs. energy: does the student respond better to a calm, patient tone "
+    "or an enthusiastic, animated one?\n"
+    "- Pronunciation: if the lesson involves foreign-language vocabulary, should "
+    "the voice adopt a native accent for those words?\n"
+    "- Emphasis: are there patterns in what the student missed that suggest the "
+    "voice should stress key terms more clearly?\n\n"
+    "If previous voice instructions are provided, refine them based on what "
+    "worked or didn't in this session. If none are provided, write fresh ones.\n\n"
+    "Example output:\n"
+    '"Speak at a gentle, unhurried pace with a warm, encouraging tone. '
+    "Pronounce Japanese vocabulary with a native Japanese accent, pausing "
+    "briefly after each new term so the student can absorb it. Lightly "
+    'emphasise key grammar particles like は, が, and を."\n\n'
+    "Output ONLY the instruction text (1-3 sentences, like the example above). "
+    "No preamble, no explanation, no quotation marks."
 )
