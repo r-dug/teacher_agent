@@ -31,7 +31,11 @@ from .callbacks import AgentCallbacks
 from .config import DEFAULT_LLM_MODEL
 from .curriculum import Curriculum
 from .prompts.persona import CONDENSE_EPISODE_SYSTEM, GENERATE_INSTRUCTIONS_SYSTEM
-from .prompts.teaching import make_intro_prompt, make_teaching_prompt
+from .prompts.teaching import (
+    make_intro_prompt,
+    make_task_status_reminder,
+    make_teaching_system_prompt,
+)
 from .prompts.tts_prep import TTS_PREP_USER_PREFIX, make_tts_prep_system
 from .providers.base import LLMProvider
 from .memory_strategies import STRATEGIES as MEMORY_STRATEGIES, TurnSummaryTracker, EmbeddingCache, strategy_turn_summaries
@@ -44,6 +48,43 @@ from .tts_pipeline import TTSPipeline
 _INTERACTIVE_TOOL_NAMES = INTERACTIVE_TOOL_NAMES
 
 log = logging.getLogger(__name__)
+
+
+def _append_reminder_to_last_user_message(
+    llm_messages: list[dict],
+    reminder: str,
+) -> None:
+    """Append a ``<system-reminder>`` block to the trailing user message.
+
+    Cache Plan helper.  Walks backward from the end of ``llm_messages``
+    to find the most recent user-role message and appends ``reminder``
+    as a text block at the end of its content.  Mutates the message list
+    in place by replacing that message with a shallow copy + appended
+    block (the original ``messages`` list persisted to the DB is not
+    touched because ``llm_messages`` is already a separate list built
+    by the memory strategy).
+
+    Handles both string-content and list-content user messages, and
+    preserves image blocks and tool_result blocks untouched.  If no
+    user message exists in the list (unusual — would happen during
+    an intro phase with no prior turns), the reminder is silently
+    dropped.
+    """
+    for i in range(len(llm_messages) - 1, -1, -1):
+        msg = llm_messages[i]
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        new_msg = dict(msg)
+        if isinstance(content, str):
+            new_msg["content"] = (content + "\n\n" + reminder) if content else reminder
+        elif isinstance(content, list):
+            new_msg["content"] = list(content) + [{"type": "text", "text": reminder}]
+        else:
+            # Unknown content shape — skip quietly.
+            return
+        llm_messages[i] = new_msg
+        return
 
 
 class TeacherAgent(Agent):
@@ -562,13 +603,21 @@ class TeacherAgent(Agent):
         """
         if _system is not None:
             system = _system
+            task_reminder = ""
         else:
-            system = make_teaching_prompt(
+            # Cache Plan: split the teaching prompt.  ``make_teaching_system_prompt``
+            # returns the stable part (voice rules, section content, approach,
+            # static concept list) — this is what we want the LLM provider to
+            # cache as a stable prefix across turns.  ``make_task_status_reminder``
+            # returns the volatile per-turn DONE/PENDING status, which we append
+            # to the trailing user message of ``llm_messages`` below so it
+            # doesn't invalidate the cached system prefix.
+            system = make_teaching_system_prompt(
                 curriculum.title, curriculum.sections, curriculum.idx, lesson_goal,
-                current_tasks=curriculum.current_tasks(),
             )
             if agent_instructions:
                 system += f"\n\nADDITIONAL STYLE INSTRUCTIONS:\n{agent_instructions}"
+            task_reminder = make_task_status_reminder(curriculum.current_tasks())
         tools = self._effective_tools if _tools is None else _tools
         call_type = _call_type or ("intro_turn" if _tools == [] else "teach_turn")
 
@@ -633,6 +682,16 @@ class TeacherAgent(Agent):
             # Strip them so the provider doesn't reject the message list.
             llm_messages = list(llm_messages)
             _strip_dangling_tool_use(llm_messages)
+
+            # Cache Plan: append the volatile task-status reminder to the
+            # trailing user message.  The trailing user message is the new
+            # turn's input (student utterance or tool_result) — it's never
+            # part of any cached prefix, so appending a reminder here has
+            # zero cache impact.  Everything before it (the stable system
+            # prompt + full prior history) remains eligible for prefix
+            # caching on both providers.
+            if task_reminder and llm_messages:
+                _append_reminder_to_last_user_message(llm_messages, task_reminder)
 
             _llm_t0 = time.monotonic()
             result = self._provider.do_turn(

@@ -1,4 +1,28 @@
-"""System prompt generators for the teaching and intro phases."""
+"""System prompt generators for the teaching and intro phases.
+
+The teaching system prompt is split into two pieces:
+
+1. ``make_teaching_system_prompt()`` — the stable portion used as the
+   LLM's system instructions.  Contains voice rules, constraints,
+   grounding rules, tool principles, approach instructions, the current
+   section's title/content/page range, the lesson goal, and the static
+   concept list.  **Stable across every turn within a section**, so
+   OpenAI's automatic prefix caching and Anthropic's ephemeral
+   ``cache_control`` breakpoints can keep it cached for the duration of
+   the section.
+
+2. ``make_task_status_reminder()`` — the volatile per-turn task
+   checklist with ``[DONE]``/``[PENDING]`` flags.  Returned as a
+   ``<system-reminder>`` tag that the teacher agent appends to the
+   trailing user message of ``llm_messages`` before each call.
+   Appending to the final user message (which is already volatile — it
+   IS the new turn's input) keeps the cacheable prefix intact.
+
+The back-compat ``make_teaching_prompt()`` concatenates the two and
+returns a single flat string for call sites that can't use the split
+shape (the Realtime API path in ``ws_session.py`` and the eval seed
+generator in ``backend/evals/generate_seed.py``).
+"""
 
 from __future__ import annotations
 
@@ -32,14 +56,20 @@ def make_intro_prompt(title: str, sections: list[dict], raw_text: str | None = N
     )
 
 
-def make_teaching_prompt(
+def make_teaching_system_prompt(
     title: str,
     sections: list[dict],
     idx: int,
     lesson_goal: str | None = None,
-    current_tasks: list[dict] | None = None,
 ) -> str:
-    """System prompt for one teaching turn."""
+    """Stable teaching system prompt.
+
+    Deliberately does NOT take a ``current_tasks`` argument — the
+    per-turn DONE/PENDING status is produced by
+    ``make_task_status_reminder`` and appended to the last user message
+    before each LLM call.  Keeping the two separate is what makes
+    prefix caching effective on both OpenAI and Anthropic.
+    """
     total = len(sections)
     sec = sections[idx]
     covered = [s["title"] for s in sections[:idx]]
@@ -51,27 +81,18 @@ def make_teaching_prompt(
     elif sec.get("page_start"):
         page_range = f" (page {sec['page_start']})"
 
-    if current_tasks:
-        checklist_lines = []
-        for i, task in enumerate(current_tasks):
-            status_tag = "DONE" if task["status"] in ("passed", "skipped") else "PENDING"
-            checklist_lines.append(f"  [{status_tag}] {i}. {task['concept']}")
-        concepts_block = (
-            "CONCEPT CHECKLIST (call mark_task_complete for each as the student demonstrates understanding):\n"
-            + "\n".join(checklist_lines)
-        )
-    else:
-        concepts_block = (
-            "KEY CONCEPTS TO VERIFY:\n"
-            + "\n".join(f"- {c}" for c in sec["key_concepts"])
-        )
-
     goal_block = ""
     if lesson_goal:
         goal_block = (
             f"\n<goal>\n{lesson_goal}\n"
             "Tailor your teaching toward this goal.\n</goal>\n"
         )
+
+    key_concepts = sec.get("key_concepts") or []
+    concepts_block = (
+        "KEY CONCEPTS TO VERIFY:\n"
+        + "\n".join(f"- {c}" for c in key_concepts)
+    )
 
     return (
         f'You are an expert, encouraging teacher working through "{title}" with a '
@@ -107,7 +128,9 @@ def make_teaching_prompt(
         f"{concepts_block}\n"
         "</checklist>\n\n"
         "<approach>\n"
-        "The checklist above defines your teaching loop for this section.\n\n"
+        "A <system-reminder> block appended to each user message shows the live "
+        "DONE/PENDING status of every concept in this section.  Use it to drive "
+        "the teaching loop:\n\n"
         "1. TEACH — Work through the first PENDING concept. Explain it briefly, "
         "then verify with a question or exercise. Do not skip ahead.\n"
         "2. MARK — When the student demonstrates understanding, you MUST call "
@@ -131,3 +154,48 @@ def make_teaching_prompt(
         "- Out-of-scope questions: search_content.\n"
         "</tool-principles>"
     )
+
+
+def make_task_status_reminder(current_tasks: list[dict] | None) -> str:
+    """Volatile per-turn task status block.
+
+    Returns an empty string when ``current_tasks`` is None or empty
+    (intro phase or edge cases).  Otherwise returns a ``<system-reminder>``
+    tag listing each concept with its ``[DONE]`` or ``[PENDING]`` flag.
+    The teacher agent appends this block to the trailing user message
+    of ``llm_messages`` before each call so that the LLM sees the
+    live task state without invalidating the cached system prompt.
+    """
+    if not current_tasks:
+        return ""
+    lines: list[str] = []
+    for i, task in enumerate(current_tasks):
+        status_tag = "DONE" if task["status"] in ("passed", "skipped") else "PENDING"
+        lines.append(f"  [{status_tag}] {i}. {task['concept']}")
+    return (
+        "<system-reminder>\n"
+        "CONCEPT CHECKLIST (call mark_task_complete for each as the student demonstrates understanding):\n"
+        + "\n".join(lines)
+        + "\n</system-reminder>"
+    )
+
+
+def make_teaching_prompt(
+    title: str,
+    sections: list[dict],
+    idx: int,
+    lesson_goal: str | None = None,
+    current_tasks: list[dict] | None = None,
+) -> str:
+    """Back-compat helper: flat string combining system prompt + task reminder.
+
+    Used by call sites that can't consume the split shape (the Realtime
+    API path in ``ws_session.py`` and the eval seed generator).  New
+    call sites should prefer ``make_teaching_system_prompt()`` plus
+    ``make_task_status_reminder()`` so caching stays effective.
+    """
+    system = make_teaching_system_prompt(title, sections, idx, lesson_goal)
+    reminder = make_task_status_reminder(current_tasks)
+    if reminder:
+        return system + "\n\n" + reminder
+    return system
