@@ -8,14 +8,15 @@
 -- ── Users ─────────────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS users (
-    id             TEXT PRIMARY KEY,
-    email          TEXT UNIQUE,
-    display_name   TEXT,
-    username       TEXT UNIQUE,
-    password_hash  TEXT,
-    email_verified SMALLINT NOT NULL DEFAULT 0,
-    is_admin       SMALLINT NOT NULL DEFAULT 0,
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id                      TEXT PRIMARY KEY,
+    email                   TEXT UNIQUE,
+    display_name            TEXT,
+    username                TEXT UNIQUE,
+    password_hash           TEXT,
+    email_verified          SMALLINT NOT NULL DEFAULT 0,
+    is_admin                SMALLINT NOT NULL DEFAULT 0,
+    terms_version_accepted  TEXT,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ── Email Verifications ────────────────────────────────────────────────────────
@@ -56,11 +57,12 @@ CREATE TABLE IF NOT EXISTS upload_tokens (
 -- ── Teaching Personas ─────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS personas (
-    id           TEXT PRIMARY KEY,
-    user_id      TEXT REFERENCES users(id) ON DELETE CASCADE,
-    name         TEXT NOT NULL,
-    instructions TEXT NOT NULL,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id                 TEXT PRIMARY KEY,
+    user_id            TEXT REFERENCES users(id) ON DELETE CASCADE,
+    name               TEXT NOT NULL,
+    instructions       TEXT NOT NULL,
+    voice_instructions TEXT NOT NULL DEFAULT '',
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ── Courses ───────────────────────────────────────────────────────────────────
@@ -427,3 +429,4 @@ ALTER TABLE lessons ADD COLUMN IF NOT EXISTS visual_aid_config TEXT NOT NULL DEF
 ALTER TABLE courses ADD COLUMN IF NOT EXISTS visual_aid_config TEXT NOT NULL DEFAULT '{}';
 ALTER TABLE courses ADD COLUMN IF NOT EXISTS default_persona_id TEXT REFERENCES personas(id) ON DELETE SET NULL;
 ALTER TABLE lesson_enrollments ADD COLUMN IF NOT EXISTS persona_id TEXT REFERENCES personas(id) ON DELETE SET NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_version_accepted TEXT;

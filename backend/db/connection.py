@@ -52,6 +52,12 @@ async def init(database_url: str, password=None) -> None:
         from pathlib import Path
         schema = (Path(__file__).parent / "schema.sql").read_text()
         await conn.execute(schema)
+        # Incremental migrations — idempotent ALTER TABLE statements for
+        # columns added after the initial schema.  Safe to re-run.
+        await conn.execute("""
+            ALTER TABLE personas
+            ADD COLUMN IF NOT EXISTS voice_instructions TEXT NOT NULL DEFAULT '';
+        """)
 
 
 async def close() -> None:

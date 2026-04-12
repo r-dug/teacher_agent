@@ -658,6 +658,16 @@ async def delete_user(conn: asyncpg.Connection, user_id: str) -> None:
     await conn.execute("DELETE FROM users WHERE id = $1", user_id)
 
 
+async def set_terms_accepted(
+    conn: asyncpg.Connection, user_id: str, version: str
+) -> None:
+    """Record that ``user_id`` has accepted the given Terms of Service version."""
+    await conn.execute(
+        "UPDATE users SET terms_version_accepted = $1 WHERE id = $2",
+        version, user_id,
+    )
+
+
 async def mark_email_verified(
     conn: asyncpg.Connection, user_id: str
 ) -> None:
@@ -858,10 +868,11 @@ async def create_persona(
     user_id: str | None,
     name: str,
     instructions: str,
+    voice_instructions: str = "",
 ) -> Row:
     await conn.execute(
-        "INSERT INTO personas (id, user_id, name, instructions) VALUES ($1, $2, $3, $4)",
-        persona_id, user_id, name, instructions,
+        "INSERT INTO personas (id, user_id, name, instructions, voice_instructions) VALUES ($1, $2, $3, $4, $5)",
+        persona_id, user_id, name, instructions, voice_instructions,
     )
     return _row(await conn.fetchrow("SELECT * FROM personas WHERE id = $1", persona_id))  # type: ignore[return-value]
 
@@ -886,10 +897,11 @@ async def update_persona(
     persona_id: str,
     name: str,
     instructions: str,
+    voice_instructions: str = "",
 ) -> Row | None:
     await conn.execute(
-        "UPDATE personas SET name = $1, instructions = $2 WHERE id = $3",
-        name, instructions, persona_id,
+        "UPDATE personas SET name = $1, instructions = $2, voice_instructions = $3 WHERE id = $4",
+        name, instructions, voice_instructions, persona_id,
     )
     return _row(await conn.fetchrow("SELECT * FROM personas WHERE id = $1", persona_id))
 
