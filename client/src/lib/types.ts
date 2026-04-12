@@ -56,7 +56,7 @@ export type ClientEvent =
       student_order?: number[]
     } }
   | { event: 'run_code'; invocation_id: string; code: string; runtime: string }
-  | { event: 'set_instructions'; instructions: string }
+  | { event: 'set_instructions'; instructions: string; voice_instructions?: string }
   | { event: 'set_voice'; voice: string }
   | { event: 'set_voice_arch'; voice_arch: string }
   | { event: 'set_stt_provider'; provider: string }
