@@ -119,6 +119,14 @@ class TeacherAgent(Agent):
         # Anthropic provider (no equivalent in the stable API).  Callers
         # usually pass something like ``f"enrollment-{enrollment_id}"``.
         self._cache_key = cache_key
+        # Cache Plan C3: per-session cache-effectiveness counters.  The
+        # per-turn log line at :655 already reports per-turn numbers;
+        # these totals let AgentSession.close() emit a single summary
+        # line at session teardown so we can tell at a glance whether
+        # the C1 prompt restructure is actually saving tokens.
+        self._cum_tokens_in = 0
+        self._cum_tokens_cached = 0
+        self._cum_turns = 0
         self._memory_strategy_name = memory_strategy
         self._memory_strategy = MEMORY_STRATEGIES.get(memory_strategy, strategy_turn_summaries)
         self._turn_tracker = TurnSummaryTracker()
@@ -184,6 +192,25 @@ class TeacherAgent(Agent):
 
     def set_tts_voice(self, voice: str) -> None:
         self.tts_voice = voice
+
+    def cache_stats(self) -> dict:
+        """Cache Plan C3: cumulative cache telemetry for this session.
+
+        Returns a dict with ``turns``, ``tokens_in``, ``tokens_cached``,
+        and ``hit_rate`` (0.0 when no turns have run).  AgentSession
+        calls this on teardown to emit a session-summary log line.
+        """
+        rate = (
+            self._cum_tokens_cached / self._cum_tokens_in
+            if self._cum_tokens_in > 0
+            else 0.0
+        )
+        return {
+            "turns": self._cum_turns,
+            "tokens_in": self._cum_tokens_in,
+            "tokens_cached": self._cum_tokens_cached,
+            "hit_rate": rate,
+        }
 
     async def run_intro_turn(
         self,
@@ -718,16 +745,26 @@ class TeacherAgent(Agent):
                 self._callbacks.on_token_usage(call_type, self._model, result.usage)
 
             _usage = result.usage
+            _tokens_in = getattr(_usage, "input_tokens", 0) or 0
+            _tokens_out = getattr(_usage, "output_tokens", 0) or 0
+            _cached = getattr(_usage, "cache_read_input_tokens", 0) or 0
+            _hit_rate = (_cached / _tokens_in) if _tokens_in > 0 else 0.0
             log.info(
-                "[llm] provider=%s model=%s call=%s tokens_in=%s tokens_out=%s cached=%s elapsed=%.2fs",
+                "[llm] provider=%s model=%s call=%s tokens_in=%s tokens_out=%s cached=%s hit_rate=%.2f elapsed=%.2fs",
                 self._provider.name,
                 self._model,
                 call_type,
-                getattr(_usage, "input_tokens", "?"),
-                getattr(_usage, "output_tokens", "?"),
-                getattr(_usage, "cache_read_input_tokens", 0),
+                _tokens_in,
+                _tokens_out,
+                _cached,
+                _hit_rate,
                 _llm_elapsed,
             )
+            # Cache Plan C3: accumulate per-session totals for the
+            # summary line at teardown.
+            self._cum_tokens_in += _tokens_in
+            self._cum_tokens_cached += _cached
+            self._cum_turns += 1
 
             messages.append({"role": "assistant", "content": result.content_blocks})
 

@@ -452,6 +452,22 @@ class AgentSession:
     def close(self) -> None:
         """Mark WS transport as closed so callback sends become no-ops."""
         self._ws_closed.set()
+        # Cache Plan C3: emit a single summary log line so we can tell at
+        # a glance whether prefix caching is paying off for this session.
+        try:
+            stats = self._teacher.cache_stats()
+        except Exception:  # noqa: BLE001 — telemetry must never break teardown
+            return
+        if stats["turns"] > 0:
+            log.info(
+                "[llm-session-summary] enrollment=%s turns=%d tokens_in=%d "
+                "tokens_cached=%d hit_rate=%.2f",
+                self._enrollment_id or "-",
+                stats["turns"],
+                stats["tokens_in"],
+                stats["tokens_cached"],
+                stats["hit_rate"],
+            )
 
     # ── TeacherAgent callbacks ─────────────────────────────────────────────────
 
