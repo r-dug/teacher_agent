@@ -778,18 +778,16 @@ class TeacherAgent(Agent):
             system = _system
             task_reminder = ""
         else:
-            # Cache Plan: split the teaching prompt.  ``make_teaching_system_prompt``
-            # returns the stable part (voice rules, section content, approach,
-            # static concept list) — this is what we want the LLM provider to
-            # cache as a stable prefix across turns.  ``make_task_status_reminder``
-            # returns the volatile per-turn DONE/PENDING status, which we append
-            # to the trailing user message of ``llm_messages`` below so it
-            # doesn't invalidate the cached system prefix.
+            # The persona's ``instructions`` field is either a full system
+            # prompt template (with {{variable}} placeholders) or a legacy
+            # identity string.  ``make_teaching_system_prompt`` handles both
+            # cases and falls back to the default template when no persona
+            # is set.  The volatile task checklist is injected separately
+            # via ``make_task_status_reminder`` (Cache Plan C1).
             system = make_teaching_system_prompt(
                 curriculum.title, curriculum.sections, curriculum.idx, lesson_goal,
+                persona_template=agent_instructions,
             )
-            if agent_instructions:
-                system += f"\n\nADDITIONAL STYLE INSTRUCTIONS:\n{agent_instructions}"
             task_reminder = make_task_status_reminder(curriculum.current_tasks())
         tools = self._effective_tools if _tools is None else _tools
         call_type = _call_type or ("intro_turn" if _tools == [] else "teach_turn")

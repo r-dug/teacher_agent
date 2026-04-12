@@ -16,9 +16,14 @@ from __future__ import annotations
 import pytest
 
 from backend.services.agents.prompts.teaching import (
+    APPROACH_BLOCK,
+    CONSTRAINTS_BLOCK,
+    DEFAULT_TEACHING_TEMPLATE,
+    TOOLS_BLOCK,
     make_task_status_reminder,
     make_teaching_prompt,
     make_teaching_system_prompt,
+    render_template,
 )
 
 
@@ -174,3 +179,115 @@ class TestBackCompatFlatPrompt:
         flat = make_teaching_prompt("Lesson", sections, 0)
         system = make_teaching_system_prompt("Lesson", sections, 0)
         assert flat == system
+
+
+# ── persona template system ──────────────────────────────────────────────────
+
+
+class TestPersonaTemplate:
+    def test_no_template_uses_default_identity(self):
+        """No persona → default 'expert, encouraging teacher' identity."""
+        sections = _make_sections()
+        system = make_teaching_system_prompt("Lesson", sections, 0)
+        assert "expert, encouraging teacher" in system
+
+    def test_legacy_persona_replaces_identity(self):
+        """Legacy persona (no {{variables}}) replaces the identity line."""
+        sections = _make_sections()
+        persona = "You are Tsumugi, a brilliantly snide tutor."
+        system = make_teaching_system_prompt(
+            "Lesson", sections, 0, persona_template=persona,
+        )
+        assert "Tsumugi" in system
+        assert "brilliantly snide" in system
+        # Default identity should be gone.
+        assert "expert, encouraging teacher" not in system
+        # Operational blocks should still be present.
+        assert "<constraints>" in system
+        assert "<approach>" in system
+        assert "<tool-principles>" in system
+        assert "Section one content about topic A." in system
+
+    def test_full_template_with_variables(self):
+        """Full custom template with {{variables}} gets substituted."""
+        sections = _make_sections()
+        custom = (
+            "I am a custom teacher for {{title}}.\n"
+            "{{section}}\n"
+            "{{approach}}"
+        )
+        system = make_teaching_system_prompt(
+            "Lesson", sections, 0, persona_template=custom,
+        )
+        assert "I am a custom teacher for Lesson." in system
+        assert "Section one content about topic A." in system
+        assert "mark_task_complete" in system  # from approach block
+        # Default identity should NOT appear (custom template replaces everything).
+        assert "expert, encouraging teacher" not in system
+
+    def test_unknown_variables_left_as_is(self):
+        """Unknown {{placeholders}} survive so admins can spot typos."""
+        sections = _make_sections()
+        custom = "Hello {{unknown_var}}. {{section}}"
+        system = make_teaching_system_prompt(
+            "Lesson", sections, 0, persona_template=custom,
+        )
+        assert "{{unknown_var}}" in system
+        assert "Section one content" in system
+
+    def test_template_has_all_expected_variables(self):
+        """All documented variables resolve to non-empty strings."""
+        sections = _make_sections()
+        template = (
+            "{{identity}} {{goal}} {{constraints}} {{grounding}} "
+            "{{progress}} {{section}} {{section_title}} "
+            "{{section_content}} {{concepts}} {{approach}} "
+            "{{tools}} {{title}} {{covered}}"
+        )
+        system = make_teaching_system_prompt(
+            "Lesson", sections, 0,
+            lesson_goal="learn stuff",
+            persona_template=template,
+        )
+        assert "{{" not in system  # all variables resolved
+
+    def test_stable_across_turns_with_template(self):
+        """A custom template is still stable across turns (no task state)."""
+        sections = _make_sections()
+        custom = "Custom teacher. {{section}} {{approach}}"
+        s1 = make_teaching_system_prompt(
+            "Lesson", sections, 0, persona_template=custom,
+        )
+        s2 = make_teaching_system_prompt(
+            "Lesson", sections, 0, persona_template=custom,
+        )
+        assert s1 == s2
+
+    def test_page_range_variable(self):
+        sections = _make_sections()
+        custom = "Pages: {{page_range}}"
+        system = make_teaching_system_prompt(
+            "Lesson", sections, 0, persona_template=custom,
+        )
+        assert "(pages 1–2)" in system
+
+    def test_covered_variable(self):
+        sections = _make_sections()
+        custom = "Covered: {{covered}}"
+        system = make_teaching_system_prompt(
+            "Lesson", sections, 1, persona_template=custom,
+        )
+        assert "Section One" in system
+
+    def test_default_template_renders_cleanly(self):
+        """The DEFAULT_TEACHING_TEMPLATE renders with no leftover markers."""
+        sections = _make_sections()
+        system = render_template(
+            DEFAULT_TEACHING_TEMPLATE,
+            {"identity": "I am a teacher.", "goal": "", "constraints": CONSTRAINTS_BLOCK,
+             "grounding": "grounding", "progress": "progress",
+             "section": "section", "concepts": "concepts",
+             "approach": APPROACH_BLOCK, "tools": TOOLS_BLOCK,
+             "title": "T", "covered": "none"},
+        )
+        assert "{{" not in system
