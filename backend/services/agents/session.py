@@ -118,8 +118,8 @@ class AgentSession:
         self._current_section_idx: int = 0  # updated by _on_section_advanced
         self._visual_aid_config: dict = visual_aid_config or {}
 
-        if tts_provider is None and kokoro_pipeline is not None:
-            from .tts import KokoroTTSProvider
+        if tts_provider is None and not tts_providers and kokoro_pipeline is not None:
+            from ..voice.tts import KokoroTTSProvider
             tts_provider = KokoroTTSProvider(
                 pipeline=kokoro_pipeline,
                 default_voice=kokoro_voice,
