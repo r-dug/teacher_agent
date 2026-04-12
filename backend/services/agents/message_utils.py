@@ -313,19 +313,23 @@ def _messages_to_openai_responses(messages: list[dict]) -> list[dict]:
         content = msg.get("content", "")
 
         if isinstance(content, str):
-            # Plain string content — wrap as a message item with input_text.
+            # Plain string content.  Assistant messages must use
+            # ``output_text`` in the Responses API; user messages
+            # use ``input_text``.
+            text_type = "output_text" if role == "assistant" else "input_text"
             out.append({
                 "type": "message",
                 "role": role,
-                "content": [{"type": "input_text", "text": content}],
+                "content": [{"type": text_type, "text": content}],
             })
             continue
 
         if not isinstance(content, list):
+            text_type = "output_text" if role == "assistant" else "input_text"
             out.append({
                 "type": "message",
                 "role": role,
-                "content": [{"type": "input_text", "text": str(content)}],
+                "content": [{"type": text_type, "text": str(content)}],
             })
             continue
 

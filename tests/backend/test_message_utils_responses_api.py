@@ -37,6 +37,22 @@ def test_assistant_text_message_uses_output_text():
     assert items[0]["content"] == [{"type": "output_text", "text": "Sure, here you go."}]
 
 
+def test_assistant_string_content_uses_output_text():
+    """Regression: assistant messages with plain STRING content (not a list)
+    must use ``output_text``, not ``input_text``.  The Responses API rejects
+    ``input_text`` on assistant messages with error code 400.
+
+    This bug was introduced when the string-content shortcut didn't check
+    the message role before choosing the content block type."""
+    items = _messages_to_openai_responses([
+        {"role": "assistant", "content": "Sure thing."},
+    ])
+    assert len(items) == 1
+    assert items[0]["type"] == "message"
+    assert items[0]["role"] == "assistant"
+    assert items[0]["content"] == [{"type": "output_text", "text": "Sure thing."}]
+
+
 def test_tool_call_and_result_become_inline_items():
     """A full turn (user question → assistant tool_use → user tool_result)
     produces input items in the right shape: message, function_call,
