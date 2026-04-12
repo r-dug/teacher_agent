@@ -29,6 +29,11 @@ class PersonaResponse(BaseModel):
     id: str
     name: str
     instructions: str
+    voice_instructions: str = ""
+    tts_voice: str = ""
+    tts_speed: float = 1.0
+    tts_format: str = ""
+    tts_prep_prompt: str = ""
     user_id: str | None
     created_at: datetime
 
