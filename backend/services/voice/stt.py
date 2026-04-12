@@ -270,3 +270,125 @@ async def transcribe_file_openai(
 def load_stt_model(model_size: str = "base") -> FasterWhisperBackend:
     """Load and return a FasterWhisperBackend (blocking; call at startup)."""
     return FasterWhisperBackend(model_size)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STT provider classes (unified interface for the chain abstraction)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import logging
+
+_log = logging.getLogger(__name__)
+
+
+class OpenAISTTProvider:
+    """Wraps the OpenAI transcription API in a provider class.
+
+    Constructed by ``build_stt_chain()`` with config from an
+    ``STTModelSpec``.  The ``transcribe`` / ``transcribe_file`` methods
+    match the call shape used by ``ws_session.py`` so the caller doesn't
+    need to know which provider is active.
+    """
+
+    provider_name = "openai"
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gpt-4o-mini-transcribe",
+        timeout_seconds: float = 30.0,
+        max_retries: int = 1,
+        cost_per_minute_usd: float = 0.0,
+    ) -> None:
+        if not (api_key or "").strip():
+            raise RuntimeError("OpenAI STT requires an API key.")
+        self._api_key = api_key.strip()
+        self.model = model
+        self._timeout = timeout_seconds
+        self._max_retries = max_retries
+        self._cost_per_minute = cost_per_minute_usd
+
+    async def transcribe(
+        self,
+        audio_b64: str,
+        sample_rate: int,
+        language: str | None = None,
+        user_id: str = "",
+    ) -> str:
+        return await transcribe_openai(
+            audio_b64,
+            sample_rate,
+            api_key=self._api_key,
+            model=self.model,
+            language=language,
+            timeout_seconds=self._timeout,
+            max_retries=self._max_retries,
+            cost_per_minute_usd=self._cost_per_minute,
+            user_id=user_id,
+        )
+
+    async def transcribe_file(
+        self,
+        audio_b64: str,
+        mime_type: str,
+        language: str | None = None,
+        user_id: str = "",
+    ) -> str:
+        return await transcribe_file_openai(
+            audio_b64,
+            mime_type,
+            api_key=self._api_key,
+            model=self.model,
+            language=language,
+            timeout_seconds=self._timeout,
+            max_retries=self._max_retries,
+            cost_per_minute_usd=self._cost_per_minute,
+            user_id=user_id,
+        )
+
+
+class LocalSTTProvider:
+    """Wraps a local Whisper backend in a provider class.
+
+    Supports lazy loading: if ``lazy=True``, the model isn't loaded
+    until the first ``transcribe`` call (matching the existing behavior
+    in ``ws_session.py`` where models are loaded on demand).
+    """
+
+    provider_name = "local"
+
+    def __init__(self, model_size: str = "base", lazy: bool = True) -> None:
+        self._model_size = model_size
+        self._backend: FasterWhisperBackend | None = None
+        if not lazy:
+            self._backend = FasterWhisperBackend(model_size)
+
+    def _get_backend(self) -> FasterWhisperBackend:
+        if self._backend is None:
+            _log.info("[LocalSTTProvider] lazy-loading Whisper model: %s", self._model_size)
+            self._backend = FasterWhisperBackend(self._model_size)
+        return self._backend
+
+    async def transcribe(
+        self,
+        audio_b64: str,
+        sample_rate: int,
+        language: str | None = None,
+        user_id: str = "",
+    ) -> str:
+        backend = self._get_backend()
+        return await transcribe(
+            audio_b64, sample_rate, backend, language, user_id=user_id,
+        )
+
+    async def transcribe_file(
+        self,
+        audio_b64: str,
+        mime_type: str,
+        language: str | None = None,
+        user_id: str = "",
+    ) -> str:
+        backend = self._get_backend()
+        return await transcribe_file(
+            audio_b64, mime_type, backend, language, user_id=user_id,
+        )
