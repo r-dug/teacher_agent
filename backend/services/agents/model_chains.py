@@ -33,6 +33,9 @@ from .model_config import ChainSpec, ModelSpec
 # the longer TTL matters for teaching sessions where a student might
 # pause for 10-30 min between turns (phone call, bathroom break, etc.)
 # without the cached prefix being evicted.
+#
+# Pricing as of 2026-04-12 from platform.openai.com/docs/pricing.
+# OpenAI has no separate cache-write charge — create-writes are free.
 GPT_4O = ModelSpec(
     name="gpt-4o",
     source="openai",
@@ -41,6 +44,10 @@ GPT_4O = ModelSpec(
     max_output=4_096,
     supports_tools=True,
     supports_prefix_cache=True,
+    input_per_mtok=2.50,
+    output_per_mtok=10.00,
+    cache_read_per_mtok=1.25,
+    cache_write_per_mtok=0.0,
     source_config={
         "api_key_env": "OPENAI_API_KEY",
         "timeout_s": 30.0,
@@ -58,6 +65,10 @@ GPT_4O_MINI = ModelSpec(
     max_output=16_384,
     supports_tools=True,
     supports_prefix_cache=True,
+    input_per_mtok=0.15,
+    output_per_mtok=0.60,
+    cache_read_per_mtok=0.075,
+    cache_write_per_mtok=0.0,
     source_config={
         "api_key_env": "OPENAI_API_KEY",
         "timeout_s": 45.0,
@@ -68,6 +79,9 @@ GPT_4O_MINI = ModelSpec(
 # Anthropic Sonnet — high quality, 200K context, currently NOT usable
 # (zero credit balance).  Listed for future use; chains keep it as a
 # fallback so topping up credits is a config-only change.
+#
+# Pricing as of 2026-04-12 from platform.claude.com/docs/en/about-claude/pricing.
+# Anthropic charges separately for cache creation (writes).
 CLAUDE_SONNET_4_6 = ModelSpec(
     name="claude-sonnet-4-6",
     source="anthropic",
@@ -76,6 +90,10 @@ CLAUDE_SONNET_4_6 = ModelSpec(
     max_output=8_192,
     supports_tools=True,
     supports_prefix_cache=True,
+    input_per_mtok=3.00,
+    output_per_mtok=15.00,
+    cache_read_per_mtok=0.30,
+    cache_write_per_mtok=3.75,
     source_config={
         "api_key_env": "ANTHROPIC_API_KEY",
         "max_retries": 6,
@@ -91,6 +109,10 @@ CLAUDE_HAIKU_4_5 = ModelSpec(
     max_output=8_192,
     supports_tools=True,
     supports_prefix_cache=True,
+    input_per_mtok=0.25,
+    output_per_mtok=1.25,
+    cache_read_per_mtok=0.03,
+    cache_write_per_mtok=0.30,
     source_config={
         "api_key_env": "ANTHROPIC_API_KEY",
         "max_retries": 3,
@@ -135,22 +157,24 @@ SEARCH_CHAIN = ChainSpec(
 # a slight cheat — embeddings don't really fit ChainSpec since
 # EmbeddingProvider is a different interface.  Kept as a chain for
 # uniform configuration access.
+TEXT_EMBEDDING_3_SMALL = ModelSpec(
+    name="text-embedding-3-small",
+    source="openai",
+    modalities=frozenset({"text"}),
+    context_window=8_191,
+    max_output=1_536,  # Embedding dimension
+    supports_tools=False,
+    supports_prefix_cache=False,
+    source_config={
+        "api_key_env": "OPENAI_API_KEY",
+        "timeout_s": 10.0,
+        "max_retries": 1,
+    },
+)
+
 EMBEDDING_CHAIN = ChainSpec(
     role="embed",
-    primary=ModelSpec(
-        name="text-embedding-3-small",
-        source="openai",
-        modalities=frozenset({"text"}),
-        context_window=8_191,
-        max_output=1_536,  # Embedding dimension
-        supports_tools=False,
-        supports_prefix_cache=False,
-        source_config={
-            "api_key_env": "OPENAI_API_KEY",
-            "timeout_s": 10.0,
-            "max_retries": 1,
-        },
-    ),
+    primary=TEXT_EMBEDDING_3_SMALL,
 )
 
 # Persona instructions generation — one-off short text completion.
@@ -188,6 +212,21 @@ TITLE_CHAIN = ChainSpec(
     role="title",
     primary=GPT_4O_MINI,
 )
+
+
+# Complete catalogue of every registered ModelSpec, whether or not it's
+# currently in an active chain.  ``model_config.lookup_pricing()`` walks
+# this list so that standalone specs (e.g., CLAUDE_HAIKU_4_5, which is
+# defined but not currently referenced by any chain) are still findable
+# by the usage tracker when a call comes in for their model name.  Add
+# a spec here when you define it at module level above.
+ALL_MODELS: list[ModelSpec] = [
+    GPT_4O,
+    GPT_4O_MINI,
+    CLAUDE_SONNET_4_6,
+    CLAUDE_HAIKU_4_5,
+    TEXT_EMBEDDING_3_SMALL,
+]
 
 
 # Lookup table for `clients.py` and other modules that need to find a

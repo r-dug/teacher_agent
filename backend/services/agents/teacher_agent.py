@@ -124,8 +124,15 @@ class TeacherAgent(Agent):
         # these totals let AgentSession.close() emit a single summary
         # line at session teardown so we can tell at a glance whether
         # the C1 prompt restructure is actually saving tokens.
+        #
+        # ``_cum_tokens_in`` is the TOTAL input tokens (includes the
+        # cached reads + cache creates).  Both provider normalizers
+        # produce this shape; see ``_normalize_anthropic_usage`` in
+        # providers/anthropic.py and the OpenAI provider's do_turn.
         self._cum_tokens_in = 0
         self._cum_tokens_cached = 0
+        self._cum_tokens_cache_write = 0
+        self._cum_tokens_out = 0
         self._cum_turns = 0
         self._memory_strategy_name = memory_strategy
         self._memory_strategy = MEMORY_STRATEGIES.get(memory_strategy, strategy_turn_summaries)
@@ -194,22 +201,66 @@ class TeacherAgent(Agent):
         self.tts_voice = voice
 
     def cache_stats(self) -> dict:
-        """Cache Plan C3: cumulative cache telemetry for this session.
+        """Cache Plan C3 + pricing consolidation: cumulative cache telemetry.
 
-        Returns a dict with ``turns``, ``tokens_in``, ``tokens_cached``,
-        and ``hit_rate`` (0.0 when no turns have run).  AgentSession
-        calls this on teardown to emit a session-summary log line.
+        Returns a dict with ``turns``, ``tokens_in`` (total, includes
+        cached), ``tokens_cached``, ``hit_rate``, ``dollars_spent``, and
+        ``dollars_saved``.  ``dollars_spent`` is the actual cost of
+        every LLM turn in this session based on ``ModelSpec`` pricing.
+        ``dollars_saved`` is what the caching saved vs the same calls
+        with no cache hits.  When the model is unknown to
+        ``lookup_pricing()``, both dollar fields report 0.0 — the token
+        counts are still accurate.
+
+        AgentSession calls this on teardown to emit a
+        ``[llm-session-summary]`` log line.
         """
+        from .model_config import lookup_pricing
+
         rate = (
             self._cum_tokens_cached / self._cum_tokens_in
             if self._cum_tokens_in > 0
             else 0.0
         )
+
+        dollars_spent = 0.0
+        dollars_saved = 0.0
+        pricing = lookup_pricing(self._model)
+        if pricing is not None:
+            uncached_input = max(
+                self._cum_tokens_in
+                - self._cum_tokens_cached
+                - self._cum_tokens_cache_write,
+                0,
+            )
+            dollars_spent = pricing.cost(
+                input_uncached=uncached_input,
+                output_tokens=self._cum_tokens_out,
+                cache_read=self._cum_tokens_cached,
+                cache_write=self._cum_tokens_cache_write,
+            )
+            # Without caching, every token billed at cache_read or
+            # cache_write rates would instead have been billed at the
+            # regular input rate.  Savings = the delta.  Note: for
+            # Anthropic, cache_write_per_mtok (3.75) is HIGHER than
+            # input_per_mtok (3.00), so cache-creation turns produce
+            # NEGATIVE savings.  That's correct — the first write
+            # pays a premium for the cached copy.  The reads amortize
+            # it over subsequent turns.
+            dollars_saved = (
+                self._cum_tokens_cached
+                * (pricing.input_per_mtok - pricing.cache_read_per_mtok)
+                + self._cum_tokens_cache_write
+                * (pricing.input_per_mtok - pricing.cache_write_per_mtok)
+            ) / 1_000_000
+
         return {
             "turns": self._cum_turns,
             "tokens_in": self._cum_tokens_in,
             "tokens_cached": self._cum_tokens_cached,
             "hit_rate": rate,
+            "dollars_spent": dollars_spent,
+            "dollars_saved": dollars_saved,
         }
 
     async def run_intro_turn(
@@ -748,6 +799,7 @@ class TeacherAgent(Agent):
             _tokens_in = getattr(_usage, "input_tokens", 0) or 0
             _tokens_out = getattr(_usage, "output_tokens", 0) or 0
             _cached = getattr(_usage, "cache_read_input_tokens", 0) or 0
+            _cache_write = getattr(_usage, "cache_creation_input_tokens", 0) or 0
             _hit_rate = (_cached / _tokens_in) if _tokens_in > 0 else 0.0
             log.info(
                 "[llm] provider=%s model=%s call=%s tokens_in=%s tokens_out=%s cached=%s hit_rate=%.2f elapsed=%.2fs",
@@ -764,6 +816,8 @@ class TeacherAgent(Agent):
             # summary line at teardown.
             self._cum_tokens_in += _tokens_in
             self._cum_tokens_cached += _cached
+            self._cum_tokens_cache_write += _cache_write
+            self._cum_tokens_out += _tokens_out
             self._cum_turns += 1
 
             messages.append({"role": "assistant", "content": result.content_blocks})

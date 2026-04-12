@@ -92,7 +92,7 @@ class AnthropicLLMProvider(LLMProvider):
         return LLMTurnResult(
             content_blocks=content_blocks,
             content_text=full_text,
-            usage=final.usage,
+            usage=_normalize_anthropic_usage(final.usage),
             tool_uses=tool_uses,
         )
 
@@ -119,4 +119,37 @@ class AnthropicLLMProvider(LLMProvider):
         for block in response.content:
             if getattr(block, "type", None) == "text":
                 text_parts.append(block.text)
-        return "\n".join(text_parts).strip(), response.usage
+        return "\n".join(text_parts).strip(), _normalize_anthropic_usage(response.usage)
+
+
+def _normalize_anthropic_usage(raw_usage) -> SimpleNamespace:
+    """Wrap an Anthropic SDK Usage object so ``input_tokens`` means TOTAL.
+
+    Anthropic's raw ``usage.input_tokens`` excludes the cached portions
+    (``cache_read_input_tokens`` and ``cache_creation_input_tokens`` are
+    reported as separate buckets).  OpenAI's Responses API reports
+    ``input_tokens`` as the total including cached tokens — so the two
+    have different semantics out of the box.
+
+    To give downstream code (the teacher-agent log line, the session
+    cache-savings accumulator, ``usage_tracker._api_cost``) a single
+    consistent shape, we normalize both providers to the convention
+    ``input_tokens = TOTAL input (including cached reads + cache
+    creates)``.  OpenAI already uses this convention; Anthropic needs
+    the addition done here.
+
+    Cache Plan C2 discovered the inconsistency once prefix caching
+    actually started landing hits — the old ``_api_cost`` formula
+    ``inp*rate + cr*cache_rate`` double-counted the cached portion on
+    OpenAI (since ``inp`` was the total and ``cr`` was a subset of it).
+    Normalizing + updating the cost formula fixes that.
+    """
+    raw_input = getattr(raw_usage, "input_tokens", 0) or 0
+    cache_read = getattr(raw_usage, "cache_read_input_tokens", 0) or 0
+    cache_create = getattr(raw_usage, "cache_creation_input_tokens", 0) or 0
+    return SimpleNamespace(
+        input_tokens=raw_input + cache_read + cache_create,
+        output_tokens=getattr(raw_usage, "output_tokens", 0) or 0,
+        cache_read_input_tokens=cache_read,
+        cache_creation_input_tokens=cache_create,
+    )

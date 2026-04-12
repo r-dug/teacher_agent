@@ -79,14 +79,30 @@ def _make_curriculum() -> Curriculum:
     )
 
 
-def _make_agent(provider: LLMProvider) -> TeacherAgent:
+def _make_agent(provider: LLMProvider, model: str = "scripted-model") -> TeacherAgent:
     return TeacherAgent(
         llm_provider=provider,
         callbacks=AgentCallbacks(),
         tts_providers=[],
         tts_voice="",
-        model="scripted-model",
+        model=model,
         cache_key="test-session",
+    )
+
+
+def _make_usage_full(
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read: int = 0,
+    cache_write: int = 0,
+) -> SimpleNamespace:
+    """Full usage shape for tests that need to exercise all four counters."""
+    return SimpleNamespace(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_input_tokens=cache_read,
+        cache_creation_input_tokens=cache_write,
     )
 
 
@@ -102,6 +118,8 @@ def test_cache_stats_zero_before_any_turn():
         "tokens_in": 0,
         "tokens_cached": 0,
         "hit_rate": 0.0,
+        "dollars_spent": 0.0,
+        "dollars_saved": 0.0,
     }
 
 
@@ -192,3 +210,113 @@ def test_hit_rate_zero_when_no_input_tokens(caplog):
     llm_lines = [r for r in caplog.records if "[llm]" in r.getMessage()]
     assert llm_lines
     assert "hit_rate=0.00" in llm_lines[-1].getMessage()
+
+
+# ── dollars_spent / dollars_saved (pricing consolidation) ────────────────────
+
+
+def test_cache_stats_dollars_zero_for_unknown_model():
+    """Unknown model names don't have pricing, so both dollar fields are 0.0.
+    Token counts are still reported accurately."""
+    p = _ScriptedProvider([
+        _make_usage_full(input_tokens=1000, output_tokens=100, cache_read=400),
+    ])
+    agent = _make_agent(p, model="scripted-model")  # not registered
+    curriculum = _make_curriculum()
+    messages: list[dict] = [{"role": "user", "content": "hi"}]
+    agent._do_single_llm_turn(
+        messages=messages,
+        curriculum=curriculum,
+        agent_instructions=None,
+        lesson_goal=None,
+    )
+    stats = agent.cache_stats()
+    assert stats["dollars_spent"] == 0.0
+    assert stats["dollars_saved"] == 0.0
+    assert stats["tokens_in"] == 1000
+    assert stats["tokens_cached"] == 400
+
+
+def test_cache_stats_dollars_for_gpt_4o():
+    """With a real registered model, dollar fields are populated.
+
+    gpt-4o pricing: input $2.50/M, output $10.00/M, cache_read $1.25/M.
+    One turn: 1M total input, 800K cached, 50K output.
+      uncached = 1M - 800K = 200K
+      spent = 200K*$2.50/M + 800K*$1.25/M + 50K*$10.00/M
+            = $0.50 + $1.00 + $0.50 = $2.00
+      saved = 800K * ($2.50 - $1.25) / M
+            = 800K * $1.25 / M = $1.00
+    """
+    p = _ScriptedProvider([
+        _make_usage_full(
+            input_tokens=1_000_000,
+            output_tokens=50_000,
+            cache_read=800_000,
+        ),
+    ])
+    agent = _make_agent(p, model="gpt-4o")
+    curriculum = _make_curriculum()
+    messages: list[dict] = [{"role": "user", "content": "hi"}]
+    agent._do_single_llm_turn(
+        messages=messages,
+        curriculum=curriculum,
+        agent_instructions=None,
+        lesson_goal=None,
+    )
+    stats = agent.cache_stats()
+    assert stats["dollars_spent"] == pytest.approx(2.00, abs=1e-6)
+    assert stats["dollars_saved"] == pytest.approx(1.00, abs=1e-6)
+
+
+def test_cache_stats_dollars_saved_zero_on_first_turn_no_cache():
+    """First turn in a section has no cache hits, so dollars_saved = 0."""
+    p = _ScriptedProvider([
+        _make_usage_full(
+            input_tokens=500_000,
+            output_tokens=10_000,
+            cache_read=0,
+        ),
+    ])
+    agent = _make_agent(p, model="gpt-4o")
+    curriculum = _make_curriculum()
+    messages: list[dict] = [{"role": "user", "content": "hi"}]
+    agent._do_single_llm_turn(
+        messages=messages,
+        curriculum=curriculum,
+        agent_instructions=None,
+        lesson_goal=None,
+    )
+    stats = agent.cache_stats()
+    assert stats["dollars_saved"] == 0.0
+    # spent = 500K*$2.50/M + 10K*$10/M = $1.25 + $0.10 = $1.35
+    assert stats["dollars_spent"] == pytest.approx(1.35, abs=1e-6)
+
+
+def test_cache_stats_includes_cache_write_in_spent():
+    """Anthropic-style cache_write (cache_creation_input_tokens) is billed
+    separately.  Claude Sonnet: cache_write $3.75/M vs input $3.00/M —
+    a premium for the first write, amortized by later reads."""
+    p = _ScriptedProvider([
+        _make_usage_full(
+            input_tokens=1_000_000,
+            output_tokens=0,
+            cache_read=0,
+            cache_write=500_000,
+        ),
+    ])
+    agent = _make_agent(p, model="claude-sonnet-4-6")
+    curriculum = _make_curriculum()
+    messages: list[dict] = [{"role": "user", "content": "hi"}]
+    agent._do_single_llm_turn(
+        messages=messages,
+        curriculum=curriculum,
+        agent_instructions=None,
+        lesson_goal=None,
+    )
+    stats = agent.cache_stats()
+    # uncached = 1M - 0 - 500K = 500K
+    # spent = 500K*$3 + 500K*$3.75 (all per M) = $1.50 + $1.875 = $3.375
+    assert stats["dollars_spent"] == pytest.approx(3.375, abs=1e-6)
+    # saved = 500K * ($3 - $3.75) / M = -$0.375 (negative — first write is a premium)
+    assert stats["dollars_saved"] == pytest.approx(-0.375, abs=1e-6)

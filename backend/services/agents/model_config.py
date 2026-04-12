@@ -40,20 +40,66 @@ Modality = Literal["text", "vision", "audio_in", "audio_out"]
 
 
 @dataclass(frozen=True)
+class ModelPricing:
+    """Per-million-token pricing in USD.
+
+    All rates are in USD per 1,000,000 tokens — more readable than the
+    USD-per-token decimals the previous ``_PRICING`` table used.  Used
+    by ``usage_tracker._api_cost`` and by ``TeacherAgent.cache_stats``
+    to compute per-session dollar savings from prefix caching.
+
+    ``cost()`` takes ``input_uncached`` (input tokens billed at the
+    regular rate, after subtracting cache-read + cache-create portions).
+    Call sites are expected to do the subtraction themselves because
+    different providers report input_tokens with different semantics;
+    see the docstring at ``usage_tracker._api_cost`` for details.
+    """
+
+    input_per_mtok: float = 0.0
+    output_per_mtok: float = 0.0
+    cache_read_per_mtok: float = 0.0
+    cache_write_per_mtok: float = 0.0
+
+    def cost(
+        self,
+        input_uncached: int,
+        output_tokens: int,
+        cache_read: int,
+        cache_write: int,
+    ) -> float:
+        return (
+            input_uncached * self.input_per_mtok
+            + output_tokens * self.output_per_mtok
+            + cache_read * self.cache_read_per_mtok
+            + cache_write * self.cache_write_per_mtok
+        ) / 1_000_000
+
+
+@dataclass(frozen=True)
 class ModelSpec:
     """Declarative description of one LLM model + how to construct it.
 
     The model's identity (``name``, ``source``) is paired with capability
-    metadata (``modalities``, ``context_window``, etc.) and source-specific
-    construction config in ``source_config``.
+    metadata (``modalities``, ``context_window``, etc.), pricing fields
+    (used by the usage tracker + cache-savings telemetry), and
+    source-specific construction config in ``source_config``.
 
     ``source_config`` always contains:
       - ``api_key_env``: name of the env var holding the API key (read by
         ``_build_one()`` so the key never lives in the spec directly)
-      - Optional ``timeout_s``, ``max_retries``, ``base_url`` per source
+      - Optional ``timeout_s``, ``max_retries``, ``base_url``,
+        ``cache_retention`` per source
 
     ``api_key_env`` is omitted only for sources that don't need a key
     (``ollama``, ``vllm``, ``local``).
+
+    Pricing fields are in USD per million tokens — zero defaults so
+    unknown-cost models don't silently report fake savings.  Populated
+    on every registered ModelSpec in ``model_chains.py`` from the
+    upstream providers' public pricing pages.  Neither OpenAI nor
+    Anthropic exposes a programmatic rate API as of April 2026, so the
+    numbers are hand-maintained; they should be verified whenever a
+    provider announces a pricing change.
     """
 
     name: str
@@ -63,7 +109,19 @@ class ModelSpec:
     max_output: int = 4096
     supports_tools: bool = True
     supports_prefix_cache: bool = False
+    input_per_mtok: float = 0.0
+    output_per_mtok: float = 0.0
+    cache_read_per_mtok: float = 0.0
+    cache_write_per_mtok: float = 0.0
     source_config: dict = field(default_factory=dict)
+
+    def pricing(self) -> ModelPricing:
+        return ModelPricing(
+            input_per_mtok=self.input_per_mtok,
+            output_per_mtok=self.output_per_mtok,
+            cache_read_per_mtok=self.cache_read_per_mtok,
+            cache_write_per_mtok=self.cache_write_per_mtok,
+        )
 
 
 @dataclass(frozen=True)
@@ -187,3 +245,67 @@ def _build_one(spec: ModelSpec) -> "LLMProvider":
         )
 
     raise ValueError(f"Unknown ModelSpec.source: {spec.source!r}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pricing lookup (for usage_tracker + cache-savings telemetry)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+_DEFAULT_PRICING = ModelPricing(
+    input_per_mtok=3.0,
+    output_per_mtok=15.0,
+    cache_read_per_mtok=0.30,
+    cache_write_per_mtok=3.75,
+)
+
+
+def _dash_prefix_matches(longer: str, shorter: str) -> bool:
+    """Return True if ``shorter`` is a dash-delimited prefix of ``longer``.
+
+    Guards against accidental matches like ``gpt-4o`` matching the prefix
+    ``gpt-4`` (the ``o`` after the prefix isn't a dash, so we reject).
+    Equal strings also count as a match.
+    """
+    if longer == shorter:
+        return True
+    if not longer.startswith(shorter):
+        return False
+    return longer[len(shorter)] == "-"
+
+
+def lookup_pricing(model: str) -> ModelPricing | None:
+    """Look up ``ModelPricing`` for a model name.
+
+    Walks every ``ModelSpec`` registered in ``model_chains.ALL_MODELS``
+    (which includes standalone specs that aren't currently in an active
+    chain) and tries, in order:
+
+    1. Exact match on ``spec.name``.
+    2. Dash-delimited prefix match in either direction (handles version
+       suffixes like ``claude-haiku-4-5-20251001`` ↔ ``claude-haiku-4-5``).
+       Among multiple prefix candidates, the longest registered name
+       wins (most specific).
+
+    Returns ``None`` for truly unknown models — callers decide whether
+    to fall back to ``_DEFAULT_PRICING`` or skip cost tracking for that
+    record.
+    """
+    from .model_chains import ALL_MODELS
+
+    seen: dict[str, ModelSpec] = {}
+    for spec in ALL_MODELS:
+        seen.setdefault(spec.name, spec)
+
+    if model in seen:
+        return seen[model].pricing()
+
+    candidates: list[tuple[int, ModelSpec]] = []
+    for spec_name, spec in seen.items():
+        if _dash_prefix_matches(model, spec_name) or _dash_prefix_matches(spec_name, model):
+            candidates.append((len(spec_name), spec))
+    if candidates:
+        candidates.sort(key=lambda kv: kv[0], reverse=True)
+        return candidates[0][1].pricing()
+
+    return None

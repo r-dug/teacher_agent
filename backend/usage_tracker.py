@@ -35,31 +35,41 @@ import psycopg2
 import psycopg2.extras
 
 # ── Pricing ───────────────────────────────────────────────────────────────────
-
-_PRICING: dict[str, dict[str, float]] = {
-    "claude-sonnet-4-6":  {"input": 3e-6,    "output": 15e-6,   "cache_read": 0.30e-6,  "cache_write": 3.75e-6},
-    "claude-opus-4-6":    {"input": 15e-6,   "output": 75e-6,   "cache_read": 1.50e-6,  "cache_write": 18.75e-6},
-    "claude-haiku-4-5":   {"input": 0.25e-6, "output": 1.25e-6, "cache_read": 0.03e-6,  "cache_write": 0.30e-6},
-    "claude-haiku-4-5-20251001": {"input": 0.25e-6, "output": 1.25e-6, "cache_read": 0.03e-6, "cache_write": 0.30e-6},
-    "gpt-4o-mini": {"input": 0.15e-6, "output": 0.60e-6, "cache_read": 0.075e-6, "cache_write": 0.0},
-    "gpt-4o": {"input": 2.50e-6, "output": 10.0e-6, "cache_read": 1.25e-6, "cache_write": 0.0},
-    "gpt-5-mini": {"input": 0.25e-6, "output": 2.0e-6, "cache_read": 0.025e-6, "cache_write": 0.0},
-    "gpt-5": {"input": 1.25e-6, "output": 10.0e-6, "cache_read": 0.125e-6, "cache_write": 0.0},
-    "gpt-5.4": {"input": 2.50e-6, "output": 15.0e-6, "cache_read": 0.25e-6, "cache_write": 0.0},
-}
-_DEFAULT_PRICING = {"input": 3e-6, "output": 15e-6, "cache_read": 0.30e-6, "cache_write": 3.75e-6}
+#
+# Pricing data lives on each ``ModelSpec`` in
+# ``backend/services/agents/model_chains.py`` (single source of truth).
+# ``_api_cost()`` looks up the pricing for the given model via
+# ``model_config.lookup_pricing()`` and falls back to
+# ``_DEFAULT_PRICING`` for models that aren't registered.
+#
+# **Usage convention**: ``inp`` is the TOTAL input tokens (including the
+# cached reads and cache creates).  Both provider normalizers in
+# ``providers/openai.py`` and ``providers/anthropic.py`` produce this
+# shape so the cost formula doesn't need to special-case providers.
+# The formula subtracts ``cr + cw`` to get the uncached portion that's
+# billed at the regular input rate.
 
 
 def _api_cost(model: str, inp: int, out: int, cr: int, cw: int) -> float:
-    p = _PRICING.get(model)
-    if p is None:
-        for prefix, pricing in sorted(_PRICING.items(), key=lambda kv: len(kv[0]), reverse=True):
-            if model.startswith(prefix):
-                p = pricing
-                break
-    if p is None:
-        p = _PRICING.get(model.split("-20")[0], _DEFAULT_PRICING)
-    return inp * p["input"] + out * p["output"] + cr * p["cache_read"] + cw * p["cache_write"]
+    """Compute USD cost for one LLM call.
+
+    Args:
+        model: Model name as reported by the LLM provider.
+        inp: Total input tokens (INCLUDES ``cr`` and ``cw``).
+        out: Output tokens.
+        cr: Input tokens read from the prefix cache.
+        cw: Input tokens used to write new cache entries (Anthropic
+            only — OpenAI Responses API doesn't charge separately for
+            cache creation, so this is always 0 for OpenAI).
+    """
+    from backend.services.agents.model_config import (
+        _DEFAULT_PRICING,
+        lookup_pricing,
+    )
+
+    pricing = lookup_pricing(model) or _DEFAULT_PRICING
+    uncached_input = max(inp - cr - cw, 0)
+    return pricing.cost(uncached_input, out, cr, cw)
 
 
 # ── In-memory summary (for sidebar widget, backward-compat) ──────────────────
