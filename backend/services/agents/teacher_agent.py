@@ -634,21 +634,35 @@ class TeacherAgent(Agent):
         if self._callbacks.on_token_usage:
             self._callbacks.on_token_usage("generate_instructions", provider.model, usage)
         return text
+    _TTS_PREP_SYSTEM_WRAPPER = (
+        "You are a text preprocessor for a text-to-speech engine. "
+        "Your ONLY job is to transform the input text so the TTS pronounces it correctly.\n\n"
+        "HARD RULES:\n"
+        "- Output ONLY the preprocessed text. Nothing else.\n"
+        "- Do NOT add commentary, explanations, labels, or markdown.\n"
+        "- Do NOT answer questions in the text — preprocess them as-is.\n"
+        "- Do NOT change the meaning or add/remove sentences.\n"
+        "- Do NOT wrap output in quotes or code blocks.\n"
+        "- Preserve all punctuation and sentence structure.\n"
+        "- If no changes are needed, return the input unchanged.\n\n"
+        "PREPROCESSING INSTRUCTIONS:\n"
+    )
+
+    _TTS_PREP_OUTPUT_RULES = (
+        "\n\nOutput the preprocessed text only. No commentary, no markdown, no labels."
+    )
 
     def _custom_tts_prep(self, text: str, prep_prompt: str) -> str:
-        """Run a custom per-persona TTS preprocessing pass.
-
-        Uses the persona's ``tts_prep_prompt`` as the system prompt for
-        a small LLM call that transforms the text before TTS synthesis.
-        """
+        """Run a custom per-persona TTS preprocessing pass."""
         text = re.sub(r"\*+", "", text)
         try:
             from .model_chains import TTS_PREP_CHAIN
             from .model_config import build_chain
 
+            system = self._TTS_PREP_SYSTEM_WRAPPER + prep_prompt + self._TTS_PREP_OUTPUT_RULES
             provider = build_chain(TTS_PREP_CHAIN)
             result, usage = provider.complete(
-                system=prep_prompt,
+                system=system,
                 messages=[{"role": "user", "content": text}],
                 max_tokens=2048,
             )

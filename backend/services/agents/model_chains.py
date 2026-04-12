@@ -63,6 +63,26 @@ GPT_4O = ModelSpec(
     },
 )
 
+# Cheapest OpenAI option — TTS preprocessing, simple rewrites.
+GPT_4O_MINI_NANO = ModelSpec(
+    name="gpt-4o-mini",
+    source="openai",
+    modalities=frozenset({"text"}),
+    context_window=128_000,
+    max_output=2_048,
+    supports_tools=False,
+    supports_prefix_cache=False,
+    input_per_mtok=0.15,
+    output_per_mtok=0.60,
+    cache_read_per_mtok=0.075,
+    cache_write_per_mtok=0.0,
+    source_config={
+        "api_key_env": "OPENAI_API_KEY",
+        "timeout_s": 10.0,
+        "max_retries": 1,
+    },
+)
+
 # Cheaper / longer-context OpenAI option, useful for bulk decompose / OCR.
 GPT_4O_MINI = ModelSpec(
     name="gpt-4o-mini",
@@ -190,10 +210,10 @@ INSTRUCTIONS_CHAIN = ChainSpec(
     primary=GPT_4O_MINI,
 )
 
-# TTS prep (IPA annotation for Kokoro) — one-off text completion.
+# TTS prep — cheapest model, simple text rewriting only.
 TTS_PREP_CHAIN = ChainSpec(
     role="tts_prep",
-    primary=GPT_4O_MINI,
+    primary=GPT_4O_MINI_NANO,
 )
 
 # Course authoring advisor chat — short conversational turns.
