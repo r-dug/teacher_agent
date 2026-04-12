@@ -11,13 +11,21 @@ from .usage_tracker import UsageTracker as TokenUsageTracker
 class AppState:
     """Holds singletons that are expensive to initialise (models, pipelines)."""
 
-    stt_model: Optional[object] = None       # FasterWhisperBackend (default, loaded at startup)
-    stt_models: dict = {}                    # model_size → FasterWhisperBackend (lazily loaded)
-    kokoro_pipeline: Optional[object] = None  # kokoro.KPipeline
-    tts_provider: Optional[object] = None      # primary provider adapter
-    tts_fallback_provider: Optional[object] = None  # fallback for same-turn resilience
+    # TTS/STT provider lists — ordered for fallback.  Constructed by
+    # build_tts_chain() / build_stt_chain() at startup.
+    tts_providers: list = []          # [OpenAITTSProvider, KokoroTTSProvider, ...]
+    stt_providers: list = []          # [OpenAISTTProvider, LocalSTTProvider, ...]
+
+    # Legacy fields kept for backward compat during transition.
+    # TODO: remove once all callers use tts_providers / stt_providers.
+    stt_model: Optional[object] = None
+    stt_models: dict = {}
+    kokoro_pipeline: Optional[object] = None
+    tts_provider: Optional[object] = None
+    tts_fallback_provider: Optional[object] = None
     active_tts_provider: str = "kokoro"
-    image_provider: Optional[object] = None   # ImageProvider or None if disabled
+
+    image_provider: Optional[object] = None
     token_tracker: TokenUsageTracker = None   # type: ignore[assignment]
 
 

@@ -68,6 +68,7 @@ class AgentSession:
         loop: asyncio.AbstractEventLoop,
         tts_provider=None,
         fallback_tts_provider=None,
+        tts_providers: list | None = None,
         tts_voice: str = DEFAULT_KOKORO_VOICE,
         kokoro_pipeline=None,
         kokoro_voice: str = DEFAULT_KOKORO_VOICE,
@@ -175,7 +176,12 @@ class AgentSession:
         )
 
         # ── Assemble TeacherAgent ────────────────────────────────────────────
-        tts_providers = [p for p in [tts_provider, fallback_tts_provider] if p is not None]
+        # Prefer the chain-built tts_providers list (S3).  Fall back to
+        # the legacy (primary, fallback) pair for backward compat.
+        if tts_providers:
+            _tts_list = list(tts_providers)
+        else:
+            _tts_list = [p for p in [tts_provider, fallback_tts_provider] if p is not None]
         from ...config import settings as _settings
         # Cache Plan C2: stable per-enrollment cache key for the OpenAI
         # Responses API ``prompt_cache_key``.  One key per enrollment so
@@ -187,7 +193,7 @@ class AgentSession:
         self._teacher = TeacherAgent(
             llm_provider=llm_provider,
             callbacks=callbacks,
-            tts_providers=tts_providers,
+            tts_providers=_tts_list,
             tts_voice=tts_voice,
             model=llm_provider.model,
             memory_strategy=_settings.MEMORY_STRATEGY,

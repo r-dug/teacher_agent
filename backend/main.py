@@ -28,7 +28,7 @@ from .config import settings
 configure_logging(storage_dir=settings.STORAGE_DIR)
 log = logging.getLogger(__name__)
 from .db import connection as db, models
-from .routers import courses, iam, internal, leaderboard, lessons, preferences, ws_session, usage
+from .routers import admin_personas, courses, evals, iam, internal, leaderboard, lessons, preferences, ws_session, usage
 from .routers.agents import personas
 from .routers.voice import voices
 
@@ -97,30 +97,35 @@ async def lifespan(app: FastAPI):
     # Load ML models in thread pool (blocking operations)
     # STT model is loaded lazily on first transcription request (avoids blocking startup)
 
-    log.info("Loading Kokoro TTS (%s)...", settings.DEFAULT_VOICE)
-    from .services.voice.tts import build_tts_providers, load_kokoro_pipeline
+    # TTS providers — chain-based construction (S3).
+    from .services.voice.tts import load_kokoro_pipeline
+    from .services.agents.model_config import build_tts_chain, build_stt_chain
+    from .services.agents.model_chains import TTS_CHAIN, TTS_CHAIN_LOCAL, STT_CHAIN, STT_CHAIN_LOCAL
 
+    log.info("Loading Kokoro TTS (%s)...", settings.DEFAULT_VOICE)
     app_state.kokoro_pipeline = await asyncio.to_thread(
         load_kokoro_pipeline, settings.DEFAULT_VOICE
     )
-    selected_provider = settings.effective_tts_provider()
-    app_state.tts_provider, app_state.tts_fallback_provider = build_tts_providers(
-        selected_provider=selected_provider,
-        kokoro_pipeline=app_state.kokoro_pipeline,
-        default_kokoro_voice=settings.DEFAULT_VOICE,
-        openai_api_key=settings.OPENAI_API_KEY,
-        openai_model=settings.OPENAI_TTS_MODEL,
-        openai_voice=settings.OPENAI_TTS_VOICE,
-        openai_format=settings.OPENAI_TTS_FORMAT,
-        openai_timeout_seconds=settings.OPENAI_TTS_TIMEOUT_S,
-        openai_max_retries=settings.OPENAI_TTS_MAX_RETRIES,
-        openai_cost_per_minute_usd=settings.OPENAI_TTS_COST_PER_MINUTE_USD,
+    selected_tts = settings.effective_tts_provider()
+    tts_spec = TTS_CHAIN_LOCAL if selected_tts == "kokoro" else TTS_CHAIN
+    app_state.tts_providers = build_tts_chain(tts_spec, kokoro_pipeline=app_state.kokoro_pipeline)
+    # Legacy compat — some callers still read tts_provider / tts_fallback_provider.
+    app_state.tts_provider = app_state.tts_providers[0] if app_state.tts_providers else None
+    app_state.tts_fallback_provider = app_state.tts_providers[1] if len(app_state.tts_providers) > 1 else None
+    app_state.active_tts_provider = selected_tts
+    log.info(
+        "TTS ready. Chain: %s",
+        " → ".join(getattr(p, "provider_name", "?") for p in app_state.tts_providers),
     )
-    app_state.active_tts_provider = selected_provider
-    if selected_provider == "openai":
-        log.info("TTS ready. Primary=openai, fallback=kokoro.")
-    else:
-        log.info("TTS ready. Primary=kokoro.")
+
+    # STT providers — chain-based construction (S3).
+    selected_stt = settings.effective_stt_provider()
+    stt_spec = STT_CHAIN_LOCAL if selected_stt == "local" else STT_CHAIN
+    app_state.stt_providers = build_stt_chain(stt_spec)
+    log.info(
+        "STT ready. Chain: %s",
+        " → ".join(getattr(p, "provider_name", "?") for p in app_state.stt_providers),
+    )
 
     # Image generation provider (optional — None if disabled or API key missing)
     from .services.images import build_image_provider
@@ -214,12 +219,14 @@ app.include_router(internal.router)
 app.include_router(courses.router)
 app.include_router(lessons.router)
 app.include_router(iam.router)
+app.include_router(admin_personas.router)
 app.include_router(leaderboard.router)
 app.include_router(personas.router)
 app.include_router(voices.router)
 app.include_router(preferences.router)
 app.include_router(ws_session.router)
 app.include_router(usage.router)
+app.include_router(evals.router)
 
 
 @app.get("/health")

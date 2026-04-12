@@ -42,10 +42,6 @@ from ..services.voice.realtime import (
 from ..services.voice.config import OPENAI_STT_MODELS
 from ..services.voice.stt import (
     select_stt_provider,
-    transcribe,
-    transcribe_file,
-    transcribe_file_openai,
-    transcribe_openai,
     load_stt_model,
 )
 from ..services.agents.curriculum import Curriculum
@@ -244,8 +240,7 @@ async def ws_session(
     agent_session = AgentSession(
         send=_send,
         loop=loop,
-        tts_provider=app_state.tts_provider,
-        fallback_tts_provider=app_state.tts_fallback_provider,
+        tts_providers=app_state.tts_providers,
         tts_voice=default_tts_voice,
         kokoro_pipeline=app_state.kokoro_pipeline,
         kokoro_voice=settings.DEFAULT_VOICE,
@@ -893,6 +888,49 @@ def _evict_and_load_stt_model(model_size: str) -> object:
     return load_stt_model(model_size)
 
 
+async def _stt_transcribe(
+    audio_b64: str,
+    sample_rate: int,
+    language: str | None,
+    user_id: str,
+) -> str:
+    """Transcribe audio using the STT provider chain with fallback.
+
+    Tries each provider in ``app_state.stt_providers`` in order.
+    On success returns the transcription text.  On failure advances
+    to the next provider.  Raises the last exception if all fail.
+    """
+    last_exc: Exception | None = None
+    for provider in app_state.stt_providers:
+        try:
+            return await provider.transcribe(
+                audio_b64, sample_rate, language=language, user_id=user_id,
+            )
+        except Exception as exc:
+            log.warning("[stt] %s failed: %s — trying next", provider.provider_name, exc)
+            last_exc = exc
+    raise RuntimeError("All STT providers exhausted") from last_exc
+
+
+async def _stt_transcribe_file(
+    audio_b64: str,
+    mime_type: str,
+    language: str | None,
+    user_id: str,
+) -> str:
+    """Same as ``_stt_transcribe`` but for pre-encoded audio files."""
+    last_exc: Exception | None = None
+    for provider in app_state.stt_providers:
+        try:
+            return await provider.transcribe_file(
+                audio_b64, mime_type, language=language, user_id=user_id,
+            )
+        except Exception as exc:
+            log.warning("[stt] %s file transcription failed: %s — trying next", provider.provider_name, exc)
+            last_exc = exc
+    raise RuntimeError("All STT providers exhausted") from last_exc
+
+
 async def _load_stt_model_bg(websocket: WebSocket, model_size: str) -> None:
     """Load an STT model in a thread pool and cache it on app_state."""
     try:
@@ -1526,31 +1564,15 @@ async def _handle_audio_input_chained(
 
     await websocket.send_json({"event": "status", "message": "Transcribing..."})
 
-    stt_provider = state.stt_provider
     _stt_t0 = time.monotonic()
     try:
-        if stt_provider == "openai":
-            model_id = state.stt_model_size or settings.OPENAI_STT_MODEL
-            text = await transcribe_openai(
-                audio_b64,
-                sample_rate,
-                api_key=settings.OPENAI_API_KEY,
-                model=model_id,
-                language=state.stt_language,
-                timeout_seconds=settings.OPENAI_STT_TIMEOUT_S,
-                max_retries=settings.OPENAI_STT_MAX_RETRIES,
-                cost_per_minute_usd=settings.OPENAI_STT_COST_PER_MINUTE_USD,
-                user_id=state.agent_session._user_id,
-            )
-        else:
-            stt_model = await _get_stt_model(state)
-            text = await transcribe(
-                audio_b64, sample_rate, stt_model, state.stt_language, user_id=state.agent_session._user_id
-            )
+        text = await _stt_transcribe(
+            audio_b64, sample_rate, state.stt_language, state.agent_session._user_id,
+        )
     except Exception as exc:
         await websocket.send_json({"event": "error", "message": f"STT error: {exc}"})
         return
-    log.info("[stt] provider=%s elapsed=%.2fs chars=%d", stt_provider, time.monotonic() - _stt_t0, len(text))
+    log.info("[stt] elapsed=%.2fs chars=%d", time.monotonic() - _stt_t0, len(text))
 
     # Re-check: another handler may have started a turn while we were transcribing.
     if state.agent_task and not state.agent_task.done():
@@ -1675,24 +1697,9 @@ async def _handle_transcribe_only(
     audio_b64: str = msg.get("data", "")
     sample_rate: int = msg.get("sample_rate", 16000)
     try:
-        if state.stt_provider == "openai":
-            model_id = state.stt_model_size or settings.OPENAI_STT_MODEL
-            text = await transcribe_openai(
-                audio_b64,
-                sample_rate,
-                api_key=settings.OPENAI_API_KEY,
-                model=model_id,
-                language=state.stt_language,
-                timeout_seconds=settings.OPENAI_STT_TIMEOUT_S,
-                max_retries=settings.OPENAI_STT_MAX_RETRIES,
-                cost_per_minute_usd=settings.OPENAI_STT_COST_PER_MINUTE_USD,
-                user_id=state.agent_session._user_id,
-            )
-        else:
-            stt_model = await _get_stt_model(state)
-            text = await transcribe(
-                audio_b64, sample_rate, stt_model, state.stt_language, user_id=state.agent_session._user_id
-            )
+        text = await _stt_transcribe(
+            audio_b64, sample_rate, state.stt_language, state.agent_session._user_id,
+        )
         await websocket.send_json({"event": "transcription_only", "text": text})
     except Exception as exc:
         await websocket.send_json({"event": "error", "message": f"STT error: {exc}"})
@@ -1717,26 +1724,10 @@ async def _handle_voice_message(
     audio_b64: str = msg.get("data", "")
     mime_type: str = msg.get("mime_type", "audio/webm")
 
-    stt_provider = state.stt_provider
     try:
-        if stt_provider == "openai":
-            model_id = state.stt_model_size or settings.OPENAI_STT_MODEL
-            text = await transcribe_file_openai(
-                audio_b64,
-                mime_type,
-                api_key=settings.OPENAI_API_KEY,
-                model=model_id,
-                language=state.stt_language,
-                timeout_seconds=settings.OPENAI_STT_TIMEOUT_S,
-                max_retries=settings.OPENAI_STT_MAX_RETRIES,
-                cost_per_minute_usd=settings.OPENAI_STT_COST_PER_MINUTE_USD,
-                user_id=state.agent_session._user_id,
-            )
-        else:
-            stt_model = await _get_stt_model(state)
-            text = await transcribe_file(
-                audio_b64, mime_type, stt_model, state.stt_language, user_id=state.agent_session._user_id
-            )
+        text = await _stt_transcribe_file(
+            audio_b64, mime_type, state.stt_language, state.agent_session._user_id,
+        )
     except Exception as exc:
         await websocket.send_json({"event": "error", "message": f"STT error: {exc}"})
         return
