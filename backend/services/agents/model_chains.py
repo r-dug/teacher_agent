@@ -20,7 +20,14 @@ edit.
 
 from __future__ import annotations
 
-from .model_config import ChainSpec, ModelSpec
+from .model_config import (
+    ChainSpec,
+    ModelSpec,
+    STTChainSpec,
+    STTModelSpec,
+    TTSChainSpec,
+    TTSModelSpec,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model definitions — referenced by chains below.
@@ -243,3 +250,79 @@ ROLE_TO_CHAIN: dict[str, ChainSpec] = {
     "ocr": OCR_CHAIN,
     "title": TITLE_CHAIN,
 }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TTS chains
+# ─────────────────────────────────────────────────────────────────────────────
+
+# OpenAI TTS — gpt-4o-mini-tts with instructions support, per-minute pricing.
+OPENAI_TTS = TTSModelSpec(
+    name="gpt-4o-mini-tts",
+    source="openai",
+    default_voice="alloy",
+    default_speed=0.97,
+    default_format="opus",
+    requires_preprocessing=False,
+    cost_per_minute_usd=0.015,
+    source_config={
+        "api_key_env": "OPENAI_API_KEY",
+        "timeout_s": 20.0,
+        "max_retries": 1,
+    },
+)
+
+# Kokoro — local TTS, zero cost, requires IPA preprocessing.
+KOKORO_TTS = TTSModelSpec(
+    name="kokoro",
+    source="local",
+    default_voice="af_bella",
+    requires_preprocessing=True,
+)
+
+# Default TTS chain: OpenAI primary, Kokoro fallback.
+TTS_CHAIN = TTSChainSpec(
+    primary=OPENAI_TTS,
+    fallbacks=[KOKORO_TTS],
+)
+
+# Local-only TTS chain (production / no-API-key environments).
+TTS_CHAIN_LOCAL = TTSChainSpec(
+    primary=KOKORO_TTS,
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STT chains
+# ─────────────────────────────────────────────────────────────────────────────
+
+# OpenAI STT — gpt-4o-mini-transcribe, per-minute pricing.
+OPENAI_STT = STTModelSpec(
+    name="gpt-4o-mini-transcribe",
+    source="openai",
+    cost_per_minute_usd=0.006,
+    source_config={
+        "api_key_env": "OPENAI_API_KEY",
+        "timeout_s": 30.0,
+        "max_retries": 1,
+    },
+)
+
+# Local STT — FasterWhisper, lazy-loaded on first transcription.
+LOCAL_STT = STTModelSpec(
+    name="faster-whisper-base",
+    source="local",
+    lazy_load=True,
+    source_config={"model_size": "base"},
+)
+
+# Default STT chain: OpenAI primary, local Whisper fallback.
+STT_CHAIN = STTChainSpec(
+    primary=OPENAI_STT,
+    fallbacks=[LOCAL_STT],
+)
+
+# Local-only STT chain.
+STT_CHAIN_LOCAL = STTChainSpec(
+    primary=LOCAL_STT,
+)

@@ -309,3 +309,169 @@ def lookup_pricing(model: str) -> ModelPricing | None:
         return candidates[0][1].pricing()
 
     return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TTS / STT spec types and builders
+# ─────────────────────────────────────────────────────────────────────────────
+
+TTSSource = Literal["openai", "local"]
+STTSource = Literal["openai", "local"]
+
+
+@dataclass(frozen=True)
+class TTSModelSpec:
+    """Declarative description of one TTS model.
+
+    Follows the same ``source_config`` pattern as ``ModelSpec`` so
+    construction is consistent across LLM / TTS / STT providers.
+    """
+
+    name: str
+    source: TTSSource
+    default_voice: str = ""
+    default_speed: float = 1.0
+    default_format: str = "wav"
+    requires_preprocessing: bool = False
+    cost_per_minute_usd: float = 0.0
+    source_config: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class STTModelSpec:
+    """Declarative description of one STT model."""
+
+    name: str
+    source: STTSource
+    lazy_load: bool = False
+    cost_per_minute_usd: float = 0.0
+    source_config: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TTSChainSpec:
+    """Primary TTS model + ordered fallbacks."""
+
+    role: str = "tts"
+    primary: TTSModelSpec = field(default_factory=lambda: TTSModelSpec(name="", source="openai"))
+    fallbacks: list[TTSModelSpec] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class STTChainSpec:
+    """Primary STT model + ordered fallbacks."""
+
+    role: str = "stt"
+    primary: STTModelSpec = field(default_factory=lambda: STTModelSpec(name="", source="openai"))
+    fallbacks: list[STTModelSpec] = field(default_factory=list)
+
+
+def build_tts_chain(
+    spec: TTSChainSpec,
+    *,
+    kokoro_pipeline=None,
+) -> list:
+    """Construct an ordered list of TTS provider instances from a chain spec.
+
+    Returns a list suitable for ``TTSPipeline(providers=...)``.  Each
+    spec in ``[primary] + fallbacks`` is built; specs that fail (e.g.
+    missing API key) are skipped with a warning.
+    """
+    providers: list = []
+    all_specs = [spec.primary] + list(spec.fallbacks)
+    for tts_spec in all_specs:
+        try:
+            providers.append(_build_one_tts(tts_spec, kokoro_pipeline=kokoro_pipeline))
+        except Exception as exc:
+            log.warning(
+                "[build_tts_chain] skipping %s/%s: %s",
+                tts_spec.source, tts_spec.name, exc,
+            )
+    if not providers:
+        raise ValueError("build_tts_chain: no TTS providers could be constructed.")
+    return providers
+
+
+def _build_one_tts(spec: TTSModelSpec, *, kokoro_pipeline=None):
+    """Construct one TTS provider from a TTSModelSpec."""
+    cfg = spec.source_config
+
+    if spec.source == "openai":
+        from ..voice.tts import OpenAITTSProvider
+
+        api_key_env = cfg.get("api_key_env", "OPENAI_API_KEY")
+        api_key = os.environ.get(api_key_env, "").strip()
+        if not api_key:
+            raise ValueError(f"OpenAI TTS requires {api_key_env} to be set.")
+        return OpenAITTSProvider(
+            api_key=api_key,
+            model=spec.name,
+            default_voice=spec.default_voice,
+            response_format=spec.default_format,
+            timeout_seconds=float(cfg.get("timeout_s", 20.0)),
+            max_retries=int(cfg.get("max_retries", 1)),
+            cost_per_minute_usd=spec.cost_per_minute_usd,
+        )
+
+    if spec.source == "local":
+        from ..voice.tts import KokoroTTSProvider
+
+        if kokoro_pipeline is None:
+            raise ValueError("Kokoro TTS requires a loaded pipeline.")
+        return KokoroTTSProvider(
+            pipeline=kokoro_pipeline,
+            default_voice=spec.default_voice or "af_bella",
+        )
+
+    raise ValueError(f"Unknown TTSModelSpec.source: {spec.source!r}")
+
+
+def build_stt_chain(spec: STTChainSpec) -> list:
+    """Construct an ordered list of STT provider instances from a chain spec.
+
+    Returns a list of objects with ``.transcribe()`` and
+    ``.transcribe_file()`` methods.
+    """
+    providers: list = []
+    all_specs = [spec.primary] + list(spec.fallbacks)
+    for stt_spec in all_specs:
+        try:
+            providers.append(_build_one_stt(stt_spec))
+        except Exception as exc:
+            log.warning(
+                "[build_stt_chain] skipping %s/%s: %s",
+                stt_spec.source, stt_spec.name, exc,
+            )
+    if not providers:
+        raise ValueError("build_stt_chain: no STT providers could be constructed.")
+    return providers
+
+
+def _build_one_stt(spec: STTModelSpec):
+    """Construct one STT provider from an STTModelSpec."""
+    cfg = spec.source_config
+
+    if spec.source == "openai":
+        from ..voice.stt import OpenAISTTProvider
+
+        api_key_env = cfg.get("api_key_env", "OPENAI_API_KEY")
+        api_key = os.environ.get(api_key_env, "").strip()
+        if not api_key:
+            raise ValueError(f"OpenAI STT requires {api_key_env} to be set.")
+        return OpenAISTTProvider(
+            api_key=api_key,
+            model=spec.name,
+            timeout_seconds=float(cfg.get("timeout_s", 30.0)),
+            max_retries=int(cfg.get("max_retries", 1)),
+            cost_per_minute_usd=spec.cost_per_minute_usd,
+        )
+
+    if spec.source == "local":
+        from ..voice.stt import LocalSTTProvider
+
+        return LocalSTTProvider(
+            model_size=cfg.get("model_size", "base"),
+            lazy=spec.lazy_load,
+        )
+
+    raise ValueError(f"Unknown STTModelSpec.source: {spec.source!r}")
