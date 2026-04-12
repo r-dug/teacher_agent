@@ -692,6 +692,45 @@ async def _receive_loop(
                     # Sections exist but no messages (reconnect after intro but before first
                     # teaching turn was saved) — skip intro, start teaching directly.
                     state.agent_task = state.first_teaching_task_fn()
+                elif state.phase == "teaching" and state.messages and state.curriculum and state.curriculum.sections:
+                    # Resumed lesson with existing messages — the student
+                    # has navigated back to the lesson page.  Inject a
+                    # greeting prompt so the teacher re-orients them on
+                    # where they left off, then fire a teaching turn.
+                    sec = state.curriculum.sections[state.curriculum.idx]
+                    covered = [s["title"] for s in state.curriculum.sections[:state.curriculum.idx]]
+                    progress = f"We already covered: {', '.join(covered)}." if covered else "This is the beginning of the lesson."
+                    state.messages.append({"role": "user", "content": (
+                        f"The student just arrived. Greet them and orient them. "
+                        f"The current section is \"{sec['title']}\" "
+                        f"(section {state.curriculum.idx + 1} of {len(state.curriculum.sections)}). "
+                        f"{progress} "
+                        f"Briefly welcome them back, remind them where they left off, "
+                        f"and continue teaching."
+                    )})
+                    import uuid as _uuid
+                    _greeting_turn_id = str(_uuid.uuid4())
+                    state.last_turn_id = _greeting_turn_id
+                    state.turn_status = "running"
+
+                    async def _greeting_turn() -> None:
+                        try:
+                            await state.agent_session.run_turn(
+                                state.curriculum, state.agent_instructions,
+                                lesson_goal=state.lesson_goal,
+                                turn_id=_greeting_turn_id,
+                            )
+                            state.turn_status = "complete"
+                            await _save_state(conn, state)
+                            await websocket.send_json({"event": "turn_complete", "turn_id": _greeting_turn_id})
+                        except asyncio.CancelledError:
+                            state.turn_status = "failed"
+                        except Exception as exc:
+                            log.exception("[greeting-turn] raised")
+                            state.turn_status = "failed"
+                            await websocket.send_json({"event": "error", "message": str(exc) or type(exc).__name__})
+
+                    state.agent_task = asyncio.create_task(_greeting_turn())
 
         elif event == "text_message":
             await _handle_text_message(websocket, msg, state, conn)
