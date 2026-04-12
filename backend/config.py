@@ -63,12 +63,10 @@ class Settings:
     # Models
     STT_MODEL_SIZE: str = os.getenv("STT_MODEL_SIZE", "base")
     STT_PROVIDER: str | None = os.getenv("STT_PROVIDER")
-    OPENAI_STT_MODEL: str = os.getenv("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
-    OPENAI_STT_TIMEOUT_S: float = float(os.getenv("OPENAI_STT_TIMEOUT_S", "30"))
-    OPENAI_STT_MAX_RETRIES: int = int(os.getenv("OPENAI_STT_MAX_RETRIES", "1"))
-    OPENAI_STT_COST_PER_MINUTE_USD: float = float(
-        os.getenv("OPENAI_STT_COST_PER_MINUTE_USD", "0.006")
-    )
+    STT_MODEL: str = os.getenv("STT_MODEL", "gpt-4o-mini-transcribe")
+    STT_TIMEOUT_S: float = float(os.getenv("STT_TIMEOUT_S", "30"))
+    STT_MAX_RETRIES: int = int(os.getenv("STT_MAX_RETRIES", "1"))
+    STT_COST_PER_MINUTE_USD: float = float(os.getenv("STT_COST_PER_MINUTE_USD", "0.006"))
     LLM_MODEL: str = os.getenv("LLM_MODEL", "claude-sonnet-4-6")
     TEACH_LLM_PROVIDER: str = os.getenv("TEACH_LLM_PROVIDER", "anthropic")
     TEACH_LLM_MODEL: str | None = os.getenv("TEACH_LLM_MODEL")
@@ -99,15 +97,14 @@ class Settings:
     DEFAULT_VOICE: str = os.getenv("DEFAULT_VOICE", "af_heart")
     ENV: str = os.getenv("ENV", "development")
     TTS_PROVIDER: str | None = os.getenv("TTS_PROVIDER")
+    TTS_MODEL: str = os.getenv("TTS_MODEL", "gpt-4o-mini-tts")
+    TTS_VOICE: str = os.getenv("TTS_VOICE", "alloy")
+    TTS_FORMAT: str = os.getenv("TTS_FORMAT", "opus")
+    TTS_SPEED: float = float(os.getenv("TTS_SPEED", "0.97"))
+    TTS_TIMEOUT_S: float = float(os.getenv("TTS_TIMEOUT_S", "20"))
+    TTS_MAX_RETRIES: int = int(os.getenv("TTS_MAX_RETRIES", "1"))
+    TTS_COST_PER_MINUTE_USD: float = float(os.getenv("TTS_COST_PER_MINUTE_USD", "0.015"))
     OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
-    OPENAI_TTS_MODEL: str = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
-    OPENAI_TTS_VOICE: str = os.getenv("OPENAI_TTS_VOICE", "alloy")
-    OPENAI_TTS_FORMAT: str = os.getenv("OPENAI_TTS_FORMAT", "wav")
-    OPENAI_TTS_TIMEOUT_S: float = float(os.getenv("OPENAI_TTS_TIMEOUT_S", "20"))
-    OPENAI_TTS_MAX_RETRIES: int = int(os.getenv("OPENAI_TTS_MAX_RETRIES", "1"))
-    OPENAI_TTS_COST_PER_MINUTE_USD: float = float(
-        os.getenv("OPENAI_TTS_COST_PER_MINUTE_USD", "0.015")
-    )
     VOICE_ARCH: str = os.getenv("VOICE_ARCH", "chained")
     OPENAI_REALTIME_MODEL: str = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-mini")
     OPENAI_REALTIME_VOICE: str = os.getenv("OPENAI_REALTIME_VOICE", "alloy")
@@ -161,7 +158,7 @@ class Settings:
 
     def default_tts_voice(self) -> str:
         if self.effective_tts_provider() == "openai":
-            return self.OPENAI_TTS_VOICE
+            return self.TTS_VOICE
         return self.DEFAULT_VOICE
 
     def effective_voice_arch(self) -> str:

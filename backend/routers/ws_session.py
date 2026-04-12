@@ -659,7 +659,7 @@ async def _receive_loop(
             state.stt_provider = provider
             if provider == "openai":
                 if state.stt_model_size not in OPENAI_STT_MODELS:
-                    state.stt_model_size = settings.OPENAI_STT_MODEL
+                    state.stt_model_size = settings.STT_MODEL
             else:
                 if state.stt_model_size in OPENAI_STT_MODELS or not state.stt_model_size:
                     state.stt_model_size = settings.STT_MODEL_SIZE

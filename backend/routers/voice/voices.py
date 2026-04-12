@@ -101,7 +101,7 @@ async def list_voice_arches():
 async def list_stt_models(provider: str | None = Query(default=None)):
     effective_provider = select_stt_provider(provider) if provider else settings.effective_stt_provider()
     if effective_provider == "openai":
-        default_model = settings.OPENAI_STT_MODEL
+        default_model = settings.STT_MODEL
         return [
             SttModelResponse(id=model_id, is_default=(model_id == default_model))
             for model_id in OPENAI_STT_MODELS

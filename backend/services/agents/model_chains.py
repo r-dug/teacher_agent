@@ -257,18 +257,21 @@ ROLE_TO_CHAIN: dict[str, ChainSpec] = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 # OpenAI TTS — gpt-4o-mini-tts with instructions support, per-minute pricing.
+# All values read from settings (which reads TTS_* env vars).
+from ...config import settings as _settings
+
 OPENAI_TTS = TTSModelSpec(
-    name="gpt-4o-mini-tts",
+    name=_settings.TTS_MODEL,
     source="openai",
-    default_voice="alloy",
-    default_speed=0.97,
-    default_format="opus",
+    default_voice=_settings.TTS_VOICE,
+    default_speed=_settings.TTS_SPEED,
+    default_format=_settings.TTS_FORMAT,
     requires_preprocessing=False,
-    cost_per_minute_usd=0.015,
+    cost_per_minute_usd=_settings.TTS_COST_PER_MINUTE_USD,
     source_config={
         "api_key_env": "OPENAI_API_KEY",
-        "timeout_s": 20.0,
-        "max_retries": 1,
+        "timeout_s": _settings.TTS_TIMEOUT_S,
+        "max_retries": _settings.TTS_MAX_RETRIES,
     },
 )
 
@@ -297,14 +300,15 @@ TTS_CHAIN_LOCAL = TTSChainSpec(
 # ─────────────────────────────────────────────────────────────────────────────
 
 # OpenAI STT — gpt-4o-mini-transcribe, per-minute pricing.
+# All values read from settings (which reads STT_* env vars).
 OPENAI_STT = STTModelSpec(
-    name="gpt-4o-mini-transcribe",
+    name=_settings.STT_MODEL,
     source="openai",
-    cost_per_minute_usd=0.006,
+    cost_per_minute_usd=_settings.STT_COST_PER_MINUTE_USD,
     source_config={
         "api_key_env": "OPENAI_API_KEY",
-        "timeout_s": 30.0,
-        "max_retries": 1,
+        "timeout_s": _settings.STT_TIMEOUT_S,
+        "max_retries": _settings.STT_MAX_RETRIES,
     },
 )
 
