@@ -644,6 +644,15 @@ export function TeachPage({ sessionId, isAdmin = false, onLogout, userEmail = ''
         setTtsPlaying(ev.playing)
         break
 
+      case 'tts_debug':
+        console.log('%c[TTS DEBUG]', 'color: #8b5cf6; font-weight: bold',
+          '\n  Original:', ev.original,
+          '\n  Transformed:', ev.transformed,
+          '\n  Prep prompt:', ev.prep_prompt,
+          '\n  Voice instructions:', ev.voice_instructions,
+        )
+        break
+
       case 'chunk_complete':
       case 'chunk_ready':
       case 'response_end':

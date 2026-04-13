@@ -108,3 +108,5 @@ class AgentCallbacks:
     on_error: Callable[[str], None] | None = None
     # Distillation: (system_prompt, messages_snapshot, tools, model)
     on_turn_logged: Callable[[str, list[dict], list[dict], str], None] | None = None
+    # TTS debug: (original_text, transformed_text, prep_prompt, voice_instructions)
+    on_tts_debug: Callable[[str, str, str, str], None] | None = None

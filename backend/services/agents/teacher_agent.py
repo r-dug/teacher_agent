@@ -654,6 +654,7 @@ class TeacherAgent(Agent):
 
     def _custom_tts_prep(self, text: str, prep_prompt: str) -> str:
         """Run a custom per-persona TTS preprocessing pass."""
+        original = text
         text = re.sub(r"\*+", "", text)
         try:
             from .model_chains import TTS_PREP_CHAIN
@@ -668,7 +669,13 @@ class TeacherAgent(Agent):
             )
             if self._callbacks.on_token_usage:
                 self._callbacks.on_token_usage("tts_prep", provider.model, usage)
-            return result or text
+            transformed = result or text
+            if self._callbacks.on_tts_debug:
+                self._callbacks.on_tts_debug(
+                    original, transformed, prep_prompt,
+                    self._tts_instructions or "",
+                )
+            return transformed
         except Exception:
             return text
 

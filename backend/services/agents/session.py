@@ -172,6 +172,7 @@ class AgentSession:
             on_response_end=self._on_response_end,
             on_tts_playing=self._on_tts_playing,
             on_tts_done=self._on_tts_done,
+            on_tts_debug=self._on_tts_debug,
             on_error=self._on_error,
         )
 
@@ -825,6 +826,21 @@ class AgentSession:
             cost_usd=estimated_cost_usd,
             user_id=self._user_id,
         )
+
+    def _on_tts_debug(
+        self,
+        original: str,
+        transformed: str,
+        prep_prompt: str,
+        voice_instructions: str,
+    ) -> None:
+        self._fire(self._send({
+            "event": "tts_debug",
+            "original": original,
+            "transformed": transformed,
+            "prep_prompt": prep_prompt,
+            "voice_instructions": voice_instructions,
+        }))
 
     def _on_task_complete(self, curriculum: Curriculum) -> None:
         # Fired from the (async) run_turn dispatcher — schedule the WS send
