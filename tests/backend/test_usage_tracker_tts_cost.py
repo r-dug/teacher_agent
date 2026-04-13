@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-import os
-
+from tests.conftest import _resolve_connection_params
 from backend.usage_tracker import UsageTracker
-
-TEST_DATABASE_URL = os.getenv(
-    "TEST_DATABASE_URL", "postgresql://localhost/pdf_to_audio_test"
-)
 
 
 def _make_tracker() -> UsageTracker:
+    dsn, kwargs = _resolve_connection_params()
     tracker = UsageTracker()
-    tracker.init(TEST_DATABASE_URL)
+    tracker.init(dsn, password=kwargs.get("password"))
     return tracker
 
 

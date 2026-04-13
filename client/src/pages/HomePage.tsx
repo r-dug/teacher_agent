@@ -146,6 +146,16 @@ export function HomePage({ sessionId, onLogout, isAdmin, userEmail = '', usernam
               Usage
             </Button>
           )}
+          {isAdmin && (
+            <Button variant="ghost" size="sm" onClick={() => navigate('/admin/evals')} data-page-transition>
+              Evals
+            </Button>
+          )}
+          {isAdmin && (
+            <Button variant="ghost" size="sm" onClick={() => navigate('/admin/personas')} data-page-transition>
+              Personas
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="sm"

@@ -248,6 +248,28 @@ export function CoursePage({ sessionId, isAdmin = false, onLogout, userEmail = '
                       </span>
                     )}
                     {lesson.completed && <Badge variant="secondary">Complete</Badge>}
+                    {(lesson.completed || lesson.current_section_idx > 0) && (
+                      <button
+                        className="text-[10px] px-1.5 py-0.5 rounded border border-[hsl(var(--border))] text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--accent))] transition-colors"
+                        onClick={async (e) => {
+                          e.stopPropagation()
+                          if (!confirm('Reset all progress and start this lesson over?')) return
+                          const res = await fetch(`/api/lessons/${lesson.id}/retake`, {
+                            method: 'POST',
+                            headers: { 'X-Session-Id': sessionId },
+                          })
+                          if (res.ok) {
+                            setLessons((prev) => prev.map((l) =>
+                              l.id === lesson.id
+                                ? { ...l, completed: false, current_section_idx: 0 }
+                                : l
+                            ))
+                          }
+                        }}
+                      >
+                        Restart
+                      </button>
+                    )}
                   </div>
                 </CardContent>
               </Card>

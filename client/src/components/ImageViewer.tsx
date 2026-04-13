@@ -30,17 +30,26 @@ export function ImageViewer({
 
   useEffect(() => {
     let cancelled = false
-    const apiUrl = imageUrl.startsWith('/api') ? imageUrl : `/api${imageUrl}`
-    fetch(apiUrl, { headers: { 'X-Session-Id': sessionId } })
-      .then(r => r.ok ? r.blob() : Promise.reject(r.status))
-      .then(blob => {
-        if (cancelled) return
-        setBlobSrc(URL.createObjectURL(blob))
-      })
-      .catch(() => { if (!cancelled) setFailed(true) })
+    const isExternal = imageUrl.startsWith('http://') || imageUrl.startsWith('https://')
+
+    if (isExternal) {
+      // External URLs (from search_image) — load directly, no auth needed.
+      setBlobSrc(imageUrl)
+    } else {
+      // Internal URLs (generated images) — fetch with session auth header.
+      const apiUrl = imageUrl.startsWith('/api') ? imageUrl : `/api${imageUrl}`
+      fetch(apiUrl, { headers: { 'X-Session-Id': sessionId } })
+        .then(r => r.ok ? r.blob() : Promise.reject(r.status))
+        .then(blob => {
+          if (cancelled) return
+          setBlobSrc(URL.createObjectURL(blob))
+        })
+        .catch(() => { if (!cancelled) setFailed(true) })
+    }
     return () => {
       cancelled = true
-      if (blobSrc) URL.revokeObjectURL(blobSrc)
+      // Only revoke blob URLs we created, not external URLs
+      if (blobSrc && blobSrc.startsWith('blob:')) URL.revokeObjectURL(blobSrc)
     }
   }, [imageUrl, sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
 

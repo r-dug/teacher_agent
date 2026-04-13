@@ -2,6 +2,8 @@
  * Curriculum progress panel: section list with current-section highlight.
  */
 
+import { useState } from 'react'
+import { ChevronDown } from 'lucide-react'
 import { Progress } from './ui/progress'
 import { cn } from '@/lib/utils'
 import { sortByRecency, recordRecent } from '@/lib/recency'
@@ -14,6 +16,7 @@ import type {
   SttLanguage,
   SttModel,
   SttProvider,
+  SectionAsset,
 } from '@/lib/types'
 
 interface CurriculumPanelProps {
@@ -62,6 +65,104 @@ function SelectRow({ label, value, onChange, children }: {
         {children}
       </select>
     </div>
+  )
+}
+
+function assetLabel(asset: SectionAsset): string {
+  if (asset.type === 'pdf_pages' && asset.page_start != null) {
+    return `Page ${asset.page_start}`
+  }
+  return asset.caption || 'Visual aid'
+}
+
+function SectionList({
+  sections,
+  current,
+  complete,
+  onViewPage,
+}: {
+  sections: CurriculumData['sections']
+  current: number
+  complete: boolean
+  onViewPage?: (pageStart: number, pageEnd: number) => void
+}) {
+  const [expanded, setExpanded] = useState<Set<number>>(new Set())
+
+  function toggle(idx: number) {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(idx)) next.delete(idx)
+      else next.add(idx)
+      return next
+    })
+  }
+
+  return (
+    <ul className="mt-2 space-y-1">
+      {sections.map((sec, idx) => {
+        const isCurrent = !complete && idx === current
+        const isDone = complete || idx < current
+        const assets = sec.assets ?? []
+        const isExpanded = expanded.has(idx)
+        return (
+          <li
+            key={idx}
+            className={cn(
+              'rounded px-2 py-1 text-sm transition-colors',
+              isCurrent && 'bg-[hsl(var(--primary)/0.1)] font-medium text-[hsl(var(--primary))]',
+              isDone && !isCurrent && 'text-[hsl(var(--muted-foreground))] line-through',
+              !isCurrent && !isDone && 'text-[hsl(var(--foreground))]'
+            )}
+          >
+            <div className="flex items-center justify-between gap-1">
+              <span className="flex-1 truncate">{sec.title ?? `Section ${idx + 1}`}</span>
+              {assets.length > 0 && (
+                <button
+                  onClick={() => toggle(idx)}
+                  className={cn(
+                    'shrink-0 flex items-center gap-0.5 rounded px-1 text-xs',
+                    'text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--accent))] hover:text-[hsl(var(--accent-foreground))] transition-colors'
+                  )}
+                  title={isExpanded ? 'Hide visual aids' : 'Show visual aids'}
+                >
+                  {assets.length} {assets.length === 1 ? 'page' : 'pages'}
+                  <ChevronDown
+                    size={12}
+                    className={cn('transition-transform', isExpanded && 'rotate-180')}
+                  />
+                </button>
+              )}
+            </div>
+            {isExpanded && assets.length > 0 && (
+              <ul className="mt-1 ml-2 space-y-0.5 no-underline" style={{ textDecoration: 'none' }}>
+                {assets.map((asset, ai) => (
+                  <li key={ai} className="no-underline" style={{ textDecoration: 'none' }}>
+                    <button
+                      onClick={() => {
+                        if (asset.page_start != null && onViewPage) {
+                          onViewPage(asset.page_start, asset.page_end ?? asset.page_start)
+                        }
+                      }}
+                      disabled={asset.page_start == null || !onViewPage}
+                      className={cn(
+                        'w-full text-left rounded px-1.5 py-0.5 text-xs transition-colors',
+                        asset.page_start != null && onViewPage
+                          ? 'hover:bg-[hsl(var(--accent))] hover:text-[hsl(var(--accent-foreground))] cursor-pointer'
+                          : 'opacity-50 cursor-default',
+                        'text-[hsl(var(--muted-foreground))]'
+                      )}
+                      style={{ textDecoration: 'none' }}
+                    >
+                      {assetLabel(asset)}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </li>
+        )
+      })}
+    </ul>
   )
 }
 
@@ -180,42 +281,12 @@ export function CurriculumPanel({
         <span>{complete ? 'Complete!' : `${current + 1} / ${total}`}</span>
       </div>
       <Progress value={pct} />
-      <ul className="mt-2 space-y-1">
-        {curriculum.sections.map((sec, idx) => {
-          const isCurrent = !complete && idx === current
-          const isDone = complete || idx < current
-          const hasPages = sec.page_start != null
-          const pageLabel = hasPages
-            ? sec.page_end && sec.page_end !== sec.page_start
-              ? `pp. ${sec.page_start}–${sec.page_end}`
-              : `p. ${sec.page_start}`
-            : null
-          return (
-            <li
-              key={idx}
-              className={cn(
-                'rounded px-2 py-1 text-sm transition-colors',
-                isCurrent && 'bg-[hsl(var(--primary)/0.1)] font-medium text-[hsl(var(--primary))]',
-                isDone && !isCurrent && 'text-[hsl(var(--muted-foreground))] line-through',
-                !isCurrent && !isDone && 'text-[hsl(var(--foreground))]'
-              )}
-            >
-              <div className="flex items-center justify-between gap-1">
-                <span className="flex-1 truncate">{sec.title ?? `Section ${idx + 1}`}</span>
-                {pageLabel && onViewPage && (
-                  <button
-                    onClick={() => onViewPage(sec.page_start!, sec.page_end ?? sec.page_start!)}
-                    className="shrink-0 rounded px-1 text-xs text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--accent))] hover:text-[hsl(var(--accent-foreground))] transition-colors"
-                    title="View pages"
-                  >
-                    {pageLabel}
-                  </button>
-                )}
-              </div>
-            </li>
-          )
-        })}
-      </ul>
+      <SectionList
+        sections={curriculum.sections}
+        current={current}
+        complete={complete}
+        onViewPage={onViewPage}
+      />
     </div>
   )
 }

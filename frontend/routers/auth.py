@@ -41,6 +41,8 @@ from email_validator import EmailNotValidError, validate_email
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
+from backend.services import terms as terms_config  # shared constants (same repo/env)
+
 from ..config import settings
 from ..email import send_verification_email, send_password_reset_email, send_welcome_email
 from ..http_client import get as get_http
@@ -154,6 +156,8 @@ class MeResponse(BaseModel):
     email: str
     username: str = ""
     is_admin: bool = False
+    terms_version_current: str = ""
+    terms_version_accepted: str = ""
 
 
 # ── routes ─────────────────────────────────────────────────────────────────────
@@ -210,7 +214,8 @@ async def verify_email(body: VerifyRequest):
     user = resp.json()
     session_id = await _create_backend_session(user["user_id"])
     store.add(session_id, user_id=user["user_id"], email=user["email"],
-              is_admin=bool(user.get("is_admin", 0)))
+              is_admin=bool(user.get("is_admin", 0)),
+              terms_version_accepted=user.get("terms_version_accepted") or "")
     # Fire welcome email in the background — don't block the verify response.
     asyncio.create_task(send_welcome_email(user["email"]))
     return SessionResponse(session_id=session_id)
@@ -244,7 +249,8 @@ async def login(body: LoginRequest):
 
     session_id = await _create_backend_session(user["user_id"])
     store.add(session_id, user_id=user["user_id"], email=email,
-              username=user.get("username", ""), is_admin=bool(user.get("is_admin", 0)))
+              username=user.get("username", ""), is_admin=bool(user.get("is_admin", 0)),
+              terms_version_accepted=user.get("terms_version_accepted") or "")
     return SessionResponse(session_id=session_id)
 
 
@@ -277,8 +283,16 @@ async def me(x_session_id: str = Header(...)):
             email=user["email"],
             username=user.get("username", ""),
             is_admin=bool(user.get("is_admin", False)),
+            terms_version_accepted=user.get("terms_version_accepted") or "",
         )
-    return MeResponse(user_id=entry.user_id, email=entry.email, username=entry.username, is_admin=entry.is_admin)
+    return MeResponse(
+        user_id=entry.user_id,
+        email=entry.email,
+        username=entry.username,
+        is_admin=entry.is_admin,
+        terms_version_current=terms_config.TOS_VERSION,
+        terms_version_accepted=entry.terms_version_accepted,
+    )
 
 
 @router.post("/forgot-password", status_code=200)

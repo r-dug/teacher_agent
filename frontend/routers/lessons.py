@@ -143,6 +143,28 @@ async def delete_lesson(lesson_id: str, x_session_id: str = Header(...)):
     return await _proxy_delete(f"/lessons/{lesson_id}", params={"user_id": user_id})
 
 
+@router.patch("/{lesson_id}/enrollment/persona")
+async def update_enrollment_persona(lesson_id: str, request: Request, x_session_id: str = Header(...)):
+    entry = _require_session(x_session_id)
+    user_id = await _get_user_id(x_session_id, entry)
+    body = await request.body()
+    return await _proxy_patch(
+        f"/lessons/{lesson_id}/enrollment/persona",
+        body,
+        request.headers.get("content-type", "application/json"),
+        params={"user_id": user_id},
+    )
+
+
+@router.post("/{lesson_id}/retake", status_code=204)
+async def retake_lesson(lesson_id: str, x_session_id: str = Header(...)):
+    entry = _require_session(x_session_id)
+    user_id = await _get_user_id(x_session_id, entry)
+    http = get_http()
+    resp = await http.post(f"/lessons/{lesson_id}/retake", params={"user_id": user_id})
+    return Response(content=resp.content, status_code=resp.status_code)
+
+
 @router.get("/{lesson_id}/page/{page_number}")
 async def get_lesson_page(
     lesson_id: str,

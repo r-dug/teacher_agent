@@ -12,6 +12,7 @@
  *  /teach/:id         → TeachPage
  *  /admin/usage       → UsageDashboardPage (admin only)
  *  /admin/iam         → IamPage (admin only)
+ *  /admin/evals       → EvalDashboardPage (admin only)
  *
  * Routing (unauthenticated):
  *  /auth/verify → EmailVerifyPage  (handles email verification links)
@@ -31,10 +32,19 @@ const UsageDashboardPage = lazy(() =>
 const IamPage = lazy(() =>
   import('./pages/IamPage').then(m => ({ default: m.IamPage }))
 )
+const EvalDashboardPage = lazy(() =>
+  import('./pages/EvalDashboardPage').then(m => ({ default: m.EvalDashboardPage }))
+)
+const PersonasPage = lazy(() =>
+  import('./pages/PersonasPage').then(m => ({ default: m.PersonasPage }))
+)
 const LeaderboardPage = lazy(() =>
   import('./pages/LeaderboardPage').then(m => ({ default: m.LeaderboardPage }))
 )
 import { BlogArticlePage } from './pages/BlogArticlePage'
+import { TermsPage } from './pages/TermsPage'
+import { TermsModal } from './components/TermsModal'
+import { LicenseFooter } from './components/LicenseFooter'
 import { LoginPage } from './pages/LoginPage'
 import { RegisterPage } from './pages/RegisterPage'
 import { EmailPendingPage } from './pages/EmailPendingPage'
@@ -55,6 +65,8 @@ export default function App() {
   const [username, setUsername] = useState('')
   const [authPage, setAuthPage] = useState<AuthPage>('login')
   const [pendingEmail, setPendingEmail] = useState('')
+  const [tosCurrent, setTosCurrent] = useState('')
+  const [tosAccepted, setTosAccepted] = useState('')
 
   // ── session bootstrap ────────────────────────────────────────────────────
   useEffect(() => {
@@ -74,6 +86,8 @@ export default function App() {
         setIsAdmin(Boolean(data.is_admin))
         setUserEmail(data.email || '')
         setUsername(data.username || '')
+        setTosCurrent(data.terms_version_current || '')
+        setTosAccepted(data.terms_version_accepted || '')
         setAuthState('authenticated')
       })
       .catch(() => {
@@ -95,6 +109,8 @@ export default function App() {
           setIsAdmin(Boolean(data.is_admin))
           setUserEmail(data.email || '')
           setUsername(data.username || '')
+          setTosCurrent(data.terms_version_current || '')
+          setTosAccepted(data.terms_version_accepted || '')
         }
       })
       .catch(() => {})
@@ -109,6 +125,8 @@ export default function App() {
     setIsAdmin(false)
     setUserEmail('')
     setUsername('')
+    setTosCurrent('')
+    setTosAccepted('')
     setAuthState('unauthenticated')
     setAuthPage('login')
     if (sid) {
@@ -135,64 +153,104 @@ export default function App() {
     )
   }
 
+  // ── public terms page (no auth) ─────────────────────────────────────────
+  if (typeof window !== 'undefined' && window.location.pathname === '/terms') {
+    return (
+      <ThemeProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/terms" element={<TermsPage />} />
+          </Routes>
+        </BrowserRouter>
+      </ThemeProvider>
+    )
+  }
+
+  const needsTosAcceptance =
+    authState === 'authenticated' &&
+    Boolean(tosCurrent) &&
+    tosCurrent !== tosAccepted
+
   return (
     <ThemeProvider>
-      {authState === 'loading' ? (
-        <div className="flex h-screen items-center justify-center">
-          <p className="text-sm text-[hsl(var(--muted-foreground))]">Loading…</p>
+      <div className="flex min-h-screen flex-col">
+        <div className="flex-1">
+          {authState === 'loading' ? (
+            <div className="flex h-screen items-center justify-center">
+              <p className="text-sm text-[hsl(var(--muted-foreground))]">Loading…</p>
+            </div>
+          ) : authState === 'authenticated' && sessionId ? (
+            <BrowserRouter>
+              <Routes>
+                <Route path="/" element={<HomePage sessionId={sessionId} onLogout={onLogout} isAdmin={isAdmin} userEmail={userEmail} username={username} onUsernameChange={setUsername} />} />
+                <Route path="/leaderboard" element={
+                  <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
+                    <LeaderboardPage sessionId={sessionId} username={username} />
+                  </Suspense>
+                } />
+                <Route path="/courses/:courseId" element={<CoursePage sessionId={sessionId} isAdmin={isAdmin} onLogout={onLogout} userEmail={userEmail} />} />
+                <Route path="/teach/:lessonId" element={<TeachPage sessionId={sessionId} isAdmin={isAdmin} onLogout={onLogout} userEmail={userEmail} />} />
+                <Route path="/admin/usage" element={
+                  <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
+                    <UsageDashboardPage sessionId={sessionId} isAdmin={isAdmin} />
+                  </Suspense>
+                } />
+                <Route path="/admin/iam" element={
+                  <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
+                    <IamPage sessionId={sessionId} isAdmin={isAdmin} currentUserId={userId} />
+                  </Suspense>
+                } />
+                <Route path="/admin/evals" element={
+                  <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
+                    <EvalDashboardPage sessionId={sessionId} isAdmin={isAdmin} />
+                  </Suspense>
+                } />
+                <Route path="/admin/personas" element={
+                  <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
+                    <PersonasPage sessionId={sessionId} isAdmin={isAdmin} />
+                  </Suspense>
+                } />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+              {needsTosAcceptance && (
+                <TermsModal
+                  sessionId={sessionId}
+                  onAccepted={() => setTosAccepted(tosCurrent)}
+                  onLogout={onLogout}
+                />
+              )}
+            </BrowserRouter>
+          ) : (
+            <BrowserRouter>
+              <Routes>
+                <Route
+                  path="/auth/verify"
+                  element={<EmailVerifyPage onLogin={onLogin} onGoLogin={() => setAuthPage('login')} />}
+                />
+                <Route
+                  path="/auth/reset-password"
+                  element={<ResetPasswordPage onGoLogin={() => setAuthPage('login')} />}
+                />
+                <Route
+                  path="*"
+                  element={
+                    authPage === 'pending' ? (
+                      <EmailPendingPage email={pendingEmail} onGoLogin={() => setAuthPage('login')} />
+                    ) : authPage === 'register' ? (
+                      <RegisterPage onPending={onRegisterSuccess} onGoLogin={() => setAuthPage('login')} />
+                    ) : authPage === 'forgot' ? (
+                      <ForgotPasswordPage onGoLogin={() => setAuthPage('login')} />
+                    ) : (
+                      <LoginPage onLogin={onLogin} onGoRegister={() => setAuthPage('register')} onForgotPassword={() => setAuthPage('forgot')} />
+                    )
+                  }
+                />
+              </Routes>
+            </BrowserRouter>
+          )}
         </div>
-      ) : authState === 'authenticated' && sessionId ? (
-        <BrowserRouter>
-          <Routes>
-            <Route path="/" element={<HomePage sessionId={sessionId} onLogout={onLogout} isAdmin={isAdmin} userEmail={userEmail} username={username} onUsernameChange={setUsername} />} />
-            <Route path="/leaderboard" element={
-              <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
-                <LeaderboardPage sessionId={sessionId} username={username} />
-              </Suspense>
-            } />
-            <Route path="/courses/:courseId" element={<CoursePage sessionId={sessionId} isAdmin={isAdmin} onLogout={onLogout} userEmail={userEmail} />} />
-            <Route path="/teach/:lessonId" element={<TeachPage sessionId={sessionId} isAdmin={isAdmin} onLogout={onLogout} userEmail={userEmail} />} />
-            <Route path="/admin/usage" element={
-              <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
-                <UsageDashboardPage sessionId={sessionId} isAdmin={isAdmin} />
-              </Suspense>
-            } />
-            <Route path="/admin/iam" element={
-              <Suspense fallback={<div className="flex h-screen items-center justify-center text-sm text-[hsl(var(--muted-foreground))]">Loading…</div>}>
-                <IamPage sessionId={sessionId} isAdmin={isAdmin} currentUserId={userId} />
-              </Suspense>
-            } />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </BrowserRouter>
-      ) : (
-        <BrowserRouter>
-          <Routes>
-            <Route
-              path="/auth/verify"
-              element={<EmailVerifyPage onLogin={onLogin} onGoLogin={() => setAuthPage('login')} />}
-            />
-            <Route
-              path="/auth/reset-password"
-              element={<ResetPasswordPage onGoLogin={() => setAuthPage('login')} />}
-            />
-            <Route
-              path="*"
-              element={
-                authPage === 'pending' ? (
-                  <EmailPendingPage email={pendingEmail} onGoLogin={() => setAuthPage('login')} />
-                ) : authPage === 'register' ? (
-                  <RegisterPage onPending={onRegisterSuccess} onGoLogin={() => setAuthPage('login')} />
-                ) : authPage === 'forgot' ? (
-                  <ForgotPasswordPage onGoLogin={() => setAuthPage('login')} />
-                ) : (
-                  <LoginPage onLogin={onLogin} onGoRegister={() => setAuthPage('register')} onForgotPassword={() => setAuthPage('forgot')} />
-                )
-              }
-            />
-          </Routes>
-        </BrowserRouter>
-      )}
+        <LicenseFooter />
+      </div>
     </ThemeProvider>
   )
 }

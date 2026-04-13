@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from ..db import connection as db, models
+from ..services import terms as terms_config
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 
@@ -89,6 +90,7 @@ class AuthUserResponse(BaseModel):
     email_verified: bool
     is_admin: bool = False
     password_hash: str | None = None  # only returned on login lookup
+    terms_version_accepted: str = ""
 
 
 class StoreTokenRequest(BaseModel):
@@ -131,6 +133,7 @@ async def auth_get_user_by_session(session_id: str, conn: Conn):
         username=user.get("username") or "",
         email_verified=bool(user["email_verified"]),
         is_admin=bool(user["is_admin"]),
+        terms_version_accepted=user.get("terms_version_accepted") or "",
     )
 
 
@@ -147,6 +150,7 @@ async def auth_get_user(email: str, conn: Conn):
         email_verified=bool(user["email_verified"]),
         is_admin=bool(user["is_admin"]),
         password_hash=user["password_hash"],
+        terms_version_accepted=user.get("terms_version_accepted") or "",
     )
 
 
@@ -254,3 +258,40 @@ async def auth_update_username(body: UpdateUsernameRequest, conn: Conn):
             raise HTTPException(status_code=409, detail="Username is already taken.")
         raise
     return {"ok": True, "username": uname}
+
+
+# ── terms of service ──────────────────────────────────────────────────────────
+
+class TermsResponse(BaseModel):
+    version: str
+    text: str
+    license_name: str
+    license_url: str
+    copyright_holder: str
+    copyright_year: str
+
+
+class TermsAcceptRequest(BaseModel):
+    user_id: str
+
+
+@router.get("/terms", response_model=TermsResponse)
+async def get_terms():
+    """Return the current Terms of Use text + version + license metadata."""
+    return TermsResponse(
+        version=terms_config.TOS_VERSION,
+        text=terms_config.TOS_TEXT,
+        license_name=terms_config.LICENSE_NAME,
+        license_url=terms_config.LICENSE_URL,
+        copyright_holder=terms_config.COPYRIGHT_HOLDER,
+        copyright_year=terms_config.COPYRIGHT_YEAR,
+    )
+
+
+@router.post("/terms/accept", status_code=204)
+async def accept_terms(body: TermsAcceptRequest, conn: Conn):
+    """Record that ``user_id`` has accepted the current TOS_VERSION."""
+    user = await models.get_user_by_id(conn, body.user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    await models.set_terms_accepted(conn, body.user_id, terms_config.TOS_VERSION)

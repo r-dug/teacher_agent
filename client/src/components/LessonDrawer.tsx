@@ -8,7 +8,7 @@
 import { useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
-import type { Course, Lesson } from '@/lib/types'
+import type { Course, Lesson, VisualAidConfig, VisualAidSourceConfig } from '@/lib/types'
 
 interface LessonDrawerProps {
   sessionId: string
@@ -45,6 +45,21 @@ export function LessonDrawer({
   )
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Visual aid config
+  const defaultSrc: VisualAidSourceConfig = { enabled: false, persistence: 'persistent', timing: 'spontaneous' }
+  const initVac = lesson?.visual_aid_config ?? {}
+  const [vacPdfPages, setVacPdfPages] = useState(initVac.pdf_pages ?? true)
+  const [vacGenerated, setVacGenerated] = useState<VisualAidSourceConfig>({ ...defaultSrc, ...initVac.generated_images })
+  const [vacWeb, setVacWeb] = useState<VisualAidSourceConfig>({ ...defaultSrc, ...initVac.web_images })
+
+  function buildVisualAidConfig(): VisualAidConfig {
+    return {
+      pdf_pages: vacPdfPages,
+      generated_images: vacGenerated,
+      web_images: vacWeb,
+    }
+  }
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0] ?? null
@@ -95,6 +110,7 @@ export function LessonDrawer({
         if (description !== (lesson?.description ?? '')) body.description = description
         // Always send course_id so we can remove from course (null = standalone)
         body.course_id = selectedCourseId || null
+        body.visual_aid_config = buildVisualAidConfig()
 
         const res = await fetch(`/api/lessons/${lesson!.id}`, {
           method: 'PATCH',
@@ -206,6 +222,63 @@ export function LessonDrawer({
           </select>
         )}
       </div>
+
+      {/* Visual aids config — edit mode only */}
+      {mode === 'edit' && (
+        <div className="space-y-3">
+          <label className="block text-sm font-medium">Visual aids</label>
+
+          {/* PDF pages */}
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={vacPdfPages} onChange={(e) => setVacPdfPages(e.target.checked)} />
+            PDF pages (show slides from source document)
+          </label>
+
+          {/* Generated images */}
+          <div className="space-y-1">
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={vacGenerated.enabled} onChange={(e) => setVacGenerated((v) => ({ ...v, enabled: e.target.checked }))} />
+              AI-generated images
+            </label>
+            {vacGenerated.enabled && (
+              <div className="ml-6 space-y-1 text-xs text-[hsl(var(--muted-foreground))]">
+                <div className="flex items-center gap-3">
+                  <span>Storage:</span>
+                  <label className="flex items-center gap-1"><input type="radio" name="gen-persist" checked={vacGenerated.persistence === 'persistent'} onChange={() => setVacGenerated((v) => ({ ...v, persistence: 'persistent' }))} /> Persistent</label>
+                  <label className="flex items-center gap-1"><input type="radio" name="gen-persist" checked={vacGenerated.persistence === 'ephemeral'} onChange={() => setVacGenerated((v) => ({ ...v, persistence: 'ephemeral' }))} /> Ephemeral</label>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span>Timing:</span>
+                  <label className="flex items-center gap-1"><input type="radio" name="gen-timing" checked={vacGenerated.timing === 'spontaneous'} onChange={() => setVacGenerated((v) => ({ ...v, timing: 'spontaneous' }))} /> Spontaneous</label>
+                  <label className="flex items-center gap-1"><input type="radio" name="gen-timing" checked={vacGenerated.timing === 'prefetched'} onChange={() => setVacGenerated((v) => ({ ...v, timing: 'prefetched' }))} /> Prefetched</label>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Web images */}
+          <div className="space-y-1">
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={vacWeb.enabled} onChange={(e) => setVacWeb((v) => ({ ...v, enabled: e.target.checked }))} />
+              Web images (public domain search)
+            </label>
+            {vacWeb.enabled && (
+              <div className="ml-6 space-y-1 text-xs text-[hsl(var(--muted-foreground))]">
+                <div className="flex items-center gap-3">
+                  <span>Storage:</span>
+                  <label className="flex items-center gap-1"><input type="radio" name="web-persist" checked={vacWeb.persistence === 'persistent'} onChange={() => setVacWeb((v) => ({ ...v, persistence: 'persistent' }))} /> Persistent</label>
+                  <label className="flex items-center gap-1"><input type="radio" name="web-persist" checked={vacWeb.persistence === 'ephemeral'} onChange={() => setVacWeb((v) => ({ ...v, persistence: 'ephemeral' }))} /> Ephemeral</label>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span>Timing:</span>
+                  <label className="flex items-center gap-1"><input type="radio" name="web-timing" checked={vacWeb.timing === 'spontaneous'} onChange={() => setVacWeb((v) => ({ ...v, timing: 'spontaneous' }))} /> Spontaneous</label>
+                  <label className="flex items-center gap-1"><input type="radio" name="web-timing" checked={vacWeb.timing === 'prefetched'} onChange={() => setVacWeb((v) => ({ ...v, timing: 'prefetched' }))} /> Prefetched</label>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {error && <p className="text-sm text-[hsl(var(--destructive))]">{error}</p>}
 

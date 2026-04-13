@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 from datetime import datetime
@@ -120,6 +121,7 @@ class LessonResponse(BaseModel):
     current_section_idx: int
     completed: bool
     section_count: int = 0
+    persona_id: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -133,6 +135,7 @@ class LessonUpdate(BaseModel):
     title: str | None = None
     description: str | None = None
     visibility: str | None = None
+    visual_aid_config: dict | None = None
     # course_id uses model_fields_set so explicit null (remove from course) is detectable
     course_id: str | None = None
 
@@ -215,12 +218,14 @@ async def get_lesson(lesson_id: str, user_id: str, conn: Conn):
     messages = await models.get_messages(conn, enrollment["id"]) if enrollment else []
     enrollment_idx = enrollment["current_section_idx"] if enrollment else 0
     enrollment_completed = bool(enrollment["completed"]) if enrollment else False
+    enrollment_persona_id = enrollment.get("persona_id") if enrollment else None
     return LessonDetailResponse(
         **{
             **lesson,
             "current_section_idx": enrollment_idx,
             "completed": enrollment_completed,
             "section_count": len(sections),
+            "persona_id": enrollment_persona_id,
         },
         sections=sections,
         messages=messages,
@@ -241,6 +246,8 @@ async def update_lesson(lesson_id: str, user_id: str, body: LessonUpdate, conn: 
         if body.visibility not in ("draft", "published"):
             raise HTTPException(status_code=422, detail="visibility must be 'draft' or 'published'")
         updates["visibility"] = body.visibility
+    if body.visual_aid_config is not None:
+        updates["visual_aid_config"] = json.dumps(body.visual_aid_config)
     if "course_id" in body.model_fields_set:
         updates["course_id"] = body.course_id  # can be None to remove from course
     if updates:
@@ -289,6 +296,33 @@ async def save_lesson_state(
         await models.upsert_sections(conn, lesson_id, sections)
     if messages := body.get("messages"):
         await models.upsert_messages(conn, enrollment["id"], messages)
+
+
+class EnrollmentPersonaUpdate(BaseModel):
+    persona_id: str | None
+
+
+@router.patch("/{lesson_id}/enrollment/persona", status_code=200)
+async def update_enrollment_persona(
+    lesson_id: str, body: EnrollmentPersonaUpdate, user_id: str, conn: Conn,
+):
+    """Persist the user's persona selection for this enrollment."""
+    lesson = _lesson_or_404(await models.get_lesson(conn, lesson_id))
+    _check_access(lesson, user_id)
+    enrollment = await models.get_or_create_enrollment(conn, lesson_id, user_id)
+    await models.update_enrollment(conn, enrollment["id"], persona_id=body.persona_id)
+    return {"persona_id": body.persona_id}
+
+
+@router.post("/{lesson_id}/retake", status_code=204)
+async def retake_lesson(lesson_id: str, user_id: str, conn: Conn):
+    """Reset enrollment progress so the user can retake the lesson."""
+    lesson = _lesson_or_404(await models.get_lesson(conn, lesson_id))
+    _check_access(lesson, user_id)
+    enrollment = await models.get_enrollment(conn, lesson_id, user_id)
+    if enrollment is None:
+        raise HTTPException(status_code=404, detail="No enrollment found")
+    await models.reset_enrollment(conn, enrollment["id"])
 
 
 # ── PDF decomposition ──────────────────────────────────────────────────────────

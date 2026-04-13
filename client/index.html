@@ -11,6 +11,34 @@
   </head>
   <body>
     <div id="root"></div>
+
+    <!-- Unobtrusive Venmo tip-jar widget. Always visible, dismissible. -->
+    <div
+      id="donation-widget"
+      style="position: fixed; bottom: 1vmin; right: 1vmin; z-index: 9999; font-family: system-ui, sans-serif;"
+    >
+      <a
+        href="/images/venmo_qrcode.png"
+        target="_blank"
+        rel="noopener"
+        title="Enjoying the app? Tip the dev via Venmo — thanks!"
+        style="display: block; padding: 3px; border: 1px solid rgba(0,0,0,0.002); border-radius: 6px; background: rgba(255,255,255,0.005); box-shadow: 0 1px 3px rgba(0,0,0,0.08); backdrop-filter: blur(4px);"
+      >
+        <img
+          src="/images/venmo_qrcode.png"
+          alt="Venmo QR code"
+          style="display: block; width: 15vmin; height: 15vmin; object-fit: contain;"
+        />
+      </a>
+      <button
+        type="button"
+        onclick="document.getElementById('donation-widget').remove()"
+        aria-label="Dismiss donation widget"
+        style="position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; padding: 0; border: 1px solid rgba(0,0,0,0.15); border-radius: 50%; background: #fff; color: #555; font-size: 12px; line-height: 1; cursor: pointer; box-shadow: 0 1px 2px rgba(0,0,0,0.1);"
+      >&times;</button>
+    </div>
+
     <script type="module" src="/src/main.tsx"></script>
+
   </body>
 </html>

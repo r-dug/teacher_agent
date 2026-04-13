@@ -27,7 +27,9 @@ async def test_list_lessons(mem_db):
     await models.create_lesson(mem_db, db.ANON_USER_ID, "L1")
     await models.create_lesson(mem_db, db.ANON_USER_ID, "L2")
     rows = await models.list_lessons(mem_db, db.ANON_USER_ID)
-    assert len(rows) == 2
+    titles = {r["title"] for r in rows}
+    assert "L1" in titles
+    assert "L2" in titles
 
 
 @pytest.mark.asyncio

@@ -50,6 +50,7 @@ class CourseResponse(BaseModel):
     title: str
     description: str | None
     visibility: str
+    default_persona_id: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -57,11 +58,15 @@ class CourseResponse(BaseModel):
 class CourseCreate(BaseModel):
     title: str
     description: str | None = None
+    visual_aid_config: dict | None = None
+    default_persona_id: str | None = None
 
 
 class CourseUpdate(BaseModel):
     title: str | None = None
     description: str | None = None
+    visual_aid_config: dict | None = None
+    default_persona_id: str | None = None
 
 
 class CoursePublishResponse(BaseModel):
@@ -264,6 +269,14 @@ async def create_course(user_id: str, body: CourseCreate, conn: Conn):
     if not title:
         raise HTTPException(status_code=422, detail="Title is required")
     course = await models.create_course(conn, user_id, title, body.description)
+    post_updates: dict = {}
+    if body.visual_aid_config is not None:
+        post_updates["visual_aid_config"] = json.dumps(body.visual_aid_config)
+    if body.default_persona_id is not None:
+        post_updates["default_persona_id"] = body.default_persona_id
+    if post_updates:
+        await models.update_course(conn, course["id"], **post_updates)
+        course = await models.get_course(conn, course["id"])
     return CourseResponse(**course)
 
 
@@ -284,6 +297,10 @@ async def update_course(course_id: str, user_id: str, body: CourseUpdate, conn: 
         updates["title"] = body.title.strip() or course["title"]
     if body.description is not None:
         updates["description"] = body.description
+    if body.visual_aid_config is not None:
+        updates["visual_aid_config"] = json.dumps(body.visual_aid_config)
+    if body.default_persona_id is not None:
+        updates["default_persona_id"] = body.default_persona_id
     if updates:
         await models.update_course(conn, course_id, **updates)
     course = await models.get_course(conn, course_id)

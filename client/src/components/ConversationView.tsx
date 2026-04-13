@@ -11,7 +11,6 @@ import { useEffect, useRef } from 'react'
 import { cn } from '@/lib/utils'
 
 export type Figure =
-  | { type: 'slide'; page: number; caption: string; lessonId: string }
   | { type: 'drawing'; dataUrl: string; prompt: string }
   | { type: 'generated_image'; imageUrl: string; caption: string; prompt: string }
 
@@ -26,10 +25,6 @@ export interface Turn {
 }
 
 function figureLabel(fig: Figure): string {
-  if (fig.type === 'slide') {
-    const caption = fig.caption.trim()
-    return caption ? `Page ${fig.page} · ${caption.slice(0, 32)}${caption.length > 32 ? '…' : ''}` : `Page ${fig.page}`
-  }
   if (fig.type === 'generated_image') {
     const cap = (fig.caption || fig.prompt).trim()
     return `Image · ${cap.slice(0, 32)}${cap.length > 32 ? '…' : ''}`
