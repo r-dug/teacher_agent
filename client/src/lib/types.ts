@@ -126,6 +126,7 @@ export type ServerEvent =
   | { event: 'error'; message: string }
   | { event: 'response_end' }
   | { event: 'pong' }
+  | { event: 'tts_debug'; original: string; transformed: string; prep_prompt: string; voice_instructions: string }
 
 // ── REST shapes ────────────────────────────────────────────────────────────
 
